@@ -1,0 +1,18 @@
+download_root = "~/Documents/UNAB"
+concurrency = 4
+max_rps = 2
+user_agent = ""
+course_include = ["*"]          # patrones glob
+course_exclude = []
+week_pattern = "Semana %V"      # ISO week, ver abajo
+naming.safe_fs = true           # sanea nombres y normaliza UTF-8 NFC
+
+[canvas]
+base_url = "https://canvas.unab.cl"
+token = ""                      # opcional si usas token_cmd o keyring
+
+[zoom]
+enabled = true
+ffmpeg_path = "ffmpeg"
+cookie_file = "~/.config/canvas-sync/zoom_cookies.txt"  # formato Netscape
+user_agent = "Mozilla/5.0"
