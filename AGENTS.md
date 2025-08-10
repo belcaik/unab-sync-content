@@ -34,14 +34,14 @@ Build a fast, robust CLI that authenticates to Canvas with a Personal Access Tok
 ## Repository Conventions
 
 * **Branching:** `main` (default). Feature branches: `feat/<scope>-<short-desc>`.
-* **Conventional Commits:**
-  `feat:`, `fix:`, `docs:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`
-
-  * Example: `feat(canvas): list courses and paginate via Link rel=next`
+* **Conventional Commits:**  
+  Use prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`  
+  Optionally, prepend [Gitmojis](https://gitmoji.dev/) for clarity and fun (e.g., `✨ feat(canvas): list courses and paginate via Link rel=next`).
 * **Formatting & Lint:** `rustfmt`, `clippy` (CI must pass).
 * **Tests:** `cargo test` (unit + integration); network calls behind thin interfaces for mocking.
 * **Releases:** Git tags `vMAJOR.MINOR.PATCH`; changelog via conventional commits.
 * **PR Rules:** Small, reviewed, CI green, include tests/docs if applicable.
+
 
 ---
 
