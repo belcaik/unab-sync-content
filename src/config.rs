@@ -26,6 +26,8 @@ pub struct Config {
     pub week_pattern: String,
     #[serde(default)]
     pub naming: Naming,
+    #[serde(default)]
+    pub logging: Logging,
     pub canvas: Canvas,
     pub zoom: Zoom,
 }
@@ -43,6 +45,8 @@ pub struct Canvas {
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_cmd: Option<String>,
+    #[serde(default)]
+    pub ignored_courses: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,10 +70,12 @@ impl Default for Config {
             course_exclude: vec![],
             week_pattern: String::new(),
             naming: Naming { safe_fs: true },
+            logging: Logging::default(),
             canvas: Canvas {
                 base_url: "https://<tenant>.instructure.com".to_string(),
                 token: None,
                 token_cmd: None,
+                ignored_courses: vec![],
             },
             zoom: Zoom {
                 enabled: true,
@@ -87,6 +93,7 @@ impl Config {
         if let Some(home) = dirs_next::home_dir() {
             self.download_root = expand_tilde(&self.download_root, &home);
             self.zoom.cookie_file = expand_tilde(&self.zoom.cookie_file, &home);
+            self.logging.file = expand_tilde(&self.logging.file, &home);
         }
     }
 }
@@ -140,6 +147,30 @@ pub async fn save_config_to_path(cfg: &Config, path: &Path) -> Result<(), Config
     }
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Logging {
+    #[serde(default = "default_level")] 
+    pub level: String,
+    #[serde(default = "default_log_file")] 
+    pub file: String,
+}
+
+fn default_level() -> String { "info".into() }
+fn default_log_file() -> String { "~/.config/u_crawler/u_crawler.log".into() }
+
+impl Default for Logging {
+    fn default() -> Self {
+        Self { level: default_level(), file: default_log_file() }
+    }
+}
+
+/// Synchronous config loader (used before async runtime for logging init).
+pub fn load_config_sync(path: &Path) -> Result<Config, ConfigError> {
+    let text = std::fs::read_to_string(path)?;
+    let cfg: Config = toml::from_str(&text)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]

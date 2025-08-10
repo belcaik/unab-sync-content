@@ -16,10 +16,23 @@ Config
 
 - Location: `~/.config/u_crawler/config.toml`
 - On `init`, a default config is created with paths expanded (no `~`).
+- Logging is configurable; default file: `~/.config/u_crawler/u_crawler.log`.
+
+Logging
+-------
+
+Configure in `config.toml`:
+
+```
+[logging]
+level = "debug"          # one of: trace, debug, info, warn, error
+file = "~/.config/u_crawler/u_crawler.log"
+```
+
+To diagnose Canvas decode errors, set `level = "debug"`, rerun `scan`, and inspect the log file for status, headers, and body snippets.
 
 Notes
 -----
 
 - Future milestones will implement Canvas listing, sync, Zoom downloads, and status/clean flows.
 - Never log secrets; tokens are stored in the config but not printed.
-
