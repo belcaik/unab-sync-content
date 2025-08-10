@@ -11,6 +11,7 @@ naming.safe_fs = true           # sanea nombres y normaliza UTF-8 NFC
 base_url = "https://canvas.unab.cl"
 token = ""                      # opcional si usas token_cmd o keyring
 
+
 [zoom]
 enabled = true
 ffmpeg_path = "ffmpeg"
