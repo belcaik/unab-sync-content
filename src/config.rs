@@ -5,7 +5,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("unable to determine config directory")] 
+    #[error("unable to determine config directory")]
     NoConfigDir,
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -47,6 +47,8 @@ pub struct Canvas {
     pub token_cmd: Option<String>,
     #[serde(default)]
     pub ignored_courses: Vec<String>,
+    #[serde(default)]
+    pub cookie_file: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,9 +57,13 @@ pub struct Zoom {
     pub ffmpeg_path: String,
     pub cookie_file: String,
     pub user_agent: String,
+    #[serde(default = "default_tool_id")]
+    pub external_tool_id: u64,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -76,12 +82,14 @@ impl Default for Config {
                 token: None,
                 token_cmd: None,
                 ignored_courses: vec![],
+                cookie_file: Some("~/.config/u_crawler/canvas_cookies.txt".to_string()),
             },
             zoom: Zoom {
                 enabled: true,
                 ffmpeg_path: "ffmpeg".to_string(),
                 cookie_file: "~/.config/u_crawler/zoom_cookies.txt".to_string(),
                 user_agent: "Mozilla/5.0".to_string(),
+                external_tool_id: 187,
             },
         }
     }
@@ -94,6 +102,9 @@ impl Config {
             self.download_root = expand_tilde(&self.download_root, &home);
             self.zoom.cookie_file = expand_tilde(&self.zoom.cookie_file, &home);
             self.logging.file = expand_tilde(&self.logging.file, &home);
+            if let Some(cf) = &self.canvas.cookie_file {
+                self.canvas.cookie_file = Some(expand_tilde(cf, &home));
+            }
         }
     }
 }
@@ -118,7 +129,10 @@ impl ConfigPaths {
         let proj = ProjectDirs::from("", "", "u_crawler").ok_or(ConfigError::NoConfigDir)?;
         let dir = proj.config_dir().to_path_buf();
         let file = dir.join("config.toml");
-        Ok(ConfigPaths { config_dir: dir, config_file: file })
+        Ok(ConfigPaths {
+            config_dir: dir,
+            config_file: file,
+        })
     }
 }
 
@@ -133,7 +147,9 @@ pub async fn save_config_to_path(cfg: &Config, path: &Path) -> Result<(), Config
     let toml_text = toml::to_string_pretty(cfg)?;
 
     // Ensure parent exists
-    if let Some(parent) = path.parent() { tokio::fs::create_dir_all(parent).await?; }
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
 
     // Write atomically-ish: write temp, then rename
     let tmp = path.with_extension("toml.part");
@@ -151,19 +167,30 @@ pub async fn save_config_to_path(cfg: &Config, path: &Path) -> Result<(), Config
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Logging {
-    #[serde(default = "default_level")] 
+    #[serde(default = "default_level")]
     pub level: String,
-    #[serde(default = "default_log_file")] 
+    #[serde(default = "default_log_file")]
     pub file: String,
 }
 
-fn default_level() -> String { "info".into() }
-fn default_log_file() -> String { "~/.config/u_crawler/u_crawler.log".into() }
+fn default_level() -> String {
+    "info".into()
+}
+fn default_log_file() -> String {
+    "~/.config/u_crawler/u_crawler.log".into()
+}
 
 impl Default for Logging {
     fn default() -> Self {
-        Self { level: default_level(), file: default_log_file() }
+        Self {
+            level: default_level(),
+            file: default_log_file(),
+        }
     }
+}
+
+fn default_tool_id() -> u64 {
+    187
 }
 
 /// Synchronous config loader (used before async runtime for logging init).

@@ -11,7 +11,7 @@ toml = "0.8"
 directories = "5.0"
 thiserror = "1.0"
 dirs-next = "2.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "deflate", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "deflate", "stream", "rustls-tls", "cookies"] }
 serde_json = "1.0"
 url = "2.5"
 regex = "1.10"
@@ -25,3 +25,10 @@ sha1 = "0.10"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 urlencoding = "2.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+which = "5"
+
+[dev-dependencies]

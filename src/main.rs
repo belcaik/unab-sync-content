@@ -1,10 +1,14 @@
-mod config;
-mod http;
 mod canvas;
-mod logger;
+mod config;
+mod cookies;
+mod ffmpeg;
 mod fsutil;
+mod http;
+mod logger;
+mod recordings;
 mod state;
 mod syncer;
+mod zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use config::{load_config_from_path, save_config_to_path, Config, ConfigPaths};
@@ -12,7 +16,12 @@ use std::process::ExitCode;
 
 /// u_crawler — Canvas/Zoom course backup CLI
 #[derive(Parser, Debug)]
-#[command(name = "u_crawler", version, about = "Canvas/Zoom course backup CLI", propagate_version = true)]
+#[command(
+    name = "u_crawler",
+    version,
+    about = "Canvas/Zoom course backup CLI",
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -44,7 +53,19 @@ enum Commands {
         verbose: bool,
     },
     /// Only process and download Zoom recordings
-    Recordings,
+    Recordings {
+        /// Run only for a specific course id
+        #[arg(long)]
+        course_id: Option<u64>,
+        /// Do not download; only list discovered links
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Operaciones avanzadas con Zoom (CDP, listados, descargas)
+    Zoom {
+        #[command(subcommand)]
+        command: ZoomCommands,
+    },
     /// Show last run, pending items, failed jobs
     Status,
     /// Verify checksums, remove .part leftovers
@@ -55,6 +76,38 @@ enum Commands {
 enum AuthCommands {
     /// Configure Canvas Personal Access Token
     Canvas(CanvasAuthArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ZoomCommands {
+    #[command(name = "sniff-cdp")]
+    SniffCdp {
+        #[arg(long)]
+        course_id: u64,
+        #[arg(long, default_value = "9222")]
+        debug_port: u16,
+        #[arg(long)]
+        keep_tab: bool,
+    },
+    List {
+        #[arg(long)]
+        course_id: u64,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(name = "fetch-urls")]
+    FetchUrls {
+        #[arg(long)]
+        course_id: u64,
+    },
+    Dl {
+        #[arg(long)]
+        course_id: u64,
+        #[arg(long, default_value = "1")]
+        concurrency: usize,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -123,20 +176,73 @@ async fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Commands::Sync { course_id, dry_run, verbose } => {
-            match syncer::run_sync(course_id, dry_run, verbose).await {
+        Commands::Sync {
+            course_id,
+            dry_run,
+            verbose,
+        } => match syncer::run_sync(course_id, dry_run, verbose).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "sync failed");
+                eprintln!("error: {e}");
+                ExitCode::from(12)
+            }
+        },
+        Commands::Recordings { course_id, dry_run } => {
+            match recordings::run_discovery(course_id, dry_run).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    tracing::error!(error = %e, "sync failed");
+                    tracing::error!(error = %e, "recordings discovery failed");
                     eprintln!("error: {e}");
                     ExitCode::from(12)
                 }
             }
         }
-        Commands::Recordings => {
-            println!("recordings: stub (implement in M3/M4)");
-            ExitCode::SUCCESS
-        }
+        Commands::Zoom { command } => match command {
+            ZoomCommands::SniffCdp {
+                course_id,
+                debug_port,
+                keep_tab,
+            } => match zoom::zoom_sniff_cdp(course_id, debug_port, keep_tab).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "zoom sniff-cdp failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            },
+            ZoomCommands::List {
+                course_id,
+                since,
+                json,
+            } => match zoom::zoom_list(course_id, since, json).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "zoom list failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            },
+            ZoomCommands::FetchUrls { course_id } => match zoom::zoom_fetch_urls(course_id).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "zoom fetch-urls failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            },
+            ZoomCommands::Dl {
+                course_id,
+                concurrency,
+            } => match zoom::zoom_download(course_id, concurrency).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "zoom dl failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            },
+        },
         Commands::Status => {
             println!("status: stub (implement in M5)");
             ExitCode::SUCCESS
@@ -165,7 +271,9 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::err
     tokio::fs::create_dir_all(&paths.config_dir).await?;
 
     // Load existing, or start from default
-    let mut cfg: Config = load_config_from_path(&paths.config_file).await.unwrap_or_default();
+    let mut cfg: Config = load_config_from_path(&paths.config_file)
+        .await
+        .unwrap_or_default();
 
     if let Some(base) = args.base_url {
         cfg.canvas.base_url = base;
@@ -200,7 +308,9 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
         let mut file_count = 0usize;
         for m in &modules {
             for it in &m.items {
-                if matches!(it.kind.as_deref(), Some("File")) { file_count += 1; }
+                if matches!(it.kind.as_deref(), Some("File")) {
+                    file_count += 1;
+                }
             }
         }
         println!("Files (discovered via modules) count: {}", file_count);
@@ -209,7 +319,16 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
         println!("Courses:");
         for c in courses {
             let code = c.course_code.unwrap_or_default();
-            println!("- [{}] {} {}", c.id, c.name, if code.is_empty() { "".to_string() } else { format!("- {}", code) });
+            println!(
+                "- [{}] {} {}",
+                c.id,
+                c.name,
+                if code.is_empty() {
+                    "".to_string()
+                } else {
+                    format!("- {}", code)
+                }
+            );
         }
     }
     Ok(())

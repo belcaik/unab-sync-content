@@ -8,7 +8,10 @@ use tracing::warn;
 
 pub fn build_http_client(cfg: &Config) -> Client {
     let mut headers = header::HeaderMap::new();
-    headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/json"));
+    headers.insert(
+        header::ACCEPT,
+        header::HeaderValue::from_static("application/json"),
+    );
 
     let builder = ClientBuilder::new()
         .user_agent(if cfg.user_agent.is_empty() {
@@ -33,7 +36,9 @@ pub fn parse_next_link(link_header: &str) -> Option<Url> {
     // Example: <https://example.com?a=1>; rel="next", <...>; rel="prev"
     for part in link_header.split(',') {
         let part = part.trim();
-        if !part.starts_with('<') { continue; }
+        if !part.starts_with('<') {
+            continue;
+        }
         let end = part.find('>')?;
         let url_str = &part[1..end];
         let params = &part[end + 1..];
@@ -70,7 +75,11 @@ pub struct HttpCtx {
 
 impl HttpCtx {
     pub fn new(cfg: &Config, client: Client) -> Self {
-        let min_interval = if cfg.max_rps == 0 { Duration::from_millis(0) } else { Duration::from_millis((1000 / cfg.max_rps) as u64) };
+        let min_interval = if cfg.max_rps == 0 {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis((1000 / cfg.max_rps) as u64)
+        };
         Self {
             client,
             limiter: Arc::new(Semaphore::new(cfg.concurrency as usize)),

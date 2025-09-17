@@ -18,7 +18,7 @@ pub enum CanvasError {
     Status(u16, String),
     #[error("decode error: {0}")]
     Decode(String),
-    #[error("missing canvas token; run `auth canvas` first")] 
+    #[error("missing canvas token; run `auth canvas` first")]
     MissingToken,
 }
 
@@ -31,9 +31,12 @@ pub struct CanvasClient {
 impl CanvasClient {
     pub async fn from_config() -> Result<Self, CanvasError> {
         let paths = ConfigPaths::default()?;
-        let cfg = load_config_from_path(&paths.config_file).await.unwrap_or_default();
+        let cfg = load_config_from_path(&paths.config_file)
+            .await
+            .unwrap_or_default();
         let http = build_http_client(&cfg);
-        let base = Url::parse(&cfg.canvas.base_url).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid base_url"))?;
+        let base = Url::parse(&cfg.canvas.base_url)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid base_url"))?;
         let token = resolve_token(&cfg).await.ok_or(CanvasError::MissingToken)?;
         Ok(CanvasClient { base, http, token })
     }
@@ -45,7 +48,11 @@ impl CanvasClient {
 
     pub async fn list_courses(&self) -> Result<Vec<Course>, CanvasError> {
         let mut out = Vec::new();
-        let mut next = Some(self.base.join("/api/v1/courses?enrollment_state=active&per_page=100").unwrap());
+        let mut next = Some(
+            self.base
+                .join("/api/v1/courses?enrollment_state=active&per_page=100")
+                .unwrap(),
+        );
         while let Some(url) = next.take() {
             debug!(method = "GET", url = %url, "canvas request");
             let resp = self
@@ -85,9 +92,19 @@ impl CanvasClient {
         Ok(out)
     }
 
-    pub async fn list_modules_with_items(&self, course_id: u64) -> Result<Vec<Module>, CanvasError> {
+    pub async fn list_modules_with_items(
+        &self,
+        course_id: u64,
+    ) -> Result<Vec<Module>, CanvasError> {
         let mut out = Vec::new();
-        let mut next = Some(self.base.join(&format!("/api/v1/courses/{}/modules?include=items&per_page=100", course_id)).unwrap());
+        let mut next = Some(
+            self.base
+                .join(&format!(
+                    "/api/v1/courses/{}/modules?include=items&per_page=100",
+                    course_id
+                ))
+                .unwrap(),
+        );
         while let Some(url) = next.take() {
             debug!(method = "GET", course_id = course_id, url = %url, "canvas request");
             let resp = self
@@ -125,7 +142,14 @@ impl CanvasClient {
     #[allow(dead_code)]
     pub async fn list_files(&self, course_id: u64) -> Result<Vec<FileObj>, CanvasError> {
         let mut out = Vec::new();
-        let mut next = Some(self.base.join(&format!("/api/v1/courses/{}/files?sort=updated_at&per_page=100", course_id)).unwrap());
+        let mut next = Some(
+            self.base
+                .join(&format!(
+                    "/api/v1/courses/{}/files?sort=updated_at&per_page=100",
+                    course_id
+                ))
+                .unwrap(),
+        );
         while let Some(url) = next.take() {
             debug!(method = "GET", course_id = course_id, url = %url, "canvas request");
             let resp = self
@@ -163,7 +187,9 @@ impl CanvasClient {
 
 async fn resolve_token(cfg: &Config) -> Option<String> {
     if let Some(t) = cfg.canvas.token.as_ref() {
-        if !t.trim().is_empty() { return Some(t.clone()); }
+        if !t.trim().is_empty() {
+            return Some(t.clone());
+        }
     }
     if let Some(cmd) = cfg.canvas.token_cmd.as_ref() {
         // Execute via sh -lc to support pipelines; trim output
@@ -173,9 +199,15 @@ async fn resolve_token(cfg: &Config) -> Option<String> {
             .output()
             .await
             .ok()?;
-        if !output.status.success() { return None; }
+        if !output.status.success() {
+            return None;
+        }
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     } else {
         None
     }
@@ -201,10 +233,11 @@ pub struct Module {
 pub struct ModuleItem {
     pub id: u64,
     pub title: Option<String>,
-    #[serde(rename = "type")] 
+    #[serde(rename = "type")]
     pub kind: Option<String>,
     pub html_url: Option<String>,
     pub page_url: Option<String>,
+    pub external_url: Option<String>,
     pub content_id: Option<u64>,
 }
 
@@ -239,7 +272,11 @@ impl CanvasClient {
     pub async fn get_page(&self, course_id: u64, page_url: &str) -> Result<PageObj, CanvasError> {
         let url = self
             .base
-            .join(&format!("/api/v1/courses/{}/pages/{}", course_id, urlencoding::encode(page_url)))
+            .join(&format!(
+                "/api/v1/courses/{}/pages/{}",
+                course_id,
+                urlencoding::encode(page_url)
+            ))
             .unwrap();
         tracing::debug!(method = "GET", url = %url, "canvas request");
         let resp = self
@@ -265,7 +302,10 @@ impl CanvasClient {
         }
     }
     pub async fn get_file(&self, file_id: u64) -> Result<FileObj, CanvasError> {
-        let url = self.base.join(&format!("/api/v1/files/{}", file_id)).unwrap();
+        let url = self
+            .base
+            .join(&format!("/api/v1/files/{}", file_id))
+            .unwrap();
         debug!(method = "GET", file_id, url = %url, "canvas request (get_file)");
         let resp = self
             .http
@@ -292,7 +332,14 @@ impl CanvasClient {
 
     pub async fn list_assignments(&self, course_id: u64) -> Result<Vec<Assignment>, CanvasError> {
         let mut out = Vec::new();
-        let mut next = Some(self.base.join(&format!("/api/v1/courses/{}/assignments?per_page=100", course_id)).unwrap());
+        let mut next = Some(
+            self.base
+                .join(&format!(
+                    "/api/v1/courses/{}/assignments?per_page=100",
+                    course_id
+                ))
+                .unwrap(),
+        );
         while let Some(url) = next.take() {
             debug!(method = "GET", course_id = course_id, url = %url, "canvas request (assignments)");
             let resp = self
