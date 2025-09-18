@@ -108,6 +108,19 @@ enum ZoomCommands {
         #[arg(long, default_value = "1")]
         concurrency: usize,
     },
+    #[command(name = "flow")]
+    Flow {
+        #[arg(long)]
+        course_id: u64,
+        #[arg(long, default_value = "9222")]
+        debug_port: u16,
+        #[arg(long)]
+        keep_tab: bool,
+        #[arg(long, default_value = "1")]
+        concurrency: usize,
+        #[arg(long)]
+        since: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -238,6 +251,20 @@ async fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     tracing::error!(error = %e, "zoom dl failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            },
+            ZoomCommands::Flow {
+                course_id,
+                debug_port,
+                keep_tab,
+                concurrency,
+                since,
+            } => match zoom::zoom_flow(course_id, debug_port, keep_tab, concurrency, since).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "zoom flow failed");
                     eprintln!("error: {e}");
                     ExitCode::from(12)
                 }

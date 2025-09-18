@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::zoom::db::ZoomDb;
-use crate::zoom::models::{RecordingListResponse, RecordingSummary, ReplayHeader, ZoomCookie};
+use crate::zoom::models::{
+    RecordingListResponse, RecordingSummary, ReplayHeader, ZoomCookie, ZoomRecordingFile,
+};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -34,6 +36,14 @@ pub struct SniffOptions<'a> {
     pub debug_port: u16,
     pub keep_tab: bool,
     pub config: &'a Config,
+    pub db: &'a ZoomDb,
+}
+
+pub struct CaptureOptions<'a> {
+    pub course_id: u64,
+    pub debug_port: u16,
+    pub keep_tab: bool,
+    pub files: &'a [ZoomRecordingFile],
     pub db: &'a ZoomDb,
 }
 
@@ -140,316 +150,327 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     let mut automation_deadline: Option<Instant> = None;
 
     let deadline = Instant::now() + Duration::from_secs(120);
+    let poll_interval = Duration::from_millis(250);
 
-    while Instant::now() < deadline {
-        if let Some(msg) = ws.next().await {
-            let msg = msg?;
-            let text = match msg {
-                Message::Text(t) => t,
-                Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                _ => continue,
-            };
-            let payload: Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+    loop {
+        if Instant::now() > deadline {
+            println!(
+                "Tiempo límite alcanzado esperando actividad CDP; continuando con los datos disponibles."
+            );
+            break;
+        }
 
-            let session_id = payload
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+        let prerequisites_ready =
+            scid.is_some() && !cookies.is_empty() && have_required_headers(&captured_headers);
+        if prerequisites_ready {
+            if !automation_triggered {
+                match trigger_download_automation(&mut ws, &mut next_id).await {
+                    Ok(()) => {
+                        println!(
+                            "Automatización de descarga iniciada; espera mientras se clonan los assets..."
+                        );
+                        automation_triggered = true;
+                        automation_deadline = Some(Instant::now() + Duration::from_secs(60));
+                    }
+                    Err(err) => {
+                        println!("No se pudo iniciar la automatización de descargas: {}", err);
+                        automation_triggered = true;
+                        automation_deadline = Some(Instant::now() + Duration::from_secs(10));
+                    }
+                }
+            } else if !replay_assets.is_empty() {
+                break;
+            } else if automation_deadline
+                .map(|deadline| Instant::now() > deadline)
+                .unwrap_or(true)
+            {
+                println!(
+                    "Tiempo agotado esperando capturar la descarga MP4; continuando con las cabeceras disponibles."
+                );
+                break;
+            }
+        }
 
-            if let Some(method) = payload.get("method").and_then(|m| m.as_str()) {
-                if method == "Target.attachedToTarget" {
-                    if let Some(params) = payload.get("params") {
-                        if let Some(session) = params
-                            .get("sessionId")
+        let message = match tokio::time::timeout(poll_interval, ws.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(err))) => return Err(Box::new(err)),
+            Ok(None) => break,
+            Err(_) => continue,
+        };
+
+        let text = match message {
+            Message::Text(t) => t,
+            Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            _ => continue,
+        };
+        let payload: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let session_id = payload
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(method) = payload.get("method").and_then(|m| m.as_str()) {
+            if method == "Target.attachedToTarget" {
+                if let Some(params) = payload.get("params") {
+                    if let Some(session) = params
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                    {
+                        let target_type = params
+                            .get("targetInfo")
+                            .and_then(|info| info.get("type"))
                             .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                        {
-                            let target_type = params
+                            .unwrap_or("");
+                        if matches!(target_type, "iframe" | "page" | "worker") {
+                            send_command(
+                                &mut ws,
+                                &mut next_id,
+                                Some(&session),
+                                "Network.enable",
+                                json!({"includeExtraInfo": true}),
+                            )
+                            .await?;
+                            send_command(
+                                &mut ws,
+                                &mut next_id,
+                                Some(&session),
+                                "Page.enable",
+                                Value::Object(Default::default()),
+                            )
+                            .await?;
+
+                            let auto_attach = params
                                 .get("targetInfo")
-                                .and_then(|info| info.get("type"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if matches!(target_type, "iframe" | "page" | "worker") {
+                                .and_then(|info| info.get("attached"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if !auto_attach {
                                 send_command(
                                     &mut ws,
                                     &mut next_id,
                                     Some(&session),
-                                    "Network.enable",
-                                    json!({"includeExtraInfo": true}),
-                                )
-                                .await?;
-                                send_command(
-                                    &mut ws,
-                                    &mut next_id,
-                                    Some(&session),
-                                    "Page.enable",
+                                    "Runtime.runIfWaitingForDebugger",
                                     Value::Object(Default::default()),
                                 )
                                 .await?;
-
-                                let auto_attach = params
-                                    .get("targetInfo")
-                                    .and_then(|info| info.get("attached"))
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
-                                if !auto_attach {
-                                    send_command(
-                                        &mut ws,
-                                        &mut next_id,
-                                        Some(&session),
-                                        "Runtime.runIfWaitingForDebugger",
-                                        Value::Object(Default::default()),
-                                    )
-                                    .await?;
-                                }
                             }
                         }
-                    }
-                    continue;
-                }
-            }
-
-            if let Some(id) = payload.get("id").and_then(|v| v.as_i64()) {
-                let pending_key = PendingKey::new(id, session_id.as_deref());
-                if let Some(kind) = pending_bodies.remove(&pending_key) {
-                    match kind {
-                        PendingResponse::Body(kind) => {
-                            if let Some(result) = payload.get("result") {
-                                if let Some(body) = result.get("body").and_then(|b| b.as_str()) {
-                                    let is_base64 = result
-                                        .get("base64Encoded")
-                                        .and_then(|b| b.as_bool())
-                                        .unwrap_or(false);
-                                    let bytes = if is_base64 {
-                                        BASE64.decode(body)?
-                                    } else {
-                                        body.as_bytes().to_vec()
-                                    };
-                                    match kind {
-                                        RequestKind::RecordingList | RequestKind::MeetingList => {
-                                            let text_body =
-                                                String::from_utf8_lossy(&bytes).to_string();
-                                            if listing.is_none() {
-                                                match serde_json::from_str::<RecordingListResponse>(
-                                                    &text_body,
-                                                ) {
-                                                    Ok(resp) => {
-                                                        if let Some(result) = &resp.result {
-                                                            if let Some(list) = &result.list {
-                                                                meetings = list.clone();
-                                                            }
-                                                        }
-                                                        listing = Some(resp);
-                                                        println!(
-                                                            "Capturada respuesta de Zoom ({:?}).",
-                                                            kind
-                                                        );
-                                                    }
-                                                    Err(err) => {
-                                                        println!(
-                                                            "No se pudo parsear respuesta de Zoom ({:?}): {}",
-                                                            kind, err
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            request_cookies_if_needed(
-                                                &mut ws,
-                                                &mut next_id,
-                                                &mut pending_bodies,
-                                                session_id.as_deref(),
-                                            )
-                                            .await?;
-                                        }
-                                        RequestKind::RecordingFile => {}
-                                    }
-                                }
-                            }
-                        }
-                        PendingResponse::Cookies => {
-                            if let Some(result) = payload.get("result") {
-                                if let Some(items) =
-                                    result.get("cookies").and_then(|c| c.as_array())
-                                {
-                                    cookies = items
-                                        .iter()
-                                        .filter_map(|item| parse_cookie(item))
-                                        .collect();
-                                    println!(
-                                        "Se capturaron {} cookies de applications.zoom.us",
-                                        cookies.len()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                if scid.is_some() && !cookies.is_empty() && have_required_headers(&captured_headers)
-                {
-                    if !automation_triggered {
-                        if let Err(err) = trigger_download_automation(&mut ws, &mut next_id).await {
-                            println!("No se pudo iniciar la automatización de descargas: {}", err);
-                        } else {
-                            println!(
-                                "Automatización de descarga iniciada; espera mientras se clonan los assets..."
-                            );
-                            automation_triggered = true;
-                            automation_deadline = Some(Instant::now() + Duration::from_secs(60));
-                        }
-                    } else if automation_deadline
-                        .map(|deadline| Instant::now() > deadline)
-                        .unwrap_or(true)
-                    {
-                        break;
                     }
                 }
                 continue;
             }
+        }
 
-            if let Some(method) = payload.get("method").and_then(|m| m.as_str()) {
-                match method {
-                    "Network.requestWillBeSent" => {
-                        if let Some(params) = payload.get("params") {
-                            if let Some(request_id) = params
-                                .get("requestId")
-                                .and_then(|r| r.as_str())
-                                .map(|s| s.to_string())
-                            {
-                                if let Some(request) = params.get("request") {
-                                    if let Some(url) = request.get("url").and_then(|u| u.as_str()) {
-                                        // println!("[CDP] request {} -> {}", request_id, url);
-                                        let map_key = (session_id.clone(), request_id.clone());
-                                        if let Some(kind) = classify_request(url) {
-                                            if let Some(headers) =
-                                                request.get("headers").and_then(|h| h.as_object())
-                                            {
-                                                merge_headers(&mut captured_headers, kind, headers);
-                                            }
-                                            if kind.includes_scid() {
-                                                if let Some(found_scid) = extract_scid(url) {
-                                                    scid = Some(found_scid);
-                                                    print!(
-                                                        "Se capturó lti_scid: {}. ",
-                                                        scid.as_deref().unwrap()
+        if let Some(id) = payload.get("id").and_then(|v| v.as_i64()) {
+            let pending_key = PendingKey::new(id, session_id.as_deref());
+            if let Some(kind) = pending_bodies.remove(&pending_key) {
+                match kind {
+                    PendingResponse::Body(kind) => {
+                        if let Some(result) = payload.get("result") {
+                            if let Some(body) = result.get("body").and_then(|b| b.as_str()) {
+                                let is_base64 = result
+                                    .get("base64Encoded")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false);
+                                let bytes = if is_base64 {
+                                    BASE64.decode(body)?
+                                } else {
+                                    body.as_bytes().to_vec()
+                                };
+                                match kind {
+                                    RequestKind::RecordingList | RequestKind::MeetingList => {
+                                        let text_body = String::from_utf8_lossy(&bytes).to_string();
+                                        if listing.is_none() {
+                                            match serde_json::from_str::<RecordingListResponse>(
+                                                &text_body,
+                                            ) {
+                                                Ok(resp) => {
+                                                    if let Some(result) = &resp.result {
+                                                        if let Some(list) = &result.list {
+                                                            meetings = list.clone();
+                                                        }
+                                                    }
+                                                    listing = Some(resp);
+                                                    println!(
+                                                        "Capturada respuesta de Zoom ({:?}).",
+                                                        kind
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    println!(
+                                                        "No se pudo parsear respuesta de Zoom ({:?}): {}",
+                                                        kind, err
                                                     );
                                                 }
                                             }
-                                            request_map.insert(map_key.clone(), kind);
-                                        } else if is_replay_asset(url) {
-                                            let mut headers_map = HashMap::new();
-                                            if let Some(headers) =
-                                                request.get("headers").and_then(|h| h.as_object())
-                                            {
-                                                merge_headers_into(&mut headers_map, headers);
-                                            }
-                                            asset_headers.insert(map_key.clone(), headers_map);
-                                            asset_urls.insert(map_key, url.to_string());
                                         }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "Network.requestWillBeSentExtraInfo" => {
-                        if let Some(params) = payload.get("params") {
-                            if let Some(request_id) = params
-                                .get("requestId")
-                                .and_then(|r| r.as_str())
-                                .map(|s| s.to_string())
-                            {
-                                let map_key = (session_id.clone(), request_id.clone());
-                                if let Some(kind) = request_map.get(&map_key).copied() {
-                                    if let Some(headers) =
-                                        params.get("headers").and_then(|h| h.as_object())
-                                    {
-                                        merge_headers(&mut captured_headers, kind, headers);
-                                    }
-                                    if let Some(text) =
-                                        params.get("headersText").and_then(|t| t.as_str())
-                                    {
-                                        merge_raw_headers(&mut captured_headers, kind, text);
-                                    }
-                                } else if let Some(headers) =
-                                    params.get("headers").and_then(|h| h.as_object())
-                                {
-                                    if let Some(entry) = asset_headers.get_mut(&map_key) {
-                                        merge_headers_into(entry, headers);
-                                    }
-                                    if let Some(text) =
-                                        params.get("headersText").and_then(|t| t.as_str())
-                                    {
-                                        if let Some(entry) = asset_headers.get_mut(&map_key) {
-                                            merge_raw_headers_into(entry, text);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "Network.loadingFinished" => {
-                        if let Some(params) = payload.get("params") {
-                            if let Some(request_id) = params
-                                .get("requestId")
-                                .and_then(|r| r.as_str())
-                                .map(|s| s.to_string())
-                            {
-                                let map_key = (session_id.clone(), request_id.clone());
-                                if let Some(kind) = request_map.get(&map_key) {
-                                    if matches!(
-                                        kind,
-                                        RequestKind::RecordingList | RequestKind::MeetingList
-                                    ) {
-                                        let cmd_id = send_command(
+                                        request_cookies_if_needed(
                                             &mut ws,
                                             &mut next_id,
+                                            &mut pending_bodies,
                                             session_id.as_deref(),
-                                            "Network.getResponseBody",
-                                            json!({"requestId": request_id}),
                                         )
                                         .await?;
-                                        pending_bodies.insert(
-                                            PendingKey::new(cmd_id, session_id.as_deref()),
-                                            PendingResponse::Body(*kind),
-                                        );
                                     }
+                                    RequestKind::RecordingFile => {}
                                 }
-                                request_map.remove(&map_key);
-                                if asset_headers.contains_key(&map_key) {
-                                    if let Some(headers_map) = asset_headers.remove(&map_key) {
-                                        if let Some(url) = asset_urls.remove(&map_key) {
-                                            let referer = headers_map
-                                                .get("referer")
-                                                .cloned()
-                                                .unwrap_or_default();
-                                            if !referer.is_empty()
-                                                && !replay_assets.contains_key(&referer)
-                                            {
-                                                println!(
-                                                    "Capturada URL de descarga para {}",
-                                                    referer
-                                                );
-                                                replay_assets.insert(
-                                                    referer.clone(),
-                                                    ReplayHeader {
-                                                        download_url: url,
-                                                        headers: headers_map,
-                                                    },
+                            }
+                        }
+                    }
+                    PendingResponse::Cookies => {
+                        if let Some(result) = payload.get("result") {
+                            if let Some(items) = result.get("cookies").and_then(|c| c.as_array()) {
+                                cookies =
+                                    items.iter().filter_map(|item| parse_cookie(item)).collect();
+                                println!(
+                                    "Se capturaron {} cookies de applications.zoom.us",
+                                    cookies.len()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(method) = payload.get("method").and_then(|m| m.as_str()) {
+            match method {
+                "Network.requestWillBeSent" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request_id) = params
+                            .get("requestId")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            if let Some(request) = params.get("request") {
+                                if let Some(url) = request.get("url").and_then(|u| u.as_str()) {
+                                    let map_key = (session_id.clone(), request_id.clone());
+                                    if let Some(kind) = classify_request(url) {
+                                        if let Some(headers) =
+                                            request.get("headers").and_then(|h| h.as_object())
+                                        {
+                                            merge_headers(&mut captured_headers, kind, headers);
+                                        }
+                                        if kind.includes_scid() {
+                                            if let Some(found_scid) = extract_scid(url) {
+                                                scid = Some(found_scid);
+                                                print!(
+                                                    "Se capturó lti_scid: {}. ",
+                                                    scid.as_deref().unwrap()
                                                 );
                                             }
+                                        }
+                                        request_map.insert(map_key.clone(), kind);
+                                    } else if is_replay_asset(url) {
+                                        let mut headers_map = HashMap::new();
+                                        if let Some(headers) =
+                                            request.get("headers").and_then(|h| h.as_object())
+                                        {
+                                            merge_headers_into(&mut headers_map, headers);
+                                        }
+                                        asset_headers.insert(map_key.clone(), headers_map);
+                                        asset_urls.insert(map_key, url.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "Network.requestWillBeSentExtraInfo" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request_id) = params
+                            .get("requestId")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            let map_key = (session_id.clone(), request_id.clone());
+                            if let Some(kind) = request_map.get(&map_key).copied() {
+                                if let Some(headers) =
+                                    params.get("headers").and_then(|h| h.as_object())
+                                {
+                                    merge_headers(&mut captured_headers, kind, headers);
+                                }
+                                if let Some(text) =
+                                    params.get("headersText").and_then(|t| t.as_str())
+                                {
+                                    merge_raw_headers(&mut captured_headers, kind, text);
+                                }
+                            } else if let Some(headers) =
+                                params.get("headers").and_then(|h| h.as_object())
+                            {
+                                if let Some(entry) = asset_headers.get_mut(&map_key) {
+                                    merge_headers_into(entry, headers);
+                                }
+                                if let Some(text) =
+                                    params.get("headersText").and_then(|t| t.as_str())
+                                {
+                                    if let Some(entry) = asset_headers.get_mut(&map_key) {
+                                        merge_raw_headers_into(entry, text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "Network.loadingFinished" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request_id) = params
+                            .get("requestId")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            let map_key = (session_id.clone(), request_id.clone());
+                            if let Some(kind) = request_map.get(&map_key) {
+                                if matches!(
+                                    kind,
+                                    RequestKind::RecordingList | RequestKind::MeetingList
+                                ) {
+                                    let cmd_id = send_command(
+                                        &mut ws,
+                                        &mut next_id,
+                                        session_id.as_deref(),
+                                        "Network.getResponseBody",
+                                        json!({"requestId": request_id}),
+                                    )
+                                    .await?;
+                                    pending_bodies.insert(
+                                        PendingKey::new(cmd_id, session_id.as_deref()),
+                                        PendingResponse::Body(*kind),
+                                    );
+                                }
+                            }
+                            request_map.remove(&map_key);
+                            if asset_headers.contains_key(&map_key) {
+                                if let Some(headers_map) = asset_headers.remove(&map_key) {
+                                    if let Some(url) = asset_urls.remove(&map_key) {
+                                        let referer =
+                                            headers_map.get("referer").cloned().unwrap_or_default();
+                                        if !referer.is_empty()
+                                            && !replay_assets.contains_key(&referer)
+                                        {
+                                            println!("Capturada URL de descarga para {}", referer);
+                                            replay_assets.insert(
+                                                referer.clone(),
+                                                ReplayHeader {
+                                                    download_url: url,
+                                                    headers: headers_map,
+                                                },
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-        } else {
-            break;
         }
     }
 
@@ -602,13 +623,231 @@ fn is_replay_asset(url: &str) -> bool {
     if let Ok(parsed) = Url::parse(url) {
         let host_ok = parsed
             .host_str()
-            .map(|host| host.ends_with("zoom.us"))
+            .map(|host| host.ends_with("zoom.us") || host.contains("cloudfront.net"))
             .unwrap_or(false);
         let path = parsed.path().to_ascii_lowercase();
-        host_ok && path.ends_with(".mp4")
+        host_ok
+            && (path.ends_with(".mp4")
+                || path.contains(".mp4?")
+                || path.ends_with(".m3u8")
+                || path.contains("playlist.m3u8"))
     } else {
         false
     }
+}
+
+pub async fn capture_play_urls(opts: CaptureOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    if opts.files.is_empty() {
+        println!("No hay playUrl para capturar.");
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+    let endpoint = format!("http://127.0.0.1:{}/json/new?about:blank", opts.debug_port);
+    let response = client.put(&endpoint).send().await?;
+    let status = response.status();
+    let text = response.text().await?;
+    if !status.is_success() {
+        return Err(format!(
+            "no se pudo crear pestaña para captura de playUrl (status {}): {}",
+            status, text
+        )
+        .into());
+    }
+
+    let tab_resp: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("respuesta inesperada del endpoint /json/new: {e}: {text}"))?;
+    let target_id = tab_resp
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing target id from CDP new tab response")?
+        .to_string();
+    let ws_url = tab_resp
+        .get("webSocketDebuggerUrl")
+        .and_then(|v| v.as_str())
+        .ok_or("missing webSocketDebuggerUrl from CDP response")?
+        .to_string();
+
+    println!("Conectado a CDP para capturar firmas de descarga.");
+
+    let (mut ws, _) = connect_async(&ws_url).await?;
+    let mut next_id: i64 = 1;
+
+    send_command(
+        &mut ws,
+        &mut next_id,
+        None,
+        "Page.enable",
+        Value::Object(Default::default()),
+    )
+    .await?;
+    send_command(
+        &mut ws,
+        &mut next_id,
+        None,
+        "Network.enable",
+        json!({"includeExtraInfo": true}),
+    )
+    .await?;
+
+    let mut stored = opts.db.load_replay_headers(opts.course_id)?;
+    let mut reused = 0usize;
+    let mut captured = 0usize;
+
+    for file in opts.files {
+        let play_url = &file.play_url;
+        if stored.contains_key(play_url) {
+            reused += 1;
+            continue;
+        }
+
+        println!("Capturando cabeceras para {}", play_url);
+        match capture_single_play_url(&mut ws, &mut next_id, play_url).await? {
+            Some(asset) => {
+                stored.insert(play_url.clone(), asset);
+                captured += 1;
+            }
+            None => {
+                println!(
+                    "No se pudo capturar la descarga directa para {} dentro del tiempo esperado.",
+                    play_url
+                );
+            }
+        }
+    }
+
+    if captured > 0 {
+        opts.db.save_replay_headers(opts.course_id, &stored)?;
+    }
+
+    println!(
+        "Captura de playUrl completada (nuevas: {}, existentes: {}).",
+        captured, reused
+    );
+
+    if !opts.keep_tab {
+        let close_endpoint = format!(
+            "http://127.0.0.1:{}/json/close/{}",
+            opts.debug_port, target_id
+        );
+        let _ = client.get(close_endpoint).send().await;
+    }
+
+    Ok(())
+}
+
+async fn capture_single_play_url(
+    ws: &mut tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>,
+    next_id: &mut i64,
+    play_url: &str,
+) -> Result<Option<ReplayHeader>, Box<dyn std::error::Error>> {
+    send_command(ws, next_id, None, "Page.navigate", json!({"url": play_url})).await?;
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut login_prompted = false;
+    let mut asset_headers: HashMap<String, String> = HashMap::new();
+    let mut asset_url: Option<String> = None;
+    let mut asset_request: Option<String> = None;
+
+    while Instant::now() < deadline {
+        let message = match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(err))) => return Err(Box::new(err)),
+            Ok(None) => break,
+            Err(_) => continue,
+        };
+
+        let text = match message {
+            Message::Text(t) => t,
+            Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            _ => continue,
+        };
+        let payload: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(method) = payload.get("method").and_then(|m| m.as_str()) {
+            match method {
+                "Network.requestWillBeSent" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request) = params.get("request") {
+                            if let Some(url) = request.get("url").and_then(|u| u.as_str()) {
+                                if url.contains("login.microsoftonline.com") && !login_prompted {
+                                    println!(
+                                        "Se detectó redirección a Microsoft SSO. Completa el login en la pestaña abierta si es necesario."
+                                    );
+                                    login_prompted = true;
+                                }
+                                if is_replay_asset(url) {
+                                    if let Some(request_id) =
+                                        params.get("requestId").and_then(|r| r.as_str())
+                                    {
+                                        asset_request = Some(request_id.to_string());
+                                        asset_url = Some(url.to_string());
+                                        if let Some(headers) =
+                                            request.get("headers").and_then(|h| h.as_object())
+                                        {
+                                            merge_headers_into(&mut asset_headers, headers);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "Network.requestWillBeSentExtraInfo" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request_id) = params.get("requestId").and_then(|r| r.as_str()) {
+                            if Some(request_id) == asset_request.as_deref() {
+                                if let Some(headers) =
+                                    params.get("headers").and_then(|h| h.as_object())
+                                {
+                                    merge_headers_into(&mut asset_headers, headers);
+                                }
+                                if let Some(text) =
+                                    params.get("headersText").and_then(|t| t.as_str())
+                                {
+                                    merge_raw_headers_into(&mut asset_headers, text);
+                                }
+                            }
+                        }
+                    }
+                }
+                "Network.loadingFinished" => {
+                    if let Some(params) = payload.get("params") {
+                        if let Some(request_id) = params.get("requestId").and_then(|r| r.as_str()) {
+                            if Some(request_id) == asset_request.as_deref() {
+                                if let Some(url) = &asset_url {
+                                    ensure_referer_header(&mut asset_headers, play_url);
+                                    ensure_range_header(&mut asset_headers);
+                                    return Ok(Some(ReplayHeader {
+                                        download_url: url.clone(),
+                                        headers: asset_headers,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn ensure_referer_header(headers: &mut HashMap<String, String>, referer: &str) {
+    headers
+        .entry("referer".into())
+        .or_insert_with(|| referer.to_string());
+}
+
+fn ensure_range_header(headers: &mut HashMap<String, String>) {
+    headers
+        .entry("range".into())
+        .or_insert_with(|| "bytes=0-".into());
 }
 
 async fn trigger_download_automation(

@@ -6,9 +6,9 @@ pub mod models;
 
 use crate::config::{load_config_from_path, ConfigPaths};
 use api::{ZoomApiError, ZoomClient};
-use cdp::{sniff_cdp, SniffOptions};
+use cdp::{capture_play_urls, sniff_cdp, CaptureOptions, SniffOptions};
 use db::ZoomDb;
-use models::{RecordingListResponse, RecordingSummary, RecordingsResult};
+use models::{RecordingListResponse, RecordingSummary, RecordingsResult, ZoomRecordingFile};
 use std::error::Error;
 
 pub async fn zoom_sniff_cdp(
@@ -176,6 +176,99 @@ pub async fn zoom_download(course_id: u64, concurrency: usize) -> Result<(), Box
     let db = ZoomDb::new(&paths.config_dir)?;
     let files = db.load_files(course_id)?;
     download::download_files(&cfg, &db, course_id, files, concurrency).await
+}
+
+pub async fn zoom_flow(
+    course_id: u64,
+    debug_port: u16,
+    keep_tab: bool,
+    concurrency: usize,
+    since: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let paths = ConfigPaths::default()?;
+    let mut cfg = load_config_from_path(&paths.config_file).await?;
+    cfg.expand_paths();
+    let db = ZoomDb::new(&paths.config_dir)?;
+
+    sniff_cdp(SniffOptions {
+        course_id,
+        debug_port,
+        keep_tab,
+        config: &cfg,
+        db: &db,
+    })
+    .await?;
+
+    println!(
+        "CDP completado; iniciando listado y descarga de grabaciones para el curso {}",
+        course_id
+    );
+
+    let client = ZoomClient::new(&cfg, &db, course_id)
+        .await
+        .map_err(map_api_err)?;
+
+    let listing = client
+        .list_recordings(since.as_deref())
+        .await
+        .map_err(map_api_err)?;
+    db.save_meetings(course_id, &listing)?;
+
+    let meetings: Vec<RecordingSummary> = listing
+        .result
+        .as_ref()
+        .and_then(|r| r.list.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    if meetings.is_empty() {
+        println!("No se encontraron reuniones Zoom para el curso {course_id}.");
+    } else {
+        println!(
+            "Se capturaron {} reuniones Zoom; consultando archivos individuales...",
+            meetings.len()
+        );
+    }
+
+    let mut all_files: Vec<ZoomRecordingFile> = Vec::new();
+    for summary in meetings {
+        let files = client
+            .fetch_recording_files(&summary)
+            .await
+            .map_err(map_api_err)?;
+        if files.is_empty() {
+            println!(
+                "- {}: sin archivos descargables reportados por Zoom",
+                summary.meeting_id
+            );
+            continue;
+        }
+        db.save_files(course_id, &summary.meeting_id, &files)?;
+        println!(
+            "- {}: capturados {} playUrl",
+            summary.meeting_id,
+            files.len()
+        );
+        all_files.extend(files.into_iter());
+    }
+
+    if all_files.is_empty() {
+        println!(
+            "No hubo grabaciones con playUrl disponibles tras el flujo completo; intenta repetir el flujo o verifica permisos."
+        );
+        return Ok(());
+    }
+
+    capture_play_urls(CaptureOptions {
+        course_id,
+        debug_port,
+        keep_tab,
+        files: &all_files,
+        db: &db,
+    })
+    .await?;
+
+    download::download_files(&cfg, &db, course_id, all_files, concurrency).await
 }
 
 fn cached_meetings_response(

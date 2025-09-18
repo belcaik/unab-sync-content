@@ -95,18 +95,31 @@ impl ZoomClient {
             }
             println!("Fetching recordings page {}: {}", page, url);
 
-            let request = self.with_request_headers(self.client.get(url));
-            let resp = match request.send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    println!("Zoom recordings request failed: {:#?}", err);
-                    return Err(ZoomApiError::from(err));
+            let mut attempt = 0;
+            let resp = loop {
+                attempt += 1;
+                let request = self.with_request_headers(self.client.get(url.clone()));
+                let response = match request.send().await {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        println!("Zoom recordings request failed: {:#?}", err);
+                        return Err(ZoomApiError::from(err));
+                    }
+                };
+
+                if matches!(response.status().as_u16(), 401 | 403) {
+                    if attempt == 1 {
+                        println!(
+                            "Zoom devolvió {}; reintentando con cookies actualizadas",
+                            response.status()
+                        );
+                        continue;
+                    }
+                    return Err(ZoomApiError::MissingState);
                 }
+                break response;
             };
             println!("Response: {:?}", resp);
-            if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
-                return Err(ZoomApiError::MissingState);
-            }
             let payload: RecordingListResponse = resp.json().await?;
             if let Some(result) = &payload.result {
                 total_expected = total_expected.or(result.total);
@@ -156,17 +169,29 @@ impl ZoomClient {
             qp.append_pair("lti_scid", &self.scid);
         }
 
-        let request = self.with_request_headers(self.client.get(url));
-        let resp = match request.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                println!("Zoom recording files request failed: {:#?}", err);
-                return Err(ZoomApiError::from(err));
+        let mut attempt = 0;
+        let resp = loop {
+            attempt += 1;
+            let request = self.with_request_headers(self.client.get(url.clone()));
+            let response = match request.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    println!("Zoom recording files request failed: {:#?}", err);
+                    return Err(ZoomApiError::from(err));
+                }
+            };
+            if matches!(response.status().as_u16(), 401 | 403) {
+                if attempt == 1 {
+                    println!(
+                        "Zoom devolvió {}; reintentando fetch_recording_files",
+                        response.status()
+                    );
+                    continue;
+                }
+                return Err(ZoomApiError::MissingState);
             }
+            break response;
         };
-        if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
-            return Err(ZoomApiError::MissingState);
-        }
         let payload: RecordingFileResponse = resp.json().await?;
         let mut out = Vec::new();
         if let Some(result) = payload.result {

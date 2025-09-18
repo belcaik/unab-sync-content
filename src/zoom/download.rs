@@ -1,13 +1,15 @@
 use crate::config::Config;
-use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available};
+use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
 use crate::fsutil::sanitize_filename_preserve_ext;
 use crate::zoom::api::effective_user_agent;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ReplayHeader, ZoomRecordingFile};
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 pub async fn download_files(
     cfg: &Config,
@@ -34,7 +36,6 @@ pub async fn download_files(
         assets.len(),
         recordings.len()
     );
-
 
     if assets.is_empty() {
         println!("No se capturaron cabeceras de descarga MP4. Ejecuta 'u_crawler zoom sniff-cdp' y presiona DESCARGAR en cada grabación antes de volver a intentar.");
@@ -87,7 +88,7 @@ pub async fn download_files(
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            download_via_ffmpeg(&ffmpeg, &headers, &url, &dest).await
+            download_with_fallback(&ffmpeg, headers, url, dest).await
         }
     }))
     .buffer_unordered(concurrency.max(1))
@@ -98,6 +99,100 @@ pub async fn download_files(
 
     println!("Descarga completa en {}", base.display());
     Ok(())
+}
+
+async fn download_with_fallback(
+    ffmpeg_path: &str,
+    headers: Vec<(String, String)>,
+    url: String,
+    dest: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match download_via_ffmpeg(ffmpeg_path, &headers, &url, &dest).await {
+        Ok(()) => Ok(()),
+        Err(err @ FfmpegError::Process { .. }) => {
+            println!(
+                "ffmpeg no pudo descargar {} ({}); intentando descarga HTTP directa...",
+                url, err
+            );
+            http_download(&headers, &url, &dest).await
+        }
+        Err(other) => Err(Box::new(other)),
+    }
+}
+
+async fn http_download(
+    headers: &[(String, String)],
+    url: &str,
+    dest: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let tmp = temp_path(dest);
+    let mut resume_from = 0u64;
+    if let Ok(meta) = tokio::fs::metadata(&tmp).await {
+        resume_from = meta.len();
+    }
+
+    let mut header_map = HeaderMap::new();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("range") {
+            continue;
+        }
+        if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
+            if let Ok(header_value) =
+                HeaderValue::from_str(value).or_else(|_| HeaderValue::from_bytes(value.as_bytes()))
+            {
+                header_map.insert(header_name, header_value);
+            }
+        }
+    }
+    if resume_from > 0 {
+        header_map.insert(
+            RANGE,
+            HeaderValue::from_str(&format!("bytes={}-", resume_from))?,
+        );
+    }
+
+    let mut request = client.get(url);
+    request = request.headers(header_map);
+
+    let response = request.send().await?;
+    if !(response.status().is_success() || response.status().as_u16() == 206) {
+        return Err(format!("HTTP {} al descargar {}", response.status(), url).into());
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&tmp)
+        .await?;
+    if resume_from > 0 {
+        file.seek(std::io::SeekFrom::Start(resume_from)).await?;
+    } else {
+        file.set_len(0).await?;
+    }
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let data = chunk?;
+        file.write_all(&data).await?;
+    }
+    file.flush().await?;
+    file.sync_data().await?;
+    drop(file);
+
+    tokio::fs::rename(&tmp, dest).await?;
+    Ok(())
+}
+
+fn temp_path(dest: &Path) -> PathBuf {
+    dest.with_extension("mp4.part")
 }
 
 fn build_ffmpeg_headers(
