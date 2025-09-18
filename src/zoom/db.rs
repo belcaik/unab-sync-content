@@ -1,4 +1,4 @@
-use crate::zoom::models::{RecordingListResponse, ZoomCookie, ZoomRecordingFile};
+use crate::zoom::models::{RecordingListResponse, ReplayHeader, ZoomCookie, ZoomRecordingFile};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -40,6 +40,22 @@ impl ZoomDb {
                 http_only INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(host, name, path)
+            );
+            CREATE TABLE IF NOT EXISTS zoom_request_headers (
+                course_id TEXT NOT NULL,
+                request_path TEXT NOT NULL,
+                header_name TEXT NOT NULL,
+                header_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(course_id, request_path, header_name)
+            );
+            CREATE TABLE IF NOT EXISTS zoom_replay_headers (
+                course_id TEXT NOT NULL,
+                referer TEXT NOT NULL,
+                download_url TEXT NOT NULL,
+                headers TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(course_id, referer)
             );
             CREATE TABLE IF NOT EXISTS zoom_meetings (
                 meeting_id TEXT PRIMARY KEY,
@@ -112,14 +128,12 @@ impl ZoomDb {
     }
 
     pub fn load_cookies(&self) -> Result<Vec<ZoomCookie>, Box<dyn std::error::Error>> {
-        let conn = self.connection()?;
+        let mut conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT host, name, value, path, expires, secure, http_only FROM zoom_cookie",
         )?;
-        let mut rows = stmt.query([])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            out.push(ZoomCookie {
+        let rows = stmt.query_map([], |row| -> Result<ZoomCookie, rusqlite::Error> {
+            Ok(ZoomCookie {
                 domain: row.get(0)?,
                 name: row.get(1)?,
                 value: row.get(2)?,
@@ -127,9 +141,149 @@ impl ZoomDb {
                 expires: row.get::<_, Option<i64>>(4)?,
                 secure: row.get::<_, i64>(5)? != 0,
                 http_only: row.get::<_, i64>(6)? != 0,
-            });
+            })
+        })?;
+
+        let now = Utc::now().timestamp();
+        let mut valid = Vec::new();
+        let mut expired = Vec::new();
+
+        for cookie in rows {
+            let cookie = cookie?;
+            let is_expired = match cookie.expires {
+                Some(ts) if ts > 0 => ts <= now,
+                Some(_) | None => false,
+            };
+            if is_expired {
+                expired.push((
+                    cookie.domain.clone(),
+                    cookie.name.clone(),
+                    cookie.path.clone(),
+                ));
+            } else {
+                valid.push(cookie);
+            }
         }
-        Ok(out)
+
+        drop(stmt);
+
+        if !expired.is_empty() {
+            let tx = conn.transaction()?;
+            for (domain, name, path) in expired {
+                tx.execute(
+                    "DELETE FROM zoom_cookie WHERE host = ?1 AND name = ?2 AND path = ?3",
+                    params![domain, name, path],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        Ok(valid)
+    }
+
+    pub fn save_request_headers(
+        &self,
+        course_id: u64,
+        request_path: &str,
+        headers: &[(String, String)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM zoom_request_headers WHERE course_id = ?1 AND request_path = ?2",
+            params![course_id.to_string(), request_path],
+        )?;
+        for (name, value) in headers {
+            tx.execute(
+                "INSERT INTO zoom_request_headers(course_id, request_path, header_name, header_value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    course_id.to_string(),
+                    request_path,
+                    name,
+                    value,
+                    Utc::now().timestamp(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_all_request_headers(
+        &self,
+        course_id: u64,
+    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT header_name, header_value FROM zoom_request_headers WHERE course_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![course_id.to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+
+        let mut headers = Vec::new();
+        for row in rows {
+            headers.push(row?);
+        }
+        Ok(headers)
+    }
+
+    pub fn save_replay_headers(
+        &self,
+        course_id: u64,
+        entries: &std::collections::HashMap<String, ReplayHeader>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM zoom_replay_headers WHERE course_id = ?1",
+            params![course_id.to_string()],
+        )?;
+        for (referer, entry) in entries {
+            let headers_json = serde_json::to_string(&entry.headers)?;
+            tx.execute(
+                "INSERT INTO zoom_replay_headers(course_id, referer, download_url, headers, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    course_id.to_string(),
+                    referer,
+                    entry.download_url,
+                    headers_json,
+                    Utc::now().timestamp(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_replay_headers(
+        &self,
+        course_id: u64,
+    ) -> Result<std::collections::HashMap<String, ReplayHeader>, Box<dyn std::error::Error>> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT referer, download_url, headers FROM zoom_replay_headers WHERE course_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![course_id.to_string()])?;
+
+        let mut map = std::collections::HashMap::new();
+        while let Some(row) = rows.next()? {
+            let referer: String = row.get(0)?;
+            let download_url: String = row.get(1)?;
+            let headers_json: String = row.get(2)?;
+            let headers: std::collections::HashMap<String, String> =
+                serde_json::from_str(&headers_json)?;
+            map.insert(
+                referer,
+                ReplayHeader {
+                    download_url,
+                    headers,
+                },
+            );
+        }
+        Ok(map)
     }
 
     pub fn save_meetings(

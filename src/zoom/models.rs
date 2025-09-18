@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoomCookie {
@@ -15,12 +16,19 @@ pub struct ZoomCookie {
 pub struct ZoomRecordingFile {
     pub meeting_id: String,
     pub play_url: String,
+    pub download_url: Option<String>,
     pub file_type: Option<String>,
     pub recording_start: Option<String>,
     pub topic: Option<String>,
     pub start_time: Option<String>,
     pub timezone: Option<String>,
     pub meeting_number: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayHeader {
+    pub download_url: String,
+    pub headers: HashMap<String, String>,
 }
 
 impl ZoomRecordingFile {
@@ -87,6 +95,8 @@ pub struct RecordingFileResult {
 pub struct RecordingFileEntry {
     #[serde(rename = "playUrl")]
     pub play_url: Option<String>,
+    #[serde(rename = "downloadUrl")]
+    pub download_url: Option<String>,
     #[serde(rename = "fileType")]
     pub file_type: Option<String>,
     #[serde(rename = "recordingStart")]

@@ -8,7 +8,7 @@ use crate::config::{load_config_from_path, ConfigPaths};
 use api::{ZoomApiError, ZoomClient};
 use cdp::{sniff_cdp, SniffOptions};
 use db::ZoomDb;
-use models::{RecordingListResponse, RecordingSummary};
+use models::{RecordingListResponse, RecordingSummary, RecordingsResult};
 use std::error::Error;
 
 pub async fn zoom_sniff_cdp(
@@ -29,29 +29,40 @@ pub async fn zoom_sniff_cdp(
     })
     .await?;
 
-    match ZoomClient::new(&cfg, &db, course_id).await {
-        Ok(client) => {
-            match client.list_recordings(None).await {
-                Ok(response) => {
-                    if let Err(e) = db.save_meetings(course_id, &response) {
-                        tracing::warn!(course_id, error = %e, "no se pudo persistir listado inicial tras sniff");
-                    }
-                    let count = response
-                        .result
-                        .as_ref()
-                        .and_then(|r| r.list.as_ref())
-                        .map(|l| l.len())
-                        .unwrap_or(0);
-                    println!(
-                        "Capturadas {} reuniones inmediatamente después del sniff.",
-                        count
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(course_id, error = %e, "falló fetch inicial de reuniones tras sniff");
-                }
-            }
+    println!("Sniff completado.");
+    // show db captured cookies
+    let cookies = db.load_cookies()?;
+    if cookies.is_empty() {
+        println!("No se capturaron cookies Zoom.");
+    } else {
+        println!("Cookies Zoom capturadas:");
+        for _cookie in &cookies {
+            // println!("- {}: {}", cookie.name, cookie.value);
         }
+    }
+    // try to fetch initial listing
+
+    match ZoomClient::new(&cfg, &db, course_id).await {
+        Ok(client) => match client.list_recordings(None).await {
+            Ok(response) => {
+                if let Err(e) = db.save_meetings(course_id, &response) {
+                    tracing::warn!(course_id, error = %e, "no se pudo persistir listado inicial tras sniff");
+                }
+                let count = response
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.list.as_ref())
+                    .map(|l| l.len())
+                    .unwrap_or(0);
+                println!(
+                    "Capturadas {} reuniones inmediatamente después del sniff.",
+                    count
+                );
+            }
+            Err(e) => {
+                tracing::warn!(course_id, error = %e, "falló fetch inicial de reuniones tras sniff");
+            }
+        },
         Err(e) => {
             tracing::warn!(course_id, error = %e, "no se pudo crear cliente Zoom tras sniff");
         }
@@ -69,20 +80,47 @@ pub async fn zoom_list(
     let cfg = load_config_from_path(&paths.config_file).await?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
-    let client = ZoomClient::new(&cfg, &db, course_id)
-        .await
-        .map_err(map_api_err)?;
-    let response = client
-        .list_recordings(since.as_deref())
-        .await
-        .map_err(map_api_err)?;
-    db.save_meetings(course_id, &response)?;
+    let (response, from_cache) = match ZoomClient::new(&cfg, &db, course_id).await {
+        Ok(client) => match client.list_recordings(since.as_deref()).await {
+            Ok(resp) => {
+                db.save_meetings(course_id, &resp)?;
+                (resp, false)
+            }
+            Err(ZoomApiError::MissingState) => {
+                tracing::warn!(
+                    course_id,
+                    "cookies Zoom vencidas; usando datos cacheados si existen"
+                );
+                let cached = cached_meetings_response(&db, course_id, since.as_deref())?;
+                (
+                    cached.ok_or_else(|| map_api_err(ZoomApiError::MissingState))?,
+                    true,
+                )
+            }
+            Err(err) => return Err(map_api_err(err)),
+        },
+        Err(ZoomApiError::MissingState) => {
+            tracing::warn!(course_id, "sin estado Zoom válido; se intentará con cache");
+            let cached = cached_meetings_response(&db, course_id, since.as_deref())?;
+            (
+                cached.ok_or_else(|| map_api_err(ZoomApiError::MissingState))?,
+                true,
+            )
+        }
+        Err(err) => return Err(map_api_err(err)),
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else {
         render_listing(&response);
+        if from_cache {
+            println!(
+                "(Los datos provienen del cache local; ejecuta 'u_crawler zoom sniff-cdp' si necesitas refrescarlos.)"
+            );
+        }
     }
+
     Ok(())
 }
 
@@ -97,10 +135,7 @@ pub async fn zoom_fetch_urls(course_id: u64) -> Result<(), Box<dyn Error>> {
 
     let mut meetings = db.load_meeting_payloads(course_id)?;
     if meetings.is_empty() {
-        let listing = client
-            .list_recordings(None)
-            .await
-            .map_err(map_api_err)?;
+        let listing = client.list_recordings(None).await.map_err(map_api_err)?;
         db.save_meetings(course_id, &listing)?;
         meetings = db.load_meeting_payloads(course_id)?;
     }
@@ -140,7 +175,52 @@ pub async fn zoom_download(course_id: u64, concurrency: usize) -> Result<(), Box
     let cfg = load_config_from_path(&paths.config_file).await?;
     let db = ZoomDb::new(&paths.config_dir)?;
     let files = db.load_files(course_id)?;
-    download::download_files(&cfg, course_id, files, concurrency).await
+    download::download_files(&cfg, &db, course_id, files, concurrency).await
+}
+
+fn cached_meetings_response(
+    db: &ZoomDb,
+    course_id: u64,
+    since: Option<&str>,
+) -> Result<Option<RecordingListResponse>, Box<dyn Error>> {
+    let meetings = db.load_meeting_payloads(course_id)?;
+    if meetings.is_empty() {
+        return Ok(None);
+    }
+
+    let mut list = Vec::new();
+    let since_date = since.and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+    for payload in meetings {
+        let summary = serde_json::from_value::<RecordingSummary>(payload)?;
+        if let Some(target) = since_date {
+            if let Some(start) = summary.start_time.as_deref() {
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S") {
+                    if dt.date() < target {
+                        continue;
+                    }
+                }
+            }
+        }
+        list.push(summary);
+    }
+
+    if list.is_empty() {
+        return Ok(None);
+    }
+
+    let total = list.len() as i64;
+    let page_size = std::cmp::min(list.len(), i32::MAX as usize) as i32;
+
+    Ok(Some(RecordingListResponse {
+        status: Some(true),
+        code: Some(200),
+        result: Some(RecordingsResult {
+            page_num: None,
+            page_size: Some(page_size),
+            total: Some(total),
+            list: Some(list),
+        }),
+    }))
 }
 
 fn render_listing(response: &RecordingListResponse) {
