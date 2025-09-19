@@ -9,6 +9,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::{Client, Url};
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::{debug, info, trace, warn};
 
 const ZOOM_BASE: &str = "https://applications.zoom.us";
 const RECORDING_LIST_PATH: &str = "/api/v1/lti/rich/recording/COURSE";
@@ -16,7 +17,7 @@ const RECORDING_FILE_PATH: &str = "/api/v1/lti/rich/recording/file";
 
 #[derive(Debug, Error)]
 pub enum ZoomApiError {
-    #[error("ejecuta 'u_crawler zoom sniff-cdp' primero para obtener lti_scid y cookies")]
+    #[error("run `u_crawler zoom sniff-cdp` first to capture lti_scid and cookies")]
     MissingState,
     #[error(transparent)]
     Http(#[from] reqwest::Error),
@@ -55,7 +56,11 @@ impl ZoomClient {
         let headers = db
             .get_all_request_headers(course_id)
             .map_err(ZoomApiError::Db)?;
-        println!("Loaded {} headers for course {}", headers.len(), course_id);
+        debug!(
+            course_id,
+            count = headers.len(),
+            "loaded stored request headers"
+        );
         for (name, value) in headers {
             request_headers.insert(name.to_ascii_lowercase(), value);
         }
@@ -91,9 +96,8 @@ impl ZoomClient {
                 qp.append_pair("page", &page.to_string());
                 qp.append_pair("total", "0");
                 qp.append_pair("lti_scid", &self.scid);
-                // println!("Query params: {:?}", qp);
             }
-            println!("Fetching recordings page {}: {}", page, url);
+            info!(page, url = %url, "fetching Zoom recordings page");
 
             let mut attempt = 0;
             let resp = loop {
@@ -102,16 +106,17 @@ impl ZoomClient {
                 let response = match request.send().await {
                     Ok(resp) => resp,
                     Err(err) => {
-                        println!("Zoom recordings request failed: {:#?}", err);
+                        warn!(error = %err, page, "Zoom recordings request failed");
                         return Err(ZoomApiError::from(err));
                     }
                 };
 
                 if matches!(response.status().as_u16(), 401 | 403) {
                     if attempt == 1 {
-                        println!(
-                            "Zoom devolvió {}; reintentando con cookies actualizadas",
-                            response.status()
+                        warn!(
+                            status = %response.status(),
+                            page,
+                            "Zoom returned authorization error; retrying with refreshed cookies"
                         );
                         continue;
                     }
@@ -119,7 +124,7 @@ impl ZoomClient {
                 }
                 break response;
             };
-            println!("Response: {:?}", resp);
+            trace!(page, status = %resp.status(), "received Zoom recordings response");
             let payload: RecordingListResponse = resp.json().await?;
             if let Some(result) = &payload.result {
                 total_expected = total_expected.or(result.total);
@@ -176,15 +181,16 @@ impl ZoomClient {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    println!("Zoom recording files request failed: {:#?}", err);
+                    warn!(error = %err, meeting_id = %meeting.meeting_id, "Zoom recording files request failed");
                     return Err(ZoomApiError::from(err));
                 }
             };
             if matches!(response.status().as_u16(), 401 | 403) {
                 if attempt == 1 {
-                    println!(
-                        "Zoom devolvió {}; reintentando fetch_recording_files",
-                        response.status()
+                    warn!(
+                        status = %response.status(),
+                        meeting_id = %meeting.meeting_id,
+                        "Zoom returned authorization error while fetching recording files; retrying"
                     );
                     continue;
                 }
@@ -192,6 +198,7 @@ impl ZoomClient {
             }
             break response;
         };
+        trace!(status = %resp.status(), meeting_id = %meeting.meeting_id, "Zoom recording files response received");
         let payload: RecordingFileResponse = resp.json().await?;
         let mut out = Vec::new();
         if let Some(result) = payload.result {
@@ -257,7 +264,7 @@ fn apply_stored_headers(
     mut builder: reqwest::RequestBuilder,
     headers: &[(String, String)],
 ) -> reqwest::RequestBuilder {
-    println!("Applying {} stored headers", headers.len());
+    trace!(count = headers.len(), "applying stored headers to request");
     for (name, value) in headers {
         if name.starts_with(':') {
             continue;
@@ -272,7 +279,7 @@ fn apply_stored_headers(
         };
         builder = builder.header(header_name, header_value);
     }
-    println!("Applied headers, building request");
+    trace!("applied stored headers to request");
     builder
 }
 

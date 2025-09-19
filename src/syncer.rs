@@ -4,6 +4,7 @@ use crate::fsutil::{
     atomic_rename, atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
 use crate::http::{build_http_client, HttpCtx};
+use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
 use html2md::parse_html;
 use regex::Regex;
@@ -31,8 +32,7 @@ pub async fn run_sync(
     let ignored: std::collections::HashSet<String> =
         cfg.canvas.ignored_courses.iter().cloned().collect();
 
-    let iter: Box<dyn Iterator<Item = crate::canvas::Course>> = if let Some(cid) = filter_course_id
-    {
+    let selected_courses: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
         if ignored.contains(&cid.to_string()) {
             tracing::info!(course_id = cid, "skipping ignored course");
             return Ok(());
@@ -48,18 +48,21 @@ pub async fn run_sync(
             );
             return Ok(());
         }
-        Box::new(sel.into_iter())
+        sel
     } else {
-        Box::new(
-            courses
-                .into_iter()
-                .filter(move |c| !ignored.contains(&c.id.to_string())),
-        )
+        courses
+            .into_iter()
+            .filter(move |c| !ignored.contains(&c.id.to_string()))
+            .collect()
     };
+
+    let course_progress = progress_bar(selected_courses.len() as u64, "Syncing courses");
 
     let mut total_pages = 0usize;
     let mut total_files = 0usize;
-    for c in iter {
+    for c in selected_courses {
+        course_progress.inc(1);
+        course_progress.set_message(format!("Syncing course {}", c.id));
         let code = c.course_code.clone().unwrap_or_default();
         let course_dir = PathBuf::from(&cfg.download_root).join(if code.is_empty() {
             sanitize_component(&c.name)
@@ -79,12 +82,19 @@ pub async fn run_sync(
         let state_path = course_dir.join("state.json");
         let mut state = State::load(&state_path).await;
 
+        let modules_spinner = spinner(&format!("Loading modules for {}", c.name));
         let modules = canvas.list_modules_with_items(c.id).await?;
+        modules_spinner.finish_and_clear();
         // Preload assignments to avoid per-item fetch; map by id
+        let assignments_spinner = spinner(&format!("Loading assignments for {}", c.name));
         let assignments_list = canvas.list_assignments(c.id).await.unwrap_or_default();
+        assignments_spinner.finish_and_clear();
         let assignments: std::collections::HashMap<u64, Assignment> =
             assignments_list.into_iter().map(|a| (a.id, a)).collect();
+        let module_progress = progress_bar(modules.len() as u64, &format!("Modules in {}", c.name));
         for m in modules {
+            module_progress.inc(1);
+            module_progress.set_message(format!("Course {} module {}", c.id, m.id));
             let (p, f) = sync_module(
                 &cfg,
                 &canvas,
@@ -100,12 +110,20 @@ pub async fn run_sync(
             .await?;
             total_pages += p;
             total_files += f;
+            if dry_run && (p > 0 || f > 0) {
+                module_progress.println(format!(
+                    "DRY-RUN module {} -> pages: {}, files: {}",
+                    m.id, p, f
+                ));
+            }
         }
+        module_progress.finish_and_clear();
 
         if !dry_run {
             state.save(&state_path).await?;
         }
     }
+    course_progress.finish_and_clear();
     if dry_run {
         println!(
             "DRY-RUN summary: pages to write: {}, files to download: {}",
@@ -154,34 +172,46 @@ async fn sync_module(
                     let html = page.body.unwrap_or_default();
                     let md = parse_html(&html);
                     let hash = sha1_hex(md.as_bytes());
+                    let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
+                    let dest = module_dir.join(&fname);
                     if state.get(&key).and_then(|s| s.content_hash.as_deref())
                         == Some(hash.as_str())
                     {
                         debug!(course_id, module_id = m.id, page_url, "page unchanged");
                         if !dry_run && verbose {
-                            let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
-                            let dest = module_dir.join(fname);
-                            println!("SKIP page -> {}", dest.display());
-                        }
-                    } else {
-                        let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
-                        let dest = module_dir.join(fname);
-                        if dry_run {
-                            pages_planned += 1;
-                            println!("DRY-RUN page -> {} ({} bytes)", dest.display(), md.len());
-                        } else {
-                            atomic_write(&dest, md.as_bytes()).await?;
-                            state.set(
-                                key,
-                                ItemState {
-                                    etag: None,
-                                    updated_at: page.updated_at,
-                                    size: Some(md.len() as u64),
-                                    content_hash: Some(hash),
-                                },
+                            info!(
+                                course_id,
+                                module_id = m.id,
+                                path = %dest.display(),
+                                "page unchanged; skipping"
                             );
-                            info!(course_id, module_id = m.id, path = %dest.display(), "wrote page markdown");
                         }
+                    } else if dry_run {
+                        pages_planned += 1;
+                        info!(
+                            course_id,
+                            module_id = m.id,
+                            path = %dest.display(),
+                            bytes = md.len(),
+                            "dry-run page planned"
+                        );
+                    } else {
+                        atomic_write(&dest, md.as_bytes()).await?;
+                        state.set(
+                            key,
+                            ItemState {
+                                etag: None,
+                                updated_at: page.updated_at,
+                                size: Some(md.len() as u64),
+                                content_hash: Some(hash),
+                            },
+                        );
+                        info!(
+                            course_id,
+                            module_id = m.id,
+                            path = %dest.display(),
+                            "wrote page markdown"
+                        );
                     }
 
                     // Discover file links inside the page HTML and download
@@ -207,14 +237,23 @@ async fn sync_module(
                                 let keyf = format!("file:{}", f.id);
                                 if dry_run {
                                     if state.get(&keyf).is_some() {
-                                        println!(
-                                            "DRY-RUN skip file -> [{}] {}",
-                                            f_ext,
-                                            dest.display()
+                                        info!(
+                                            course_id,
+                                            module_id = m.id,
+                                            file_id = fid,
+                                            path = %dest.display(),
+                                            "dry-run skip file; already synced"
                                         );
                                     } else {
                                         files_planned += 1;
-                                        println!("DRY-RUN file -> [{}] {}", f_ext, dest.display());
+                                        info!(
+                                            course_id,
+                                            module_id = m.id,
+                                            file_id = fid,
+                                            path = %dest.display(),
+                                            file_ext = f_ext,
+                                            "dry-run file planned"
+                                        );
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
@@ -246,22 +285,29 @@ async fn sync_module(
                     let html = page.body.unwrap_or_default();
                     let md = parse_html(&html);
                     let hash = sha1_hex(md.as_bytes());
+                    let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
+                    let dest = module_dir.join(&fname);
                     if state.get(&key).and_then(|s| s.content_hash.as_deref())
                         == Some(hash.as_str())
                     {
                         if !dry_run && verbose {
-                            let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
-                            let dest = module_dir.join(fname);
-                            println!("SKIP page -> {}", dest.display());
+                            info!(
+                                course_id,
+                                module_id = m.id,
+                                path = %dest.display(),
+                                "page unchanged; skipping"
+                            );
                         }
                     } else if dry_run {
-                        let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
-                        let dest = module_dir.join(fname);
                         pages_planned += 1;
-                        println!("DRY-RUN page -> {} ({} bytes)", dest.display(), md.len());
+                        info!(
+                            course_id,
+                            module_id = m.id,
+                            path = %dest.display(),
+                            bytes = md.len(),
+                            "dry-run page planned"
+                        );
                     } else {
-                        let fname = format!("{:02}-{}.md", idx + 1, sanitize_component(&title));
-                        let dest = module_dir.join(fname);
                         atomic_write(&dest, md.as_bytes()).await?;
                         state.set(
                             key,
@@ -296,18 +342,28 @@ async fn sync_module(
                                 let keyf = format!("file:{}", f.id);
                                 if dry_run {
                                     if state.get(&keyf).is_some() {
-                                        println!(
-                                            "DRY-RUN skip file -> [{}] {}",
-                                            f_ext,
-                                            dest.display()
+                                        info!(
+                                            course_id,
+                                            module_id = m.id,
+                                            file_id = fid,
+                                            path = %dest.display(),
+                                            "dry-run skip file; already synced"
                                         );
                                     } else {
                                         files_planned += 1;
-                                        println!("DRY-RUN file -> [{}] {}", f_ext, dest.display());
+                                        info!(
+                                            course_id,
+                                            module_id = m.id,
+                                            file_id = fid,
+                                            path = %dest.display(),
+                                            file_ext = f_ext,
+                                            "dry-run file planned"
+                                        );
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
                                     download_if_needed(httpctx, &f, &dest, state, verbose).await?;
+                                    info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                 }
                             }
                             Err(e) => {
@@ -339,14 +395,28 @@ async fn sync_module(
                             let keyf = format!("file:{}", f.id);
                             if dry_run {
                                 if state.get(&keyf).is_some() {
-                                    println!("DRY-RUN skip file -> [{}] {}", f_ext, dest.display());
+                                    info!(
+                                        course_id,
+                                        module_id = m.id,
+                                        file_id = fid,
+                                        path = %dest.display(),
+                                        "dry-run skip file; already synced"
+                                    );
                                 } else {
                                     files_planned += 1;
-                                    println!("DRY-RUN file -> [{}] {}", f_ext, dest.display());
+                                    info!(
+                                        course_id,
+                                        module_id = m.id,
+                                        file_id = fid,
+                                        path = %dest.display(),
+                                        file_ext = f_ext,
+                                        "dry-run file planned"
+                                    );
                                 }
                             } else {
                                 ensure_dir(dest.parent().unwrap()).await?;
                                 download_if_needed(httpctx, &f, &dest, state, verbose).await?;
+                                info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                             }
                         }
                         Err(e) => {
@@ -374,14 +444,21 @@ async fn sync_module(
                             == Some(hash.as_str())
                         {
                             if !dry_run && verbose {
-                                println!("SKIP assignment -> {}", dest.display());
+                                info!(
+                                    course_id,
+                                    module_id = m.id,
+                                    path = %dest.display(),
+                                    "assignment unchanged; skipping"
+                                );
                             }
                         } else if dry_run {
                             pages_planned += 1;
-                            println!(
-                                "DRY-RUN assignment -> {} ({} bytes)",
-                                dest.display(),
-                                md.len()
+                            info!(
+                                course_id,
+                                module_id = m.id,
+                                path = %dest.display(),
+                                bytes = md.len(),
+                                "dry-run assignment planned"
                             );
                         } else {
                             atomic_write(&dest, md.as_bytes()).await?;
@@ -419,23 +496,29 @@ async fn sync_module(
                                     let keyf = format!("file:{}", f.id);
                                     if dry_run {
                                         if state.get(&keyf).is_some() {
-                                            println!(
-                                                "DRY-RUN skip file -> [{}] {}",
-                                                f_ext,
-                                                dest.display()
+                                            info!(
+                                                course_id,
+                                                module_id = m.id,
+                                                file_id = fid,
+                                                path = %dest.display(),
+                                                "dry-run skip file; already synced"
                                             );
                                         } else {
                                             files_planned += 1;
-                                            println!(
-                                                "DRY-RUN file -> [{}] {}",
-                                                f_ext,
-                                                dest.display()
+                                            info!(
+                                                course_id,
+                                                module_id = m.id,
+                                                file_id = fid,
+                                                path = %dest.display(),
+                                                file_ext = f_ext,
+                                                "dry-run file planned"
                                             );
                                         }
                                     } else {
                                         ensure_dir(dest.parent().unwrap()).await?;
                                         download_if_needed(httpctx, &f, &dest, state, verbose)
                                             .await?;
+                                        info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                     }
                                 }
                                 Err(e) => {
@@ -477,18 +560,21 @@ async fn download_if_needed(
         .get(header::ETAG)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.trim_matches('"').to_string());
-    let size = head
+    let mut size = head
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
+    if size.is_none() {
+        size = f.size;
+    }
 
     let prev = state.get(&key);
     if let (Some(prev), Some(et)) = (prev, etag.as_ref()) {
         if prev.etag.as_deref() == Some(et) {
             info!(file_id = f.id, path = %dest.display(), "unchanged (etag)");
             if verbose {
-                println!("SKIP file -> {}", dest.display());
+                info!(file_id = f.id, path = %dest.display(), "verbose skip (unchanged file)");
             }
             return Ok(());
         }

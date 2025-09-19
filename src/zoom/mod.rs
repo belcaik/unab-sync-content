@@ -5,6 +5,7 @@ pub mod download;
 pub mod models;
 
 use crate::config::{load_config_from_path, ConfigPaths};
+use crate::progress::progress_bar;
 use api::{ZoomApiError, ZoomClient};
 use cdp::{capture_play_urls, sniff_cdp, CaptureOptions, SniffOptions};
 use db::ZoomDb;
@@ -29,13 +30,13 @@ pub async fn zoom_sniff_cdp(
     })
     .await?;
 
-    println!("Sniff completado.");
+    println!("Sniff completed.");
     // show db captured cookies
     let cookies = db.load_cookies()?;
     if cookies.is_empty() {
-        println!("No se capturaron cookies Zoom.");
+        println!("No Zoom cookies were captured.");
     } else {
-        println!("Cookies Zoom capturadas:");
+        println!("Captured Zoom cookies:");
         for _cookie in &cookies {
             // println!("- {}: {}", cookie.name, cookie.value);
         }
@@ -46,7 +47,11 @@ pub async fn zoom_sniff_cdp(
         Ok(client) => match client.list_recordings(None).await {
             Ok(response) => {
                 if let Err(e) = db.save_meetings(course_id, &response) {
-                    tracing::warn!(course_id, error = %e, "no se pudo persistir listado inicial tras sniff");
+                    tracing::warn!(
+                        course_id,
+                        error = %e,
+                        "failed to persist initial meeting list after sniff"
+                    );
                 }
                 let count = response
                     .result
@@ -54,17 +59,22 @@ pub async fn zoom_sniff_cdp(
                     .and_then(|r| r.list.as_ref())
                     .map(|l| l.len())
                     .unwrap_or(0);
-                println!(
-                    "Capturadas {} reuniones inmediatamente después del sniff.",
-                    count
-                );
+                println!("Captured {} meetings immediately after sniff.", count);
             }
             Err(e) => {
-                tracing::warn!(course_id, error = %e, "falló fetch inicial de reuniones tras sniff");
+                tracing::warn!(
+                    course_id,
+                    error = %e,
+                    "failed to fetch meetings right after sniff"
+                );
             }
         },
         Err(e) => {
-            tracing::warn!(course_id, error = %e, "no se pudo crear cliente Zoom tras sniff");
+            tracing::warn!(
+                course_id,
+                error = %e,
+                "could not create Zoom client after sniff"
+            );
         }
     }
 
@@ -89,7 +99,7 @@ pub async fn zoom_list(
             Err(ZoomApiError::MissingState) => {
                 tracing::warn!(
                     course_id,
-                    "cookies Zoom vencidas; usando datos cacheados si existen"
+                    "Zoom cookies expired; using cached data if available"
                 );
                 let cached = cached_meetings_response(&db, course_id, since.as_deref())?;
                 (
@@ -100,7 +110,7 @@ pub async fn zoom_list(
             Err(err) => return Err(map_api_err(err)),
         },
         Err(ZoomApiError::MissingState) => {
-            tracing::warn!(course_id, "sin estado Zoom válido; se intentará con cache");
+            tracing::warn!(course_id, "missing valid Zoom state; trying cache");
             let cached = cached_meetings_response(&db, course_id, since.as_deref())?;
             (
                 cached.ok_or_else(|| map_api_err(ZoomApiError::MissingState))?,
@@ -116,7 +126,7 @@ pub async fn zoom_list(
         render_listing(&response);
         if from_cache {
             println!(
-                "(Los datos provienen del cache local; ejecuta 'u_crawler zoom sniff-cdp' si necesitas refrescarlos.)"
+                "(Data comes from the local cache; run `u_crawler zoom sniff-cdp` to refresh it.)"
             );
         }
     }
@@ -141,13 +151,19 @@ pub async fn zoom_fetch_urls(course_id: u64) -> Result<(), Box<dyn Error>> {
     }
 
     if meetings.is_empty() {
-        println!("No se encontraron reuniones para el curso {course_id}.");
+        println!("No meetings were found for course {course_id}.");
         return Ok(());
     }
 
     let mut stored = 0usize;
+    let progress = progress_bar(
+        meetings.len() as u64,
+        &format!("Fetching recording files for course {}", course_id),
+    );
     for payload in meetings {
         let summary: RecordingSummary = serde_json::from_value(payload)?;
+        progress.inc(1);
+        progress.set_message(format!("Meeting {}", summary.meeting_id));
         let files = client
             .fetch_recording_files(&summary)
             .await
@@ -156,16 +172,17 @@ pub async fn zoom_fetch_urls(course_id: u64) -> Result<(), Box<dyn Error>> {
             continue;
         }
         db.save_files(course_id, &summary.meeting_id, &files)?;
-        println!(
-            "Capturados {} playUrl(s) para meeting {}",
+        progress.println(format!(
+            "Captured {} playUrl entries for meeting {}",
             files.len(),
             summary.meeting_id
-        );
+        ));
         stored += files.len();
     }
+    progress.finish_and_clear();
 
     if stored == 0 {
-        println!("No se obtuvieron playUrl. ¿La herramienta permite descargas?");
+        println!("No playUrl entries were returned. Does the tool allow downloads?");
     }
     Ok(())
 }
@@ -200,7 +217,7 @@ pub async fn zoom_flow(
     .await?;
 
     println!(
-        "CDP completado; iniciando listado y descarga de grabaciones para el curso {}",
+        "CDP sniff finished; starting listing and download for course {}",
         course_id
     );
 
@@ -222,39 +239,46 @@ pub async fn zoom_flow(
         .unwrap_or_default();
 
     if meetings.is_empty() {
-        println!("No se encontraron reuniones Zoom para el curso {course_id}.");
+        println!("No Zoom meetings were found for course {course_id}.");
     } else {
         println!(
-            "Se capturaron {} reuniones Zoom; consultando archivos individuales...",
+            "Captured {} Zoom meetings; fetching individual recording files...",
             meetings.len()
         );
     }
 
     let mut all_files: Vec<ZoomRecordingFile> = Vec::new();
+    let meeting_progress = progress_bar(
+        meetings.len() as u64,
+        &format!("Gathering recording files for course {}", course_id),
+    );
     for summary in meetings {
+        meeting_progress.inc(1);
+        meeting_progress.set_message(format!("Meeting {}", summary.meeting_id));
         let files = client
             .fetch_recording_files(&summary)
             .await
             .map_err(map_api_err)?;
         if files.is_empty() {
-            println!(
-                "- {}: sin archivos descargables reportados por Zoom",
+            meeting_progress.println(format!(
+                "- {}: Zoom did not report downloadable files",
                 summary.meeting_id
-            );
+            ));
             continue;
         }
         db.save_files(course_id, &summary.meeting_id, &files)?;
-        println!(
-            "- {}: capturados {} playUrl",
+        meeting_progress.println(format!(
+            "- {}: captured {} playUrl entries",
             summary.meeting_id,
             files.len()
-        );
+        ));
         all_files.extend(files.into_iter());
     }
+    meeting_progress.finish_and_clear();
 
     if all_files.is_empty() {
         println!(
-            "No hubo grabaciones con playUrl disponibles tras el flujo completo; intenta repetir el flujo o verifica permisos."
+            "No recordings with playUrl entries were available after the full flow; try again or verify permissions."
         );
         return Ok(());
     }
@@ -319,7 +343,7 @@ fn cached_meetings_response(
 fn render_listing(response: &RecordingListResponse) {
     println!(
         "{:<20} | {:<20} | {:<40} | {:<15}",
-        "Meeting ID", "Inicio", "Tema", "Zona"
+        "Meeting ID", "Start", "Topic", "Timezone"
     );
     println!("{}", "-".repeat(105));
     if let Some(result) = &response.result {
@@ -329,7 +353,7 @@ fn render_listing(response: &RecordingListResponse) {
                     "{:<20} | {:<20} | {:<40} | {:<15}",
                     item.meeting_id,
                     item.start_time.clone().unwrap_or_else(|| "?".into()),
-                    item.topic.clone().unwrap_or_else(|| "(sin tema)".into()),
+                    item.topic.clone().unwrap_or_else(|| "(no topic)".into()),
                     item.timezone.clone().unwrap_or_else(|| "".into())
                 );
             }

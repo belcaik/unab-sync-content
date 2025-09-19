@@ -138,51 +138,6 @@ impl CanvasClient {
         }
         Ok(out)
     }
-
-    #[allow(dead_code)]
-    pub async fn list_files(&self, course_id: u64) -> Result<Vec<FileObj>, CanvasError> {
-        let mut out = Vec::new();
-        let mut next = Some(
-            self.base
-                .join(&format!(
-                    "/api/v1/courses/{}/files?sort=updated_at&per_page=100",
-                    course_id
-                ))
-                .unwrap(),
-        );
-        while let Some(url) = next.take() {
-            debug!(method = "GET", course_id = course_id, url = %url, "canvas request");
-            let resp = self
-                .http
-                .get(url.clone())
-                .header(header::AUTHORIZATION, self.auth_header_val())
-                .send()
-                .await?;
-            let status = resp.status();
-            let link = resp
-                .headers()
-                .get(header::LINK)
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string());
-            let text = resp.text().await?;
-            if !status.is_success() {
-                let snippet = text.chars().take(1000).collect::<String>();
-                error!(status = %status.as_u16(), body = %snippet, course_id, "canvas non-success response (files)");
-                return Err(CanvasError::Status(status.as_u16(), snippet));
-            }
-            let mut page: Vec<FileObj> = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    let snippet = text.chars().take(1000).collect::<String>();
-                    error!(error = %e, body = %snippet, course_id, "canvas decode failure (files)");
-                    return Err(CanvasError::Decode(e.to_string()));
-                }
-            };
-            out.append(&mut page);
-            next = link.as_deref().and_then(parse_next_link);
-        }
-        Ok(out)
-    }
 }
 
 async fn resolve_token(cfg: &Config) -> Option<String> {
@@ -229,7 +184,6 @@ pub struct Module {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct ModuleItem {
     pub id: u64,
     pub title: Option<String>,
@@ -246,7 +200,6 @@ pub struct FileObj {
     pub id: u64,
     pub display_name: Option<String>,
     pub filename: Option<String>,
-    #[allow(dead_code)]
     pub size: Option<u64>,
     pub updated_at: Option<String>,
     pub url: Option<String>,

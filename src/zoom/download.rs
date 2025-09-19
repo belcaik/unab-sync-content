@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
 use crate::fsutil::sanitize_filename_preserve_ext;
+use crate::progress::progress_bar;
 use crate::zoom::api::effective_user_agent;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ReplayHeader, ZoomRecordingFile};
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tracing::{info, warn};
 
 pub async fn download_files(
     cfg: &Config,
@@ -19,7 +21,7 @@ pub async fn download_files(
     concurrency: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if files.is_empty() {
-        println!("No hay archivos para descargar.");
+        println!("No recording files to download.");
         return Ok(());
     }
 
@@ -29,16 +31,18 @@ pub async fn download_files(
 
     let recordings = db.load_meeting_payloads(course_id)?;
 
-    println!(
-        "Iniciando descarga de {} archivos de grabación para el curso {} ({} con cabeceras capturadas, {} reuniones en total)",
-        files.len(),
+    info!(
         course_id,
-        assets.len(),
-        recordings.len()
+        total_files = files.len(),
+        captured_headers = assets.len(),
+        recordings = recordings.len(),
+        "starting Zoom download batch"
     );
 
     if assets.is_empty() {
-        println!("No se capturaron cabeceras de descarga MP4. Ejecuta 'u_crawler zoom sniff-cdp' y presiona DESCARGAR en cada grabación antes de volver a intentar.");
+        println!(
+            "No captured MP4 headers were found. Run `u_crawler zoom sniff-cdp` and replay each recording before retrying."
+        );
         return Ok(());
     }
 
@@ -54,9 +58,9 @@ pub async fn download_files(
         let asset = match assets.get(&play_url) {
             Some(asset) => asset,
             None => {
-                println!(
-                    "No se encontró captura de headers para la grabación {}. Omite descarga.",
-                    play_url
+                warn!(
+                    play_url,
+                    "missing replay headers for recording; skipping download"
                 );
                 continue;
             }
@@ -76,19 +80,26 @@ pub async fn download_files(
     }
 
     if tasks.is_empty() {
-        println!("No hay descargas pendientes con headers capturados.");
+        println!("No downloads remain with captured headers.");
         return Ok(());
     }
 
     let ffmpeg_path = Arc::new(cfg.zoom.ffmpeg_path.clone());
+    let progress = Arc::new(progress_bar(
+        tasks.len() as u64,
+        &format!("Downloading recordings for course {}", course_id),
+    ));
 
     futures_util::stream::iter(tasks.into_iter().map(|(url, headers, dest)| {
         let ffmpeg = ffmpeg_path.clone();
+        let pb = progress.clone();
         async move {
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            download_with_fallback(&ffmpeg, headers, url, dest).await
+            let result = download_with_fallback(&ffmpeg, headers, url, dest).await;
+            pb.inc(1);
+            result
         }
     }))
     .buffer_unordered(concurrency.max(1))
@@ -96,8 +107,9 @@ pub async fn download_files(
     .await
     .into_iter()
     .collect::<Result<Vec<_>, _>>()?;
+    progress.finish_and_clear();
 
-    println!("Descarga completa en {}", base.display());
+    println!("Download completed at {}", base.display());
     Ok(())
 }
 
@@ -110,10 +122,7 @@ async fn download_with_fallback(
     match download_via_ffmpeg(ffmpeg_path, &headers, &url, &dest).await {
         Ok(()) => Ok(()),
         Err(err @ FfmpegError::Process { .. }) => {
-            println!(
-                "ffmpeg no pudo descargar {} ({}); intentando descarga HTTP directa...",
-                url, err
-            );
+            warn!(url, error = %err, "ffmpeg download failed; falling back to HTTP");
             http_download(&headers, &url, &dest).await
         }
         Err(other) => Err(Box::new(other)),
@@ -164,7 +173,7 @@ async fn http_download(
 
     let response = request.send().await?;
     if !(response.status().is_success() || response.status().as_u16() == 206) {
-        return Err(format!("HTTP {} al descargar {}", response.status(), url).into());
+        return Err(format!("HTTP {} while downloading {}", response.status(), url).into());
     }
 
     let mut file = tokio::fs::OpenOptions::new()

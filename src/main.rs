@@ -1,10 +1,10 @@
 mod canvas;
 mod config;
-mod cookies;
 mod ffmpeg;
 mod fsutil;
 mod http;
 mod logger;
+mod progress;
 mod recordings;
 mod state;
 mod syncer;
@@ -12,6 +12,7 @@ mod zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use config::{load_config_from_path, save_config_to_path, Config, ConfigPaths};
+use progress::progress_bar;
 use std::process::ExitCode;
 
 /// u_crawler — Canvas/Zoom course backup CLI
@@ -327,10 +328,18 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
 
     if let Some(cid) = course_id {
         let modules = client.list_modules_with_items(cid).await?;
-        println!("Modules (course_id={cid}):");
+        let pb = progress_bar(modules.len() as u64, &format!("Modules for course {cid}"));
+        pb.println(format!("Modules (course_id={cid}):"));
         for m in &modules {
-            println!("- [{}] {} (items: {})", m.id, m.name, m.items.len());
+            pb.inc(1);
+            pb.println(format!(
+                "- [{}] {} (items: {})",
+                m.id,
+                m.name,
+                m.items.len()
+            ));
         }
+        pb.finish_and_clear();
         // Derive files via module items to avoid list_files 403
         let mut file_count = 0usize;
         for m in &modules {
@@ -343,10 +352,12 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
         println!("Files (discovered via modules) count: {}", file_count);
     } else {
         let courses = client.list_courses().await?;
-        println!("Courses:");
+        let pb = progress_bar(courses.len() as u64, "Courses");
+        pb.println("Courses:".to_string());
         for c in courses {
             let code = c.course_code.unwrap_or_default();
-            println!(
+            pb.inc(1);
+            pb.println(format!(
                 "- [{}] {} {}",
                 c.id,
                 c.name,
@@ -355,8 +366,9 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
                 } else {
                     format!("- {}", code)
                 }
-            );
+            ));
         }
+        pb.finish_and_clear();
     }
     Ok(())
 }

@@ -1,6 +1,7 @@
 use crate::canvas::{CanvasClient, Module};
 use crate::config::{load_config_from_path, ConfigPaths};
 use crate::http::build_http_client;
+use crate::progress::{progress_bar, spinner};
 use regex::Regex;
 use tracing::info;
 
@@ -27,13 +28,22 @@ pub async fn run_discovery(
     }
 
     let mut total = 0usize;
+    let course_progress = progress_bar(courses.len() as u64, "Scanning courses for Zoom links");
     for course in courses {
+        course_progress.inc(1);
+        course_progress.set_message(format!("Scanning course {}", course.id));
         info!(course_id = course.id, name = %course.name, "scan recordings");
+        let modules_spinner = spinner(&format!("Loading modules for {}", course.name));
         let modules: Vec<Module> = canvas
             .list_modules_with_items(course.id)
             .await
             .unwrap_or_default();
+        modules_spinner.finish_and_clear();
+        let module_progress =
+            progress_bar(modules.len() as u64, &format!("Modules in {}", course.name));
         for module in modules {
+            module_progress.inc(1);
+            module_progress.set_message(format!("Module {}", module.id));
             for item in module.items {
                 if let Some(page_url) = item.page_url.as_deref() {
                     if let Ok(page) = canvas.get_page(course.id, page_url).await {
@@ -69,8 +79,11 @@ pub async fn run_discovery(
                 }
             }
         }
+        module_progress.finish_and_clear();
 
+        let assignments_spinner = spinner(&format!("Loading assignments for {}", course.name));
         let assignments = canvas.list_assignments(course.id).await.unwrap_or_default();
+        assignments_spinner.finish_and_clear();
         for assignment in assignments {
             if let Some(desc) = assignment.description.as_deref() {
                 for url in extract_zoom_links(desc) {
@@ -87,6 +100,7 @@ pub async fn run_discovery(
             }
         }
     }
+    course_progress.finish_and_clear();
 
     println!(
         "{}Discovered {} Zoom link(s).",

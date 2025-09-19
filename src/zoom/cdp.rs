@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::progress::progress_bar;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{
     RecordingListResponse, RecordingSummary, ReplayHeader, ZoomCookie, ZoomRecordingFile,
@@ -64,14 +65,10 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
-        return Err(format!(
-            "no se pudo crear la pestaña CDP (status {}): {}",
-            status, text
-        )
-        .into());
+        return Err(format!("could not create CDP tab (status {}): {}", status, text).into());
     }
     let tab_resp: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("respuesta inesperada del endpoint /json/new: {e}: {text}"))?;
+        .map_err(|e| format!("unexpected response from /json/new: {e}: {text}"))?;
     let target_id = tab_resp
         .get("id")
         .and_then(|v| v.as_str())
@@ -84,12 +81,10 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
         .to_string();
 
     println!(
-        "Conectado al DevTools de Chromium. Se abrirá una pestaña hacia:\n  {}\nSi Canvas requiere SSO, completa el flujo en esa pestaña.",
+        "Connected to Chromium DevTools. A tab will open at:\n  {}\nIf Canvas requires SSO, complete the flow in that tab.",
         target_url
     );
-    println!(
-        "Esperando a que la pestaña cargue la tabla de Zoom. Esto puede tardar hasta 2 minutos..."
-    );
+    println!("Waiting for the Zoom table to load in the browser tab (can take up to 2 minutes)...");
 
     let (mut ws, _) = connect_async(&ws_url).await?;
 
@@ -155,7 +150,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     loop {
         if Instant::now() > deadline {
             println!(
-                "Tiempo límite alcanzado esperando actividad CDP; continuando con los datos disponibles."
+                "Timeout waiting for CDP activity; continuing with the data collected so far."
             );
             break;
         }
@@ -167,13 +162,13 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                 match trigger_download_automation(&mut ws, &mut next_id).await {
                     Ok(()) => {
                         println!(
-                            "Automatización de descarga iniciada; espera mientras se clonan los assets..."
+                            "Download automation kicked off; waiting while assets are cloned..."
                         );
                         automation_triggered = true;
                         automation_deadline = Some(Instant::now() + Duration::from_secs(60));
                     }
                     Err(err) => {
-                        println!("No se pudo iniciar la automatización de descargas: {}", err);
+                        println!("Could not start download automation: {}", err);
                         automation_triggered = true;
                         automation_deadline = Some(Instant::now() + Duration::from_secs(10));
                     }
@@ -185,7 +180,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                 .unwrap_or(true)
             {
                 println!(
-                    "Tiempo agotado esperando capturar la descarga MP4; continuando con las cabeceras disponibles."
+                    "Timed out while waiting to capture the MP4 download; continuing with available headers."
                 );
                 break;
             }
@@ -297,13 +292,13 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                                                     }
                                                     listing = Some(resp);
                                                     println!(
-                                                        "Capturada respuesta de Zoom ({:?}).",
+                                                        "Captured Zoom response ({:?}).",
                                                         kind
                                                     );
                                                 }
                                                 Err(err) => {
                                                     println!(
-                                                        "No se pudo parsear respuesta de Zoom ({:?}): {}",
+                                                        "Could not parse Zoom response ({:?}): {}",
                                                         kind, err
                                                     );
                                                 }
@@ -328,7 +323,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                                 cookies =
                                     items.iter().filter_map(|item| parse_cookie(item)).collect();
                                 println!(
-                                    "Se capturaron {} cookies de applications.zoom.us",
+                                    "Captured {} cookies from applications.zoom.us",
                                     cookies.len()
                                 );
                             }
@@ -361,7 +356,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                                             if let Some(found_scid) = extract_scid(url) {
                                                 scid = Some(found_scid);
                                                 print!(
-                                                    "Se capturó lti_scid: {}. ",
+                                                    "Captured lti_scid: {}. ",
                                                     scid.as_deref().unwrap()
                                                 );
                                             }
@@ -454,7 +449,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
                                         if !referer.is_empty()
                                             && !replay_assets.contains_key(&referer)
                                         {
-                                            println!("Capturada URL de descarga para {}", referer);
+                                            println!("Captured download URL for {}", referer);
                                             replay_assets.insert(
                                                 referer.clone(),
                                                 ReplayHeader {
@@ -483,13 +478,16 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     }
 
     let scid = scid.ok_or(
-        "no se pudo capturar lti_scid; asegúrate de abrir la pestaña y de que la tabla cargue",
+        "failed to capture lti_scid; ensure the tab opened and the table finished loading",
     )?;
     if cookies.is_empty() {
-        return Err("no se capturaron cookies para applications.zoom.us".into());
+        return Err("no cookies were captured for applications.zoom.us".into());
     }
     if !have_required_headers(&captured_headers) {
-        return Err("no se capturaron encabezados de la petición de recordings; espera a que la tabla cargue completamente".into());
+        return Err(
+            "missing request headers for the recordings call; wait until the table loads fully"
+                .into(),
+        );
     }
 
     opts.db.save_scid(opts.course_id, &scid)?;
@@ -512,7 +510,7 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     }
 
     println!(
-        "Listo. Guardado scid={}, {} cookies, {} encabezados API, {} assets y {} reuniones.",
+        "Done. Stored scid={}, {} cookies, {} API header sets, {} assets, and {} meetings.",
         scid,
         cookies.len(),
         captured_headers.len(),
@@ -521,11 +519,11 @@ pub async fn sniff_cdp(opts: SniffOptions<'_>) -> Result<(), Box<dyn std::error:
     );
     if replay_assets.is_empty() {
         println!(
-            "(No se capturaron descargas MP4; presiona el botón 'Descargar' en la reproducción durante el sniff para clonar esas cabeceras.)"
+            "(No MP4 downloads were captured; click the 'Download' button in the playback during the sniff to clone those headers.)"
         );
     }
     println!(
-        "Ahora puedes ejecutar 'u_crawler zoom list --course-id {}'",
+        "You can now run 'u_crawler zoom list --course-id {}'",
         opts.course_id
     );
 
@@ -638,7 +636,7 @@ fn is_replay_asset(url: &str) -> bool {
 
 pub async fn capture_play_urls(opts: CaptureOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     if opts.files.is_empty() {
-        println!("No hay playUrl para capturar.");
+        println!("No playUrl entries to capture.");
         return Ok(());
     }
 
@@ -649,14 +647,14 @@ pub async fn capture_play_urls(opts: CaptureOptions<'_>) -> Result<(), Box<dyn s
     let text = response.text().await?;
     if !status.is_success() {
         return Err(format!(
-            "no se pudo crear pestaña para captura de playUrl (status {}): {}",
+            "could not create tab for capturing playUrl entries (status {}): {}",
             status, text
         )
         .into());
     }
 
     let tab_resp: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("respuesta inesperada del endpoint /json/new: {e}: {text}"))?;
+        .map_err(|e| format!("unexpected response from /json/new: {e}: {text}"))?;
     let target_id = tab_resp
         .get("id")
         .and_then(|v| v.as_str())
@@ -668,7 +666,7 @@ pub async fn capture_play_urls(opts: CaptureOptions<'_>) -> Result<(), Box<dyn s
         .ok_or("missing webSocketDebuggerUrl from CDP response")?
         .to_string();
 
-    println!("Conectado a CDP para capturar firmas de descarga.");
+    println!("Connected to CDP to capture download signatures.");
 
     let (mut ws, _) = connect_async(&ws_url).await?;
     let mut next_id: i64 = 1;
@@ -694,34 +692,42 @@ pub async fn capture_play_urls(opts: CaptureOptions<'_>) -> Result<(), Box<dyn s
     let mut reused = 0usize;
     let mut captured = 0usize;
 
+    let progress = progress_bar(
+        opts.files.len() as u64,
+        &format!("Capturing playUrl headers for course {}", opts.course_id),
+    );
+
     for file in opts.files {
         let play_url = &file.play_url;
+        progress.inc(1);
+        progress.set_message(format!("{}", play_url));
         if stored.contains_key(play_url) {
             reused += 1;
             continue;
         }
 
-        println!("Capturando cabeceras para {}", play_url);
         match capture_single_play_url(&mut ws, &mut next_id, play_url).await? {
             Some(asset) => {
                 stored.insert(play_url.clone(), asset);
                 captured += 1;
             }
             None => {
-                println!(
-                    "No se pudo capturar la descarga directa para {} dentro del tiempo esperado.",
+                progress.println(format!(
+                    "Could not capture the direct download for {} within the expected time window.",
                     play_url
-                );
+                ));
             }
         }
     }
+
+    progress.finish_and_clear();
 
     if captured > 0 {
         opts.db.save_replay_headers(opts.course_id, &stored)?;
     }
 
     println!(
-        "Captura de playUrl completada (nuevas: {}, existentes: {}).",
+        "playUrl capture completed (new: {}, existing: {}).",
         captured, reused
     );
 
@@ -775,7 +781,7 @@ async fn capture_single_play_url(
                             if let Some(url) = request.get("url").and_then(|u| u.as_str()) {
                                 if url.contains("login.microsoftonline.com") && !login_prompted {
                                     println!(
-                                        "Se detectó redirección a Microsoft SSO. Completa el login en la pestaña abierta si es necesario."
+                                        "Detected redirect to Microsoft SSO. Complete the login in the open tab if required."
                                     );
                                     login_prompted = true;
                                 }

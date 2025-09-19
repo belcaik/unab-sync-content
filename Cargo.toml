@@ -18,6 +18,7 @@ regex = "1.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+indicatif = { version = "0.17", features = ["tokio"] }
 sanitize-filename = "0.5"
 html2md = "0.2"
 deunicode = "1.6"
