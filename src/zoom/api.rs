@@ -84,23 +84,32 @@ impl ZoomClient {
         // Build headers
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", HeaderValue::from_str(&effective_user_agent(cfg)).unwrap());
-        headers.insert("Referer", HeaderValue::from_static("https://canvas.unab.cl/"));
+        headers.insert("Referer", HeaderValue::from_static("https://applications.zoom.us/lti/advantage"));
 
         // Load ajaxHeaders
         let stored_headers = db
             .get_all_request_headers(course_id)
             .map_err(ZoomApiError::Db)?;
         
-        debug!(
+        info!(
+            "ZoomClient headers from DB -> course_id={}, count={}",
             course_id,
-            count = stored_headers.len(),
-            "loaded stored request headers"
+            stored_headers.len()
         );
 
         for (name, value) in stored_headers {
             if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
                 if let Ok(hval) = HeaderValue::from_str(&value) {
                     headers.insert(hname, hval);
+                }
+            }
+        }
+
+        // Log the headers we just configured (filtering sensitive values if needed, but x-zm keys are useful)
+        for (name, value) in headers.iter() {
+            if let Ok(v) = value.to_str() {
+                if name.as_str().starts_with("x-zm") || name.as_str().eq_ignore_ascii_case("x-xsrf-token") {
+                    info!("ZoomClient header: {} = {}", name, v);
                 }
             }
         }
@@ -203,7 +212,10 @@ impl ZoomClient {
                 let text = resp.text().await.unwrap_or_default();
                 warn!(status = %status, body = %text, "Zoom recordings request failed");
                 if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-                     return Err(ZoomApiError::MissingState);
+                     return Err(ZoomApiError::Message(format!(
+                        "Zoom returned {} (likely cookies/headers invalid): {}",
+                        status, text
+                    )));
                 }
                 return Err(ZoomApiError::Message(format!("HTTP {} - {}", status, text)));
             }

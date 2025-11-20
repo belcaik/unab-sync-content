@@ -184,6 +184,18 @@ impl ZoomDb {
         Ok(valid)
     }
 
+    pub fn delete_all_request_headers(
+        &self,
+        course_id: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.connection()?;
+        conn.execute(
+            "DELETE FROM zoom_request_headers WHERE course_id = ?1",
+            params![course_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn save_request_headers(
         &self,
         course_id: u64,

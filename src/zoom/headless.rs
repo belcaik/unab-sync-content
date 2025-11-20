@@ -127,9 +127,14 @@ impl<'a> ZoomHeadless<'a> {
                             if let Some(idx) = content.find("window.appConf") {
                                 // println!("Found window.appConf in intercepted body!");
                                 // Extract a chunk to parse
+                                // Extract a chunk to parse
                                 let start = idx;
-                                let end = if idx + 2000 < content.len() { idx + 2000 } else { content.len() };
+                                // Capture a larger chunk to ensure we get ajaxHeaders even if they are far down
+                                let end = (idx + 20000).min(content.len());
                                 let chunk = &content[start..end];
+                                
+                                // Debug log to verify we are seeing the right content
+                                println!("DEBUG appConf chunk (first 500 chars):\n{}", &chunk[..chunk.len().min(500)]);
                                 
                                 // Regex for scid
                                 // scid: "..."
@@ -146,7 +151,11 @@ impl<'a> ZoomHeadless<'a> {
                                 // Regex for ajaxHeaders
                                 // User says it looks like: ajaxHeaders: [{key: "...", value: "..."}, ...]
                                 // We will capture the content inside ajaxHeaders: [...]
-                                let re_ajax = Regex::new(r#"ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
+                                // Regex for ajaxHeaders
+                                // User says it looks like: ajaxHeaders: [{key: "...", value: "..."}, ...]
+                                // We will capture the content inside ajaxHeaders: [...]
+                                // Use (?s) to allow . to match newlines
+                                let re_ajax = Regex::new(r#"(?s)ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
                                 if let Some(caps) = re_ajax.captures(chunk) {
                                     if let Some(ajax_body) = caps.get(1) {
                                         let ajax_body_str = ajax_body.as_str();
@@ -323,7 +332,15 @@ impl<'a> ZoomHeadless<'a> {
         }
 
         if !captured_headers.is_empty() {
+            // Clear old headers first to avoid mixing with stale data
+            self.db.delete_all_request_headers(self.course_id)?;
+            
             let header_list: Vec<(String, String)> = captured_headers.iter().map(|(k,v)| (k.clone(), v.clone())).collect();
+            
+            // Log keys to verify we have x-xsrf-token
+            let keys: Vec<String> = header_list.iter().map(|(k, _)| k.clone()).collect();
+            println!("Saving headers: {:?}", keys);
+            
             self.db.save_request_headers(self.course_id, "/api/v1/lti/rich/recording", &header_list)?;
             println!("Saved {} request headers to DB", captured_headers.len());
         } else {
@@ -335,6 +352,18 @@ impl<'a> ZoomHeadless<'a> {
         } else {
             return Err("Failed to capture Zoom cookies".into());
         }
+
+        // Verification log
+        let scid_after = self.db.get_scid(self.course_id)?;
+        let cookies_after = self.db.load_cookies()?;
+        let headers_after = self.db.get_all_request_headers(self.course_id)?;
+
+        println!(
+            "AFTER HEADLESS SAVE -> scid={:?}, cookies={}, headers={}",
+            scid_after,
+            cookies_after.len(),
+            headers_after.len()
+        );
         
 
 
