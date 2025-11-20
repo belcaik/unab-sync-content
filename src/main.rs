@@ -81,42 +81,10 @@ enum AuthCommands {
 
 #[derive(Subcommand, Debug)]
 enum ZoomCommands {
-    #[command(name = "sniff-cdp")]
-    SniffCdp {
-        #[arg(long)]
-        course_id: u64,
-        #[arg(long, default_value = "9222")]
-        debug_port: u16,
-        #[arg(long)]
-        keep_tab: bool,
-    },
-    List {
-        #[arg(long)]
-        course_id: u64,
-        #[arg(long)]
-        since: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    #[command(name = "fetch-urls")]
-    FetchUrls {
-        #[arg(long)]
-        course_id: u64,
-    },
-    Dl {
-        #[arg(long)]
-        course_id: u64,
-        #[arg(long, default_value = "1")]
-        concurrency: usize,
-    },
     #[command(name = "flow")]
     Flow {
         #[arg(long)]
         course_id: u64,
-        #[arg(long, default_value = "9222")]
-        debug_port: u16,
-        #[arg(long)]
-        keep_tab: bool,
         #[arg(long, default_value = "1")]
         concurrency: usize,
         #[arg(long)]
@@ -213,56 +181,11 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Zoom { command } => match command {
-            ZoomCommands::SniffCdp {
-                course_id,
-                debug_port,
-                keep_tab,
-            } => match zoom::zoom_sniff_cdp(course_id, debug_port, keep_tab).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "zoom sniff-cdp failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            },
-            ZoomCommands::List {
-                course_id,
-                since,
-                json,
-            } => match zoom::zoom_list(course_id, since, json).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "zoom list failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            },
-            ZoomCommands::FetchUrls { course_id } => match zoom::zoom_fetch_urls(course_id).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "zoom fetch-urls failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            },
-            ZoomCommands::Dl {
-                course_id,
-                concurrency,
-            } => match zoom::zoom_download(course_id, concurrency).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "zoom dl failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            },
             ZoomCommands::Flow {
                 course_id,
-                debug_port,
-                keep_tab,
                 concurrency,
                 since,
-            } => match zoom::zoom_flow(course_id, debug_port, keep_tab, concurrency, since).await {
+            } => match zoom::zoom_flow(course_id, concurrency, since).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     tracing::error!(error = %e, "zoom flow failed");

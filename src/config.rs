@@ -49,6 +49,10 @@ pub struct Canvas {
     pub ignored_courses: Vec<String>,
     #[serde(default)]
     pub cookie_file: Option<String>,
+    #[serde(default)]
+    pub sso_email: Option<String>,
+    #[serde(default)]
+    pub sso_password: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +87,8 @@ impl Default for Config {
                 token_cmd: None,
                 ignored_courses: vec![],
                 cookie_file: Some("~/.config/u_crawler/canvas_cookies.txt".to_string()),
+                sso_email: None,
+                sso_password: None,
             },
             zoom: Zoom {
                 enabled: true,

@@ -1,12 +1,12 @@
 use crate::config::Config;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{
-    RecordingFileResponse, RecordingListResponse, RecordingSummary, RecordingsResult, ZoomCookie,
+    RecordingFileResponse, RecordingListResponse, RecordingSummary, RecordingsResult,
     ZoomRecordingFile,
 };
-use reqwest::cookie::Jar;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url};
+use reqwest_cookie_store::CookieStoreMutex;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
@@ -17,7 +17,7 @@ const RECORDING_FILE_PATH: &str = "/api/v1/lti/rich/recording/file";
 
 #[derive(Debug, Error)]
 pub enum ZoomApiError {
-    #[error("run `u_crawler zoom sniff-cdp` first to capture lti_scid and cookies")]
+    #[error("run `u_crawler zoom flow` first to capture lti_scid and cookies")]
     MissingState,
     #[error(transparent)]
     Http(#[from] reqwest::Error),
@@ -27,52 +27,149 @@ pub enum ZoomApiError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Db(#[from] Box<dyn std::error::Error>),
+    #[error(transparent)]
+    Cookie(#[from] cookie::ParseError),
+    #[error(transparent)]
+    CookieStore(#[from] cookie_store::Error),
+    #[error("{0}")]
+    Message(String),
 }
 
 pub struct ZoomClient {
     client: Client,
     scid: String,
     base_url: Url,
-    request_headers: Vec<(String, String)>,
 }
 
 impl ZoomClient {
     pub async fn new(cfg: &Config, db: &ZoomDb, course_id: u64) -> Result<Self, ZoomApiError> {
         let scid = db
             .get_scid(course_id)
-            .map_err(ZoomApiError::Db)?
-            .ok_or(ZoomApiError::MissingState)?;
+            .map_err(ZoomApiError::Db)?;
+        
+        if let Some(ref s) = scid {
+            info!("Loaded scid from DB: {}", s);
+        } else {
+            warn!("No scid found in DB for course {}", course_id);
+            return Err(ZoomApiError::MissingState);
+        }
+        let scid = scid.unwrap();
+
         let cookies = db.load_cookies().map_err(ZoomApiError::Db)?;
+        info!("Loaded {} cookies from DB", cookies.len());
         if cookies.is_empty() {
+            warn!("No cookies found in DB");
             return Err(ZoomApiError::MissingState);
         }
 
-        let jar = build_cookie_jar(&cookies)?;
-        let client = reqwest::Client::builder()
-            .cookie_provider(jar)
-            .user_agent(effective_user_agent(cfg))
-            .build()?;
-        let mut request_headers = std::collections::HashMap::new();
-        let headers = db
+        // Build cookie store
+        let cookie_store = cookie_store::CookieStore::default();
+        let mut cookie_store = cookie_store;
+        for c in &cookies {
+            let mut cookie = cookie::Cookie::new(c.name.clone(), c.value.clone());
+            cookie.set_domain(c.domain.clone());
+            cookie.set_path(c.path.clone());
+            cookie.set_secure(c.secure);
+            cookie.set_http_only(c.http_only);
+            // We need to parse the domain to a URL for insert_raw, or just use the domain string if it's a domain match
+            // insert_raw takes &Cookie and &Url.
+            // We can construct a dummy URL from the domain.
+            let url_str = format!("https://{}{}", c.domain.trim_start_matches('.'), c.path);
+            if let Ok(url) = Url::parse(&url_str) {
+                 let _ = cookie_store.insert_raw(&cookie, &url);
+            }
+        }
+        let cookie_store = Arc::new(CookieStoreMutex::new(cookie_store));
+
+        // Build headers
+        let mut headers = HeaderMap::new();
+        headers.insert("User-Agent", HeaderValue::from_str(&effective_user_agent(cfg)).unwrap());
+        headers.insert("Referer", HeaderValue::from_static("https://canvas.unab.cl/"));
+
+        // Load ajaxHeaders
+        let stored_headers = db
             .get_all_request_headers(course_id)
             .map_err(ZoomApiError::Db)?;
+        
         debug!(
             course_id,
-            count = headers.len(),
+            count = stored_headers.len(),
             "loaded stored request headers"
         );
-        for (name, value) in headers {
-            request_headers.insert(name.to_ascii_lowercase(), value);
+
+        for (name, value) in stored_headers {
+            if let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) {
+                if let Ok(hval) = HeaderValue::from_str(&value) {
+                    headers.insert(hname, hval);
+                }
+            }
         }
+
+        let client = Client::builder()
+            .cookie_provider(cookie_store)
+            .default_headers(headers)
+            .build()?;
+
         Ok(Self {
             client,
             scid,
             base_url: Url::parse(ZOOM_BASE)?,
-            request_headers: request_headers
-                .into_iter()
-                .map(|(name, value)| (name, value))
-                .collect(),
         })
+    }
+
+    pub async fn validate_cookies(&self) -> bool {
+        let mut url = match self.base_url.join(RECORDING_LIST_PATH) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("startTime", "");
+            qp.append_pair("endTime", "");
+            qp.append_pair("keyWord", "");
+            qp.append_pair("searchType", "1");
+            qp.append_pair("status", "");
+            qp.append_pair("page", "1");
+            qp.append_pair("total", "0");
+            qp.append_pair("lti_scid", &self.scid);
+        }
+
+        debug!(url = %url, "validating Zoom cookies");
+
+        // We use a separate client or the existing one? Existing one has cookies.
+        // We need to ensure we don't follow redirects to detect 302 easily, 
+        // OR we check if the final URL is still the API URL.
+        // But `self.client` is already built.
+        // Let's just check status 200.
+        match self.client.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.as_u16() == 200 {
+                    // Extra check: ensure it's JSON, not a login page HTML
+                    if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+                        if let Ok(ct_str) = ct.to_str() {
+                            if ct_str.contains("application/json") {
+                                info!("Zoom cookies are valid (HTTP 200 JSON)");
+                                return true;
+                            }
+                        }
+                    }
+                    // If content-type check fails or is missing, but status is 200, 
+                    // it might still be valid or it might be a 200 OK login page.
+                    // Let's assume if it's not JSON it's suspicious for an API call.
+                    warn!("Zoom cookies validation: HTTP 200 but Content-Type not JSON");
+                    false
+                } else {
+                    warn!("Zoom cookies validation failed: HTTP {}", status);
+                    false
+                }
+            }
+            Err(e) => {
+                warn!("Zoom cookie validation request failed: {}", e);
+                false
+            }
+        }
     }
 
     pub async fn list_recordings(
@@ -99,33 +196,21 @@ impl ZoomClient {
             }
             info!(page, url = %url, "fetching Zoom recordings page");
 
-            let mut attempt = 0;
-            let resp = loop {
-                attempt += 1;
-                let request = self.with_request_headers(self.client.get(url.clone()));
-                let response = match request.send().await {
-                    Ok(resp) => resp,
-                    Err(err) => {
-                        warn!(error = %err, page, "Zoom recordings request failed");
-                        return Err(ZoomApiError::from(err));
-                    }
-                };
+            let resp = self.client.get(url.clone()).send().await?;
 
-                if matches!(response.status().as_u16(), 401 | 403) {
-                    if attempt == 1 {
-                        warn!(
-                            status = %response.status(),
-                            page,
-                            "Zoom returned authorization error; retrying with refreshed cookies"
-                        );
-                        continue;
-                    }
-                    return Err(ZoomApiError::MissingState);
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                warn!(status = %status, body = %text, "Zoom recordings request failed");
+                if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+                     return Err(ZoomApiError::MissingState);
                 }
-                break response;
-            };
-            trace!(page, status = %resp.status(), "received Zoom recordings response");
+                return Err(ZoomApiError::Message(format!("HTTP {} - {}", status, text)));
+            }
+
+
             let payload: RecordingListResponse = resp.json().await?;
+            
             if let Some(result) = &payload.result {
                 total_expected = total_expected.or(result.total);
                 if let Some(list) = &result.list {
@@ -133,12 +218,16 @@ impl ZoomClient {
                         break;
                     }
                     all.extend(list.clone());
+                    
+                    // Check if we have all
                     if let Some(total) = total_expected {
                         if all.len() as i64 >= total {
                             break;
                         }
                     }
-                    if result.page_size.unwrap_or_default() as usize > list.len() {
+                    
+                    // Check if page is full
+                     if result.page_size.unwrap_or_default() as usize > list.len() {
                         break;
                     }
                 } else {
@@ -149,6 +238,11 @@ impl ZoomClient {
             }
 
             page += 1;
+            // Safety break
+            if page > 100 {
+                warn!("Too many pages, stopping");
+                break;
+            }
         }
 
         Ok(RecordingListResponse {
@@ -174,30 +268,16 @@ impl ZoomClient {
             qp.append_pair("lti_scid", &self.scid);
         }
 
-        let mut attempt = 0;
-        let resp = loop {
-            attempt += 1;
-            let request = self.with_request_headers(self.client.get(url.clone()));
-            let response = match request.send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    warn!(error = %err, meeting_id = %meeting.meeting_id, "Zoom recording files request failed");
-                    return Err(ZoomApiError::from(err));
-                }
-            };
-            if matches!(response.status().as_u16(), 401 | 403) {
-                if attempt == 1 {
-                    warn!(
-                        status = %response.status(),
-                        meeting_id = %meeting.meeting_id,
-                        "Zoom returned authorization error while fetching recording files; retrying"
-                    );
-                    continue;
-                }
-                return Err(ZoomApiError::MissingState);
-            }
-            break response;
-        };
+        let resp = self.client.get(url.clone()).send().await?;
+        
+        if !resp.status().is_success() {
+             let status = resp.status();
+             if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+                 return Err(ZoomApiError::MissingState);
+             }
+             return Err(ZoomApiError::Http(resp.error_for_status().unwrap_err()));
+        }
+
         trace!(status = %resp.status(), meeting_id = %meeting.meeting_id, "Zoom recording files response received");
         let payload: RecordingFileResponse = resp.json().await?;
         let mut out = Vec::new();
@@ -220,34 +300,6 @@ impl ZoomClient {
         }
         Ok(out)
     }
-
-    fn with_request_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if self.request_headers.is_empty() {
-            builder
-        } else {
-            apply_stored_headers(builder, &self.request_headers)
-        }
-    }
-}
-
-fn build_cookie_jar(cookies: &[ZoomCookie]) -> Result<Arc<Jar>, ZoomApiError> {
-    let jar = Arc::new(Jar::default());
-    for cookie in cookies {
-        let mut cookie_str = format!(
-            "{}={}; Domain={}; Path={}",
-            cookie.name, cookie.value, cookie.domain, cookie.path
-        );
-        if cookie.secure {
-            cookie_str.push_str("; Secure");
-        }
-        if cookie.http_only {
-            cookie_str.push_str("; HttpOnly");
-        }
-        let url = Url::parse(&format!("{}{}", ZOOM_BASE, cookie.path))
-            .unwrap_or_else(|_| Url::parse(ZOOM_BASE).unwrap());
-        jar.add_cookie_str(&cookie_str, &url);
-    }
-    Ok(jar)
 }
 
 pub(crate) fn effective_user_agent(cfg: &Config) -> String {
@@ -257,63 +309,5 @@ pub(crate) fn effective_user_agent(cfg: &Config) -> String {
         cfg.user_agent.clone()
     } else {
         format!("u_crawler/{}", env!("CARGO_PKG_VERSION"))
-    }
-}
-
-fn apply_stored_headers(
-    mut builder: reqwest::RequestBuilder,
-    headers: &[(String, String)],
-) -> reqwest::RequestBuilder {
-    trace!(count = headers.len(), "applying stored headers to request");
-    for (name, value) in headers {
-        if name.starts_with(':') {
-            continue;
-        }
-        let header_name = match HeaderName::from_bytes(name.as_bytes()) {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-        let header_value = match HeaderValue::from_str(value) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        builder = builder.header(header_name, header_value);
-    }
-    trace!("applied stored headers to request");
-    builder
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_stored_headers_skips_invalid_entries() {
-        let client = reqwest::Client::builder()
-            .user_agent("test-agent")
-            .build()
-            .expect("client");
-
-        let headers = vec![
-            (":authority".to_string(), "ignored".to_string()),
-            ("X-Test".to_string(), "value".to_string()),
-            ("Invalid Header".to_string(), "value".to_string()),
-        ];
-
-        let request = apply_stored_headers(client.get("https://example.com"), &headers)
-            .build()
-            .expect("request build");
-
-        let header_map = request.headers();
-        assert_eq!(
-            header_map
-                .get("X-Test")
-                .expect("x-test header present")
-                .to_str()
-                .unwrap(),
-            "value"
-        );
-        assert!(header_map.get(":authority").is_none());
-        assert!(header_map.get("Invalid Header").is_none());
     }
 }

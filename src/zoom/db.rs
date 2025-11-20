@@ -85,6 +85,7 @@ impl ZoomDb {
             "REPLACE INTO zoom_course_scid(course_id, scid, updated_at) VALUES (?1, ?2, ?3)",
             params![course_id.to_string(), scid, Utc::now().timestamp()],
         )?;
+        println!("DB: Saved scid for course {}", course_id);
         Ok(())
     }
 
@@ -94,8 +95,10 @@ impl ZoomDb {
         let mut rows = stmt.query(params![course_id.to_string()])?;
         if let Some(row) = rows.next()? {
             let scid: String = row.get(0)?;
+            println!("DB: Found scid for course {}", course_id);
             Ok(Some(scid))
         } else {
+            println!("DB: No scid found for course {}", course_id);
             Ok(None)
         }
     }
@@ -164,7 +167,6 @@ impl ZoomDb {
                 valid.push(cookie);
             }
         }
-
         drop(stmt);
 
         if !expired.is_empty() {
@@ -178,6 +180,7 @@ impl ZoomDb {
             tx.commit()?;
         }
 
+        println!("DB: Loaded {} valid cookies", valid.len());
         Ok(valid)
     }
 
@@ -365,22 +368,5 @@ impl ZoomDb {
         Ok(())
     }
 
-    pub fn load_files(
-        &self,
-        course_id: u64,
-    ) -> Result<Vec<ZoomRecordingFile>, Box<dyn std::error::Error>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            "SELECT f.payload FROM zoom_files f
-             JOIN zoom_meetings m ON m.meeting_id = f.meeting_id
-             WHERE m.course_id = ?1",
-        )?;
-        let mut rows = stmt.query(params![course_id.to_string()])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let payload: String = row.get(0)?;
-            out.push(serde_json::from_str(&payload)?);
-        }
-        Ok(out)
-    }
+
 }
