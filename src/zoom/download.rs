@@ -50,22 +50,26 @@ pub async fn download_files(
         .join("Zoom")
         .join(course_id.to_string());
 
+    // Load cookies for downloads
+    let cookies = db.load_cookies()?;
+    
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     let mut tasks = Vec::new();
 
+    // Filter `assets` to only include those that correspond to `files`
     for file in files {
-        let play_url = file.play_url.clone();
-        let asset = match assets.get(&play_url) {
+        let asset = match assets.get(&file.play_url) {
             Some(asset) => asset,
             None => {
                 warn!(
-                    play_url,
+                    play_url = file.play_url,
                     "missing replay headers for recording; skipping download"
                 );
                 continue;
             }
         };
 
+        let play_url = asset.download_url.clone();
         let mut filename = sanitize_filename_preserve_ext(file.filename_hint() + ".mp4");
         let count = name_counts.entry(filename.clone()).or_insert(0);
         if *count > 0 {
@@ -75,7 +79,7 @@ pub async fn download_files(
         *count += 1;
 
         let dest = base.join(&filename);
-        let headers = build_ffmpeg_headers(cfg, asset, &play_url);
+        let headers = build_ffmpeg_headers(cfg, asset, &file.play_url, &cookies, &asset.download_url);
         tasks.push((asset.download_url.clone(), headers, dest));
     }
 
@@ -129,7 +133,7 @@ async fn download_with_fallback(
     }
 }
 
-async fn http_download(
+pub async fn http_download(
     headers: &[(String, String)],
     url: &str,
     dest: &Path,
@@ -168,6 +172,18 @@ async fn http_download(
         );
     }
 
+    // DEBUG: Log all headers being sent
+    println!("HTTP download {} with {} headers:", url, header_map.len());
+    for (k, v) in header_map.iter() {
+        let val_str = v.to_str().unwrap_or("<binary>");
+        let display_val = if val_str.len() > 100 {
+            format!("{}...", &val_str[..100])
+        } else {
+            val_str.to_string()
+        };
+        println!("  {}: {}", k, display_val);
+    }
+
     let mut request = client.get(url);
     request = request.headers(header_map);
 
@@ -204,62 +220,40 @@ fn temp_path(dest: &Path) -> PathBuf {
     dest.with_extension("mp4.part")
 }
 
-fn build_ffmpeg_headers(
-    cfg: &Config,
+pub fn build_ffmpeg_headers(
+    _cfg: &Config,
     asset: &ReplayHeader,
-    referer: &str,
+    _referer: &str,
+    cookies: &[crate::zoom::models::ZoomCookie],
+    download_url: &str,
 ) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    let lower_map: HashMap<String, String> = asset
-        .headers
-        .iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-        .collect();
-
-    // Preserve order roughly similar to browser critical headers
-    let ordered_keys = [
-        "host",
-        "authority",
-        "accept",
-        "accept-language",
-        "cookie",
-        "cf-ipcountry",
-        "sec-ch-ua",
-        "sec-ch-ua-mobile",
-        "sec-ch-ua-platform",
-        "sec-fetch-dest",
-        "sec-fetch-mode",
-        "sec-fetch-site",
-        "sec-fetch-storage-access",
-        "range",
-        "origin",
-        "referer",
-        "x-xsrf-token",
-        "x-zm-aid",
-        "x-zm-cluster-id",
-        "x-zm-haid",
-        "x-zm-region",
-        "priority",
-    ];
-
-    for key in ordered_keys.iter() {
-        if let Some(value) = lower_map.get(*key) {
-            headers.push((canonical_header_name(key), value.clone()));
+    let mut headers: Vec<(String, String)> = asset.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    
+    // Extract domain from download URL
+    let domain = if let Ok(url) = url::Url::parse(download_url) {
+        url.host_str().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    
+    // Build Cookie header from saved cookies matching the domain
+    let mut cookie_values = Vec::new();
+    for cookie in cookies {
+        // Match cookies for this domain (ssrweb.zoom.us, zoom.us, etc.)
+        if domain.ends_with(&cookie.domain) || cookie.domain.starts_with('.') && domain.ends_with(&cookie.domain[1..]) {
+            cookie_values.push(format!("{}={}", cookie.name, cookie.value));
         }
     }
-
-    for (key, value) in lower_map.iter() {
-        if ordered_keys.contains(&key.as_str()) || should_skip_header(key) {
-            continue;
-        }
-        headers.push((canonical_header_name(key), value.clone()));
+    
+    if !cookie_values.is_empty() {
+        let cookie_header = cookie_values.join("; ");
+        println!("Building Cookie header with {} cookies for domain {}", cookie_values.len(), domain);
+        headers.push(("Cookie".to_string(), cookie_header));
+    } else {
+        println!("⚠ Warning: No cookies found for domain {}", domain);
     }
-
-    apply_or_replace(&mut headers, "User-Agent", &effective_user_agent(cfg));
-    apply_or_replace(&mut headers, "Referer", referer);
-    ensure_header(&mut headers, "Accept", "*/*");
-    ensure_header(&mut headers, "Range", "bytes=0-");
-
+    
+    println!("Total headers for download (including Cookie): {}", headers.len());
     headers
 }
 

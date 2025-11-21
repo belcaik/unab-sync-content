@@ -2,12 +2,12 @@ use crate::config::Config;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ReplayHeader, ZoomCookie, ZoomRecordingFile};
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent;
+use chromiumoxide::cdp::browser_protocol::network::{CookieParam, EventRequestWillBeSent, TimeSinceEpoch};
 use chromiumoxide::Page;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use url::Url;
 use base64::prelude::*;
@@ -414,6 +414,46 @@ impl<'a> ZoomHeadless<'a> {
             return Ok(());
         }
 
+        self.handle_microsoft_sso(page).await?;
+        Ok(())
+    }
+
+    async fn handle_microsoft_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Handling Microsoft SSO...");
+        self.handle_ms_account(page).await
+    }
+
+    async fn handle_ms_account(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+        // First, check for remembered account tiles (account picker)
+        sleep(Duration::from_secs(2)).await;
+        
+        // Look for account tiles - the clickable element is .table[role="button"] inside .tile-container
+        if let Ok(tiles) = page.find_elements(".table[role='button']").await {
+            if !tiles.is_empty() {
+                println!("Found {} remembered account tile(s), attempting to click the first one...", tiles.len());
+                if let Some(tile) = tiles.first() {
+                    if let Err(e) = tile.click().await {
+                        println!("Warning: Failed to click account tile: {:?}", e);
+                    } else {
+                        println!("Clicked remembered account tile");
+                        sleep(Duration::from_secs(3)).await;
+                        
+                        // Handle "Stay signed in?" if it appears after clicking tile
+                        if page.content().await?.contains("Stay signed in?") {
+                            println!("Handling 'Stay signed in' prompt...");
+                            if page.find_element("#idSIButton9").await.is_ok() {
+                                page.find_element("#idSIButton9").await?.click().await?;
+                            }
+                        }
+                        
+                        sleep(Duration::from_secs(5)).await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        
+        // Fallback: manual credential entry
         if let Some(email) = &self.config.canvas.sso_email {
             println!("Attempting to enter email...");
             // Selector for email input. Usually 'input[type="email"]' or 'input[name="loginfmt"]'
@@ -435,10 +475,6 @@ impl<'a> ZoomHeadless<'a> {
         }
 
         // "Stay signed in?" - usually has a "Yes" button (input[type="submit"] or button)
-        // We can try to click "Yes" or "No". Let's try "Yes" to avoid repeated logins if we reuse session (though we don't persist browser profile yet).
-        // Actually, "No" is safer to avoid "kmsi" (Keep Me Signed In) interruptions if logic is flaky.
-        // But "Yes" reduces friction.
-        // Let's look for the text or button.
         if page.content().await?.contains("Stay signed in?") {
              println!("Handling 'Stay signed in' prompt...");
              // The "Yes" button often has id "idSIButton9"
@@ -448,6 +484,381 @@ impl<'a> ZoomHeadless<'a> {
         }
         
         sleep(Duration::from_secs(5)).await;
+        Ok(())
+    }
+
+    async fn is_zoom_login_page(&self, page: &Page) -> Result<bool, Box<dyn std::error::Error>> {
+        let url = page.url().await?.unwrap_or_default();
+        let html = page.content().await?;
+
+        Ok(url.contains("zoom.us/signin")
+            || html.contains("zm-login-methods__item")
+            || html.contains("Sign in with Microsoft"))
+    }
+
+    async fn handle_zoom_login(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Handling Zoom login fallback...");
+        
+        let start = Instant::now();
+        let mut clicked = false;
+
+        while start.elapsed() < Duration::from_secs(10) {
+            if let Ok(el) = page.find_element("a[aria-label='Sign in with Microsoft']").await {
+                println!("Found 'Sign in with Microsoft' button. Clicking...");
+                el.click().await?;
+                clicked = true;
+                break;
+            }
+
+            // fallback by text
+            if let Ok(methods) = page.find_elements(".zm-login-methods__item").await {
+                for m in methods {
+                    if let Ok(Some(text)) = m.inner_text().await {
+                        if text.to_lowercase().contains("microsoft") {
+                            println!("Found 'Microsoft' login method. Clicking...");
+                            m.click().await?;
+                            clicked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if clicked { break; }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if !clicked {
+            println!("Warning: Could not find 'Sign in with Microsoft' button on Zoom login page.");
+            return Ok(());
+        }
+
+        // Wait for redirect to Microsoft
+        sleep(Duration::from_secs(3)).await;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            let url = page.url().await?.unwrap_or_default();
+            if url.contains("login.microsoftonline.com") {
+                println!("Redirected to Microsoft login: {}", url);
+                self.handle_microsoft_sso(page).await?;
+                break;
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        // Wait for return to Zoom
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            let url = page.url().await?.unwrap_or_default();
+            if url.contains("zoom.us/rec/play") || (url.contains("zoom.us") && !url.contains("signin")) {
+                println!("Back on Zoom page: {}", url);
+                break;
+            }
+            sleep(Duration::from_millis(1000)).await;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_zoom_play_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+        // Step 1: Wait for page to settle after navigation
+        sleep(Duration::from_secs(3)).await;
+
+        let url = page.url().await?.unwrap_or_default();
+        
+        // Step 2: Check if already authenticated (player loaded)
+        if url.contains("zoom.us/rec/play") {
+            // Additional check: look for player elements, not login elements
+            if let Ok(html) = page.content().await {
+                if !html.contains("zm-login-methods__item") && !html.contains("Sign in with Microsoft") {
+                    println!("Zoom player already loaded, no authentication needed");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Step 3: Detect Zoom login screen
+        if !self.is_zoom_login_page(page).await.unwrap_or(false) {
+            println!("No Zoom login detected, assuming already authenticated");
+            return Ok(());
+        }
+
+        println!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
+
+        // Step 4: Click "Sign in with Microsoft" on Zoom
+        let start = Instant::now();
+        let mut clicked = false;
+
+        while start.elapsed() < Duration::from_secs(10) {
+            // Try multiple selectors
+            if let Ok(el) = page.find_element("a[aria-label='Sign in with Microsoft']").await {
+                println!("Clicked 'Sign in with Microsoft' button (aria-label match)");
+                el.click().await?;
+                clicked = true;
+                break;
+            }
+
+            if let Ok(el) = page.find_element("a[aria-label*='Microsoft']").await {
+                println!("Clicked 'Sign in with Microsoft' button (aria-label partial match)");
+                el.click().await?;
+                clicked = true;
+                break;
+            }
+
+            // Fallback: search by text in login methods
+            if let Ok(methods) = page.find_elements(".zm-login-methods__item").await {
+                for method in methods {
+                    if let Ok(Some(text)) = method.inner_text().await {
+                        if text.to_lowercase().contains("microsoft") {
+                            println!("Clicked 'Microsoft' login method (text match)");
+                            method.click().await?;
+                            clicked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if clicked {
+                break;
+            }
+
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if !clicked {
+            return Err("Could not find 'Sign in with Microsoft' button on Zoom login page".into());
+        }
+
+        // Step 5: Wait for redirect to Microsoft
+        println!("Clicked Microsoft sign-in button, waiting for redirect...");
+        sleep(Duration::from_secs(3)).await;
+
+        let start = Instant::now();
+        let mut on_microsoft = false;
+        while start.elapsed() < Duration::from_secs(30) {
+            let current_url = page.url().await?.unwrap_or_default();
+            if current_url.contains("login.microsoftonline.com") {
+                println!("Redirected to Microsoft login: {}", current_url);
+                on_microsoft = true;
+                break;
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if !on_microsoft {
+            return Err("Timeout waiting for redirect to Microsoft login".into());
+        }
+
+        // Step 6: Handle Microsoft authentication (account picker or credentials)
+        self.handle_ms_account(page).await?;
+        println!("Microsoft authentication complete, waiting for Zoom player...");
+
+        // Step 7: Wait for return to Zoom
+        let start = Instant::now();
+        let mut back_on_zoom = false;
+        while start.elapsed() < Duration::from_secs(30) {
+            let current_url = page.url().await?.unwrap_or_default();
+            if current_url.contains("zoom.us") && !current_url.contains("signin") {
+                println!("Back on Zoom page: {}", current_url);
+                back_on_zoom = true;
+                break;
+            }
+            sleep(Duration::from_millis(1000)).await;
+        }
+
+        if !back_on_zoom {
+            return Err("Timeout waiting to return to Zoom after Microsoft authentication".into());
+        }
+
+        // Give the player time to initialize
+        sleep(Duration::from_secs(2)).await;
+        println!("Zoom player should now be loaded");
+
+        Ok(())
+    }
+
+    pub async fn capture_and_download_immediately(
+        &self,
+        cfg: &crate::config::Config,
+        db: &ZoomDb,
+        course_id: u64,
+        files: Vec<ZoomRecordingFile>,
+        _concurrency: usize,  // Not used since we process one-by-one
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ffmpeg::{ensure_ffmpeg_available, download_via_ffmpeg, FfmpegError};
+        use crate::fsutil::sanitize_filename_preserve_ext;
+        use std::path::{PathBuf};
+        use std::collections::HashMap;
+        use crate::zoom::models::ReplayHeader;
+
+        ensure_ffmpeg_available(&cfg.zoom.ffmpeg_path).await?;
+
+        let base = PathBuf::from(&cfg.download_root)
+            .join("Zoom")
+            .join(course_id.to_string());
+        
+        tokio::fs::create_dir_all(&base).await?;
+
+        let (mut browser, mut handler) = Browser::launch(
+            BrowserConfig::builder()
+                .with_head()
+                .arg("--no-sandbox")
+                .arg("--disable-gpu")
+                .build()?,
+        )
+        .await?;
+
+        let handle = tokio::spawn(async move {
+            while let Some(h) = handler.next().await {
+                if h.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let page = browser.new_page("about:blank").await?;
+        page.set_user_agent(&self.config.zoom.user_agent).await?;
+
+        let mut name_counts: HashMap<String, usize> = HashMap::new();
+        let mut cookies_captured = false;
+
+        println!("Processing {} recordings (capture → download → next)...", files.len());
+
+        for (idx, file) in files.iter().enumerate() {
+            println!("\n[{}/{}] Processing: {}", idx + 1, files.len(), file.play_url);
+
+            // STEP 1: Navigate to play URL
+            let mut events = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
+            page.goto(&file.play_url).await?;
+
+            // STEP 2: Authenticate if needed
+            if let Err(e) = self.handle_zoom_play_sso(&page).await {
+                println!("Warning: SSO failed for {}: {:?}", file.play_url, e);
+                println!("Skipping this file...");
+                continue;
+            }
+
+            // STEP 3: Capture fresh cookies (first file only) and load for downloads
+            let zoom_cookies = if !cookies_captured {
+                println!("Capturing fresh cookies after SSO...");
+                let current_cookies = page.get_cookies().await?;
+                let mut fresh_cookies = Vec::new();
+                for c in current_cookies {
+                    if c.domain.contains("zoom.us") || c.domain.contains("cloudfront.net") {
+                        fresh_cookies.push(crate::zoom::models::ZoomCookie {
+                            domain: c.domain,
+                            name: c.name,
+                            value: c.value,
+                            path: c.path,
+                            expires: Some(c.expires as i64),
+                            secure: c.secure,
+                            http_only: c.http_only,
+                        });
+                    }
+                }
+                if !fresh_cookies.is_empty() {
+                    self.db.replace_cookies(&fresh_cookies)?;
+                    println!("Saved {} fresh cookies for downloads", fresh_cookies.len());
+                }
+                cookies_captured = true;
+                fresh_cookies
+            } else {
+                // Load cookies from DB for subsequent files
+                self.db.load_cookies()?
+            };
+
+            // STEP 4: Wait for media request (capture EXACT headers from .mp4 request)
+            let start = Instant::now();
+            let mut asset: Option<ReplayHeader> = None;
+
+            while start.elapsed() < Duration::from_secs(30) {
+                tokio::select! {
+                    event = events.next() => {
+                        if let Some(event) = event {
+                            let url = event.request.url.clone();
+                            if self.is_replay_asset(&url) {
+                                // Capture ALL headers without filtering (including cookie, host, etc.)
+                                let headers_val = serde_json::to_value(event.request.headers.clone())
+                                    .unwrap_or(serde_json::Value::Null);
+                                let mut headers = HashMap::new();
+                                if let Some(obj) = headers_val.as_object() {
+                                    for (k, v) in obj {
+                                        if let Some(s) = v.as_str() {
+                                            headers.insert(k.clone(), s.to_string());
+                                        }
+                                    }
+                                }
+
+                                println!("✓ Captured download URL: {}", url);
+                                println!("  Captured {} headers from MP4 request:", headers.len());
+                                for (k, v) in &headers {
+                                    // Log all headers (truncate long values like cookies)
+                                    let display_val = if v.len() > 100 {
+                                        format!("{}...", &v[..100])
+                                    } else {
+                                        v.clone()
+                                    };
+                                    println!("    {}: {}", k, display_val);
+                                }
+
+                                asset = Some(ReplayHeader {
+                                    download_url: url.clone(),
+                                    headers,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    _ = sleep(Duration::from_millis(100)) => {}
+                }
+            }
+
+            let asset = match asset {
+                Some(a) => a,
+                None => {
+                    println!("✗ Could not capture download URL, skipping...");
+                    continue;
+                }
+            };
+
+            // STEP 5: Download immediately (while token is fresh!)
+            let mut filename = sanitize_filename_preserve_ext(file.filename_hint() + ".mp4");
+            let count = name_counts.entry(filename.clone()).or_insert(0);
+            if *count > 0 {
+                let stem = filename.trim_end_matches(".mp4");
+                filename = format!("{}_{}.mp4", stem, count);
+            }
+            *count += 1;
+
+            let dest = base.join(&filename);
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
+            let headers = crate::zoom::download::build_ffmpeg_headers(cfg, &asset, &file.play_url, &zoom_cookies, &asset.download_url);
+
+            println!("⬇ Downloading to: {}", dest.display());
+            match download_via_ffmpeg(&cfg.zoom.ffmpeg_path, &headers, &asset.download_url, &dest).await {
+                Ok(()) => println!("✓ Downloaded successfully!"),
+                Err(FfmpegError::Process{..}) => {
+                    println!("✗ ffmpeg failed, trying HTTP fallback...");
+                    if let Err(e) = crate::zoom::download::http_download(&headers, &asset.download_url, &dest).await {
+                        println!("✗ HTTP download also failed: {:?}", e);
+                    } else {
+                        println!("✓ Downloaded via HTTP!");
+                    }
+                }
+                Err(e) => {
+                    println!("✗ Download error: {:?}", e);
+                }
+            }
+        }
+
+        browser.close().await?;
+        handle.await?;
+
+        println!("\nAll files processed! Downloads saved to: {}", base.display());
         Ok(())
     }
 
@@ -476,6 +887,7 @@ impl<'a> ZoomHeadless<'a> {
         // The logic is: navigate to play_url -> wait for network request to .mp4 or .m3u8
         
         let mut stored = self.db.load_replay_headers(self.course_id)?;
+        let mut cookies_captured = false;
         
         for file in files {
             if stored.contains_key(&file.play_url) {
@@ -486,9 +898,41 @@ impl<'a> ZoomHeadless<'a> {
             
             let mut events = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
             page.goto(&file.play_url).await?;
+
+            // Handle authentication if needed (new comprehensive SSO flow)
+            if let Err(e) = self.handle_zoom_play_sso(&page).await {
+                println!("Warning: SSO failed for {}: {:?}", file.play_url, e);
+                println!("Skipping this file and continuing...");
+                continue;
+            }
+
+            // CAPTURE FRESH COOKIES after successful authentication on first file
+            if !cookies_captured {
+                println!("Capturing fresh cookies after SSO authentication...");
+                let current_cookies = page.get_cookies().await?;
+                let mut zoom_cookies = Vec::new();
+                for c in current_cookies {
+                    if c.domain.contains("zoom.us") || c.domain.contains("cloudfront.net") {
+                        zoom_cookies.push(crate::zoom::models::ZoomCookie {
+                            domain: c.domain,
+                            name: c.name,
+                            value: c.value,
+                            path: c.path,
+                            expires: Some(c.expires as i64),
+                            secure: c.secure,
+                            http_only: c.http_only,
+                        });
+                    }
+                }
+                if !zoom_cookies.is_empty() {
+                    self.db.replace_cookies(&zoom_cookies)?;
+                    println!("Saved {} fresh cookies to DB for downloads", zoom_cookies.len());
+                }
+                cookies_captured = true;
+            }
             
             // Wait for the media request
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let mut found = false;
             
             while start.elapsed() < Duration::from_secs(30) {

@@ -170,11 +170,12 @@ pub async fn zoom_flow(
         return Ok(());
     }
 
-    // 4. Capture play URLs (Headless)
-    headless.capture_play_url_headers(&all_files).await?;
+    // 4. Capture play URLs and download immediately (one by one to avoid token expiration)
+    println!("Starting capture and download (tokens expire quickly, processing one by one)...");
+    headless.capture_and_download_immediately(&cfg, &db, course_id, all_files, concurrency).await?;
 
-    // 5. Download files
-    download::download_files(&cfg, &db, course_id, all_files, concurrency).await
+    println!("All recordings processed!");
+    Ok(())
 }
 
 fn map_api_err(err: ZoomApiError) -> Box<dyn Error> {
