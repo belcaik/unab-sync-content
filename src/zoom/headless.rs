@@ -31,6 +31,12 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
+                // Running in full headless mode (no GUI)
+                // Let's try headless first, but maybe provide an option?
+                // The user said "headless browser", so let's stick to headless unless debugging.
+                // Actually, for SSO, sometimes headful is required if there are captchas or complex interactions,
+                // but standard Azure AD usually works in headless if user agent is set correctly.
+                // Let's use the config user agent.
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
                 .arg("--disable-dev-shm-usage")
@@ -660,7 +666,7 @@ impl<'a> ZoomHeadless<'a> {
 
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
-                .with_head()
+                // Running in full headless mode (no GUI)
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
                 .build()?,
