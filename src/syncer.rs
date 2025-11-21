@@ -119,6 +119,19 @@ pub async fn run_sync(
         }
         module_progress.finish_and_clear();
 
+        // Sync Zoom recordings for this course
+        println!("Starting Zoom sync for course {}...", c.id);
+        match crate::zoom::zoom_flow(c.id, 1, None).await {
+            Ok(()) => {
+                println!("✓ Zoom sync completed for course {}", c.id);
+            }
+            Err(e) => {
+                warn!(course_id = c.id, error = %e, "zoom flow failed for course");
+                eprintln!("Warning: Zoom sync failed for course {}: {}", c.id, e);
+                // Continue with other courses even if Zoom fails
+            }
+        }
+
         if !dry_run {
             state.save(&state_path).await?;
         }

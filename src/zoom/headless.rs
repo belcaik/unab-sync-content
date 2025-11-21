@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::zoom::db::ZoomDb;
-use crate::zoom::models::{ReplayHeader, ZoomCookie, ZoomRecordingFile};
+use crate::zoom::models::{ZoomCookie, ZoomRecordingFile};
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::network::{CookieParam, EventRequestWillBeSent, TimeSinceEpoch};
+use chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent;
 use chromiumoxide::Page;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -31,12 +31,6 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
-                .with_head() // We might want to run headless, but for debugging/SSO visibility 'with_head' is often safer initially. User asked for headless though.
-                // Let's try headless first, but maybe provide an option?
-                // The user said "headless browser", so let's stick to headless unless debugging.
-                // Actually, for SSO, sometimes headful is required if there are captchas or complex interactions,
-                // but standard Azure AD usually works in headless if user agent is set correctly.
-                // Let's use the config user agent.
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
                 .arg("--disable-dev-shm-usage")
@@ -496,69 +490,7 @@ impl<'a> ZoomHeadless<'a> {
             || html.contains("Sign in with Microsoft"))
     }
 
-    async fn handle_zoom_login(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Handling Zoom login fallback...");
-        
-        let start = Instant::now();
-        let mut clicked = false;
 
-        while start.elapsed() < Duration::from_secs(10) {
-            if let Ok(el) = page.find_element("a[aria-label='Sign in with Microsoft']").await {
-                println!("Found 'Sign in with Microsoft' button. Clicking...");
-                el.click().await?;
-                clicked = true;
-                break;
-            }
-
-            // fallback by text
-            if let Ok(methods) = page.find_elements(".zm-login-methods__item").await {
-                for m in methods {
-                    if let Ok(Some(text)) = m.inner_text().await {
-                        if text.to_lowercase().contains("microsoft") {
-                            println!("Found 'Microsoft' login method. Clicking...");
-                            m.click().await?;
-                            clicked = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if clicked { break; }
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        if !clicked {
-            println!("Warning: Could not find 'Sign in with Microsoft' button on Zoom login page.");
-            return Ok(());
-        }
-
-        // Wait for redirect to Microsoft
-        sleep(Duration::from_secs(3)).await;
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(30) {
-            let url = page.url().await?.unwrap_or_default();
-            if url.contains("login.microsoftonline.com") {
-                println!("Redirected to Microsoft login: {}", url);
-                self.handle_microsoft_sso(page).await?;
-                break;
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        // Wait for return to Zoom
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(30) {
-            let url = page.url().await?.unwrap_or_default();
-            if url.contains("zoom.us/rec/play") || (url.contains("zoom.us") && !url.contains("signin")) {
-                println!("Back on Zoom page: {}", url);
-                break;
-            }
-            sleep(Duration::from_millis(1000)).await;
-        }
-
-        Ok(())
-    }
 
     async fn handle_zoom_play_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
         // Step 1: Wait for page to settle after navigation
@@ -681,7 +613,7 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn capture_and_download_immediately(
         &self,
         cfg: &crate::config::Config,
-        db: &ZoomDb,
+        _db: &ZoomDb,
         course_id: u64,
         files: Vec<ZoomRecordingFile>,
         _concurrency: usize,  // Not used since we process one-by-one
@@ -699,6 +631,32 @@ impl<'a> ZoomHeadless<'a> {
             .join(course_id.to_string());
         
         tokio::fs::create_dir_all(&base).await?;
+
+        // Scan for existing recordings to avoid redownloading
+        let existing_files = scan_existing_recordings(&base)?;
+        let files_to_download: Vec<_> = files
+            .into_iter()
+            .filter(|file| {
+                let filename = sanitize_filename_preserve_ext(&(file.filename_hint() + ".mp4"));
+                if existing_files.contains(&filename) {
+                    println!("⏩ Skipping (already exists): {}", filename);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        if files_to_download.is_empty() {
+            println!("All recordings already downloaded!");
+            return Ok(());
+        }
+
+        println!(
+            "Found {} recordings, {} new to download",
+            files_to_download.len() + existing_files.len(),
+            files_to_download.len()
+        );
 
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
@@ -721,12 +679,13 @@ impl<'a> ZoomHeadless<'a> {
         page.set_user_agent(&self.config.zoom.user_agent).await?;
 
         let mut name_counts: HashMap<String, usize> = HashMap::new();
+        println!("Starting capture and download (tokens expire quickly, processing one by one)...");
+        println!("Processing {} recordings (capture → download → next)...\n", files_to_download.len());
+
         let mut cookies_captured = false;
 
-        println!("Processing {} recordings (capture → download → next)...", files.len());
-
-        for (idx, file) in files.iter().enumerate() {
-            println!("\n[{}/{}] Processing: {}", idx + 1, files.len(), file.play_url);
+        for (idx, file) in files_to_download.iter().enumerate() {
+            println!("\n[{}/{}] Processing: {}", idx + 1, files_to_download.len(), file.play_url);
 
             // STEP 1: Navigate to play URL
             let mut events = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
@@ -862,118 +821,7 @@ impl<'a> ZoomHeadless<'a> {
         Ok(())
     }
 
-    pub async fn capture_play_url_headers(&self, files: &[ZoomRecordingFile]) -> Result<(), Box<dyn std::error::Error>> {
-         let (mut browser, mut handler) = Browser::launch(
-            BrowserConfig::builder()
-                .with_head() // Headless
-                .arg("--no-sandbox")
-                .arg("--disable-gpu")
-                .build()?,
-        )
-        .await?;
 
-        let handle = tokio::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let page = browser.new_page("about:blank").await?;
-        page.set_user_agent(&self.config.zoom.user_agent).await?;
-
-        // We need to capture the download URL and headers for each file
-        // The logic is: navigate to play_url -> wait for network request to .mp4 or .m3u8
-        
-        let mut stored = self.db.load_replay_headers(self.course_id)?;
-        let mut cookies_captured = false;
-        
-        for file in files {
-            if stored.contains_key(&file.play_url) {
-                continue;
-            }
-            
-            println!("Capturing headers for: {}", file.play_url);
-            
-            let mut events = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
-            page.goto(&file.play_url).await?;
-
-            // Handle authentication if needed (new comprehensive SSO flow)
-            if let Err(e) = self.handle_zoom_play_sso(&page).await {
-                println!("Warning: SSO failed for {}: {:?}", file.play_url, e);
-                println!("Skipping this file and continuing...");
-                continue;
-            }
-
-            // CAPTURE FRESH COOKIES after successful authentication on first file
-            if !cookies_captured {
-                println!("Capturing fresh cookies after SSO authentication...");
-                let current_cookies = page.get_cookies().await?;
-                let mut zoom_cookies = Vec::new();
-                for c in current_cookies {
-                    if c.domain.contains("zoom.us") || c.domain.contains("cloudfront.net") {
-                        zoom_cookies.push(crate::zoom::models::ZoomCookie {
-                            domain: c.domain,
-                            name: c.name,
-                            value: c.value,
-                            path: c.path,
-                            expires: Some(c.expires as i64),
-                            secure: c.secure,
-                            http_only: c.http_only,
-                        });
-                    }
-                }
-                if !zoom_cookies.is_empty() {
-                    self.db.replace_cookies(&zoom_cookies)?;
-                    println!("Saved {} fresh cookies to DB for downloads", zoom_cookies.len());
-                }
-                cookies_captured = true;
-            }
-            
-            // Wait for the media request
-            let start = Instant::now();
-            let mut found = false;
-            
-            while start.elapsed() < Duration::from_secs(30) {
-                 tokio::select! {
-                    event = events.next() => {
-                        if let Some(event) = event {
-                            let url = event.request.url.clone();
-                            if self.is_replay_asset(&url) {
-                                let headers_val = serde_json::to_value(event.request.headers.clone()).unwrap_or(serde_json::Value::Null);
-                                let mut headers = HashMap::new();
-                                if let Some(obj) = headers_val.as_object() {
-                                    for (k, v) in obj {
-                                        headers.insert(k.clone(), v.as_str().unwrap_or("").to_string());
-                                    }
-                                }
-                                
-                                stored.insert(file.play_url.clone(), ReplayHeader {
-                                    download_url: url,
-                                    headers,
-                                });
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    _ = sleep(Duration::from_millis(100)) => {}
-                }
-            }
-            
-            if !found {
-                println!("Warning: Could not capture download URL for {}", file.play_url);
-            }
-        }
-        
-        self.db.save_replay_headers(self.course_id, &stored)?;
-
-        browser.close().await?;
-        handle.await?;
-        
-        Ok(())
-    }
 
     fn is_replay_asset(&self, url: &str) -> bool {
         if let Ok(parsed) = Url::parse(url) {
@@ -991,4 +839,20 @@ impl<'a> ZoomHeadless<'a> {
             false
         }
     }
+}
+
+/// Helper function to scan existing .mp4 files in the recordings directory
+fn scan_existing_recordings(dir: &std::path::Path) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error>> {
+    let mut existing = std::collections::HashSet::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".mp4") {
+                    existing.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(existing)
 }

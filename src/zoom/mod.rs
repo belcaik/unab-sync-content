@@ -11,7 +11,7 @@ use db::ZoomDb;
 use headless::ZoomHeadless;
 use models::{RecordingSummary, ZoomRecordingFile};
 use std::error::Error;
-use tracing::{error, info};
+use tracing::info;
 
 pub async fn zoom_flow(
     course_id: u64,

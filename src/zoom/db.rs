@@ -1,7 +1,6 @@
-use crate::zoom::models::{RecordingListResponse, ReplayHeader, ZoomCookie, ZoomRecordingFile};
+use crate::zoom::models::{RecordingListResponse, ZoomCookie, ZoomRecordingFile};
 use chrono::Utc;
 use rusqlite::{params, Connection};
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -95,7 +94,7 @@ impl ZoomDb {
         let mut rows = stmt.query(params![course_id.to_string()])?;
         if let Some(row) = rows.next()? {
             let scid: String = row.get(0)?;
-            println!("DB: Found scid for course {}", course_id);
+
             Ok(Some(scid))
         } else {
             println!("DB: No scid found for course {}", course_id);
@@ -180,7 +179,7 @@ impl ZoomDb {
             tx.commit()?;
         }
 
-        println!("DB: Loaded {} valid cookies", valid.len());
+
         Ok(valid)
     }
 
@@ -244,62 +243,7 @@ impl ZoomDb {
         Ok(headers)
     }
 
-    pub fn save_replay_headers(
-        &self,
-        course_id: u64,
-        entries: &std::collections::HashMap<String, ReplayHeader>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM zoom_replay_headers WHERE course_id = ?1",
-            params![course_id.to_string()],
-        )?;
-        for (referer, entry) in entries {
-            let headers_json = serde_json::to_string(&entry.headers)?;
-            tx.execute(
-                "INSERT INTO zoom_replay_headers(course_id, referer, download_url, headers, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    course_id.to_string(),
-                    referer,
-                    entry.download_url,
-                    headers_json,
-                    Utc::now().timestamp(),
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
 
-    pub fn load_replay_headers(
-        &self,
-        course_id: u64,
-    ) -> Result<std::collections::HashMap<String, ReplayHeader>, Box<dyn std::error::Error>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            "SELECT referer, download_url, headers FROM zoom_replay_headers WHERE course_id = ?1",
-        )?;
-        let mut rows = stmt.query(params![course_id.to_string()])?;
-
-        let mut map = std::collections::HashMap::new();
-        while let Some(row) = rows.next()? {
-            let referer: String = row.get(0)?;
-            let download_url: String = row.get(1)?;
-            let headers_json: String = row.get(2)?;
-            let headers: std::collections::HashMap<String, String> =
-                serde_json::from_str(&headers_json)?;
-            map.insert(
-                referer,
-                ReplayHeader {
-                    download_url,
-                    headers,
-                },
-            );
-        }
-        Ok(map)
-    }
 
     pub fn save_meetings(
         &self,
@@ -333,20 +277,7 @@ impl ZoomDb {
         Ok(())
     }
 
-    pub fn load_meeting_payloads(
-        &self,
-        course_id: u64,
-    ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-        let conn = self.connection()?;
-        let mut stmt = conn.prepare("SELECT payload FROM zoom_meetings WHERE course_id = ?1")?;
-        let mut rows = stmt.query(params![course_id.to_string()])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let payload: String = row.get(0)?;
-            out.push(serde_json::from_str(&payload)?);
-        }
-        Ok(out)
-    }
+
 
     pub fn save_files(
         &self,
