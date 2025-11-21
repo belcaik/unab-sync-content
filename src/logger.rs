@@ -8,7 +8,7 @@ pub fn init_logging(cfg: Option<&Config>) {
         (c.logging.level.clone(), PathBuf::from(&c.logging.file))
     } else {
         // Fallback to default path inside config dir
-        let paths = ConfigPaths::default().ok();
+        let paths = ConfigPaths::new().ok();
         let p = paths
             .as_ref()
             .map(|p| p.config_dir.join("u_crawler.log"))

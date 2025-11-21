@@ -107,7 +107,7 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_init() -> Result<Self, ConfigError> {
-        let paths = ConfigPaths::default()?;
+        let paths = ConfigPaths::new()?;
         if !paths.config_file.exists() {
             if let Some(parent) = paths.config_file.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -155,10 +155,8 @@ impl Config {
             missing.push("canvas.token or canvas.token_cmd".to_string());
         }
 
-        if self.zoom.enabled {
-            if self.zoom.ffmpeg_path.trim().is_empty() {
-                missing.push("zoom.ffmpeg_path".to_string());
-            }
+        if self.zoom.enabled && self.zoom.ffmpeg_path.trim().is_empty() {
+            missing.push("zoom.ffmpeg_path".to_string());
         }
 
         if !missing.is_empty() {
@@ -197,7 +195,7 @@ pub struct ConfigPaths {
 }
 
 impl ConfigPaths {
-    pub fn default() -> Result<Self, ConfigError> {
+    pub fn new() -> Result<Self, ConfigError> {
         let proj = ProjectDirs::from("", "", "u_crawler").ok_or(ConfigError::NoConfigDir)?;
         let dir = proj.config_dir().to_path_buf();
         let file = dir.join("config.toml");

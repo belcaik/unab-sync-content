@@ -67,6 +67,7 @@ pub async fn http_download(
 
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(&tmp)
         .await?;

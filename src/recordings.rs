@@ -1,5 +1,4 @@
 use crate::canvas::{CanvasClient, Module};
-use crate::config::ConfigPaths;
 use crate::http::build_http_client;
 use crate::progress::{progress_bar, spinner};
 use regex::Regex;

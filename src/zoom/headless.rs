@@ -98,6 +98,12 @@ impl<'a> ZoomHeadless<'a> {
             .await
             .unwrap();
 
+        // Pre-compile regexes
+        let re_scid = Regex::new(r#"scid\s*:\s*['"]([^'"]+)['"]"#).unwrap();
+        let re_ajax = Regex::new(r#"(?s)ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
+        let re_kv = Regex::new(r#"\{\s*key\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]+)['"]\s*\}"#).unwrap();
+        let re_xsrf = Regex::new(r#"(?i)['"]?x-xsrf-token['"]?\s*:\s*['"]([^'"]+)['"]"#).unwrap();
+
         // Spawn Fetch interception task
         tokio::spawn(async move {
             while let Some(event) = request_paused_events.next().await {
@@ -166,7 +172,7 @@ impl<'a> ZoomHeadless<'a> {
 
                                 // Regex for scid
                                 // scid: "..."
-                                let re_scid = Regex::new(r#"scid\s*:\s*['"]([^'"]+)['"]"#).unwrap();
+                                // scid: "..."
                                 if let Some(caps) = re_scid.captures(chunk) {
                                     if let Some(val) = caps.get(1) {
                                         let s = val.as_str().to_string();
@@ -183,15 +189,13 @@ impl<'a> ZoomHeadless<'a> {
                                 // User says it looks like: ajaxHeaders: [{key: "...", value: "..."}, ...]
                                 // We will capture the content inside ajaxHeaders: [...]
                                 // Use (?s) to allow . to match newlines
-                                let re_ajax =
-                                    Regex::new(r#"(?s)ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
                                 if let Some(caps) = re_ajax.captures(chunk) {
                                     if let Some(ajax_body) = caps.get(1) {
                                         let ajax_body_str = ajax_body.as_str();
                                         // Now extract key-value pairs
                                         // Regex for {key: "...", value: "..."}
                                         // We need to be careful about quotes and spacing
-                                        let re_kv = Regex::new(r#"\{\s*key\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]+)['"]\s*\}"#).unwrap();
+                                        // We need to be careful about quotes and spacing
 
                                         let mut headers = HashMap::new();
                                         for cap in re_kv.captures_iter(ajax_body_str) {
@@ -230,10 +234,6 @@ impl<'a> ZoomHeadless<'a> {
                                 }
 
                                 // Explicitly capture x-xsrf-token if missed (sometimes it's in a different format or location)
-                                let re_xsrf = Regex::new(
-                                    r#"(?i)['"]?x-xsrf-token['"]?\s*:\s*['"]([^'"]+)['"]"#,
-                                )
-                                .unwrap();
                                 if let Some(caps) = re_xsrf.captures(chunk) {
                                     if let Some(val) = caps.get(1) {
                                         let mut data = captured_data_clone.lock().unwrap();
@@ -279,9 +279,8 @@ impl<'a> ZoomHeadless<'a> {
                 let url = event.request.url.clone();
                 let mut data = captured_data_clone_for_fetch.lock().unwrap();
 
-                // Capture lti_scid from URL query params (fallback)
                 if data.0.is_none() && url.contains("lti_scid=") {
-                    if let Some(parsed) = Url::parse(&url).ok() {
+                    if let Ok(parsed) = Url::parse(&url) {
                         for (k, v) in parsed.query_pairs() {
                             if k == "lti_scid" {
                                 println!("Captured lti_scid from URL: {}", v);

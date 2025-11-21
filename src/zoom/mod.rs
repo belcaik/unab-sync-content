@@ -19,7 +19,7 @@ pub async fn zoom_flow(
     since: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let cfg = crate::config::Config::load_or_init()?;
-    let paths = ConfigPaths::default()?;
+    let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
     println!("Starting Zoom flow for course {}", course_id);

@@ -1,14 +1,10 @@
-mod canvas;
-mod config;
-mod ffmpeg;
-mod fsutil;
-mod http;
-mod logger;
-mod progress;
-mod recordings;
-mod state;
-mod syncer;
-mod zoom;
+use u_crawler::canvas;
+use u_crawler::config;
+use u_crawler::logger;
+use u_crawler::progress;
+use u_crawler::recordings;
+use u_crawler::syncer;
+use u_crawler::zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use config::{load_config_from_path, save_config_to_path, Config, ConfigError, ConfigPaths};
@@ -228,7 +224,7 @@ async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let paths = ConfigPaths::default()?;
+    let paths = ConfigPaths::new()?;
 
     // Load or init, but if it was just created (MissingConfigFile), we proceed with default config
     let mut cfg = match Config::load_or_init() {
@@ -290,7 +286,7 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
     } else {
         let courses = client.list_courses().await?;
         let pb = progress_bar(courses.len() as u64, "Courses");
-        pb.println("Courses:".to_string());
+        pb.println("Courses:");
         for c in courses {
             let code = c.course_code.unwrap_or_default();
             pb.inc(1);
