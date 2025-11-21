@@ -4,7 +4,7 @@ pub mod download;
 pub mod headless;
 pub mod models;
 
-use crate::config::{load_config_from_path, ConfigPaths};
+use crate::config::ConfigPaths;
 use crate::progress::progress_bar;
 use api::{ZoomApiError, ZoomClient};
 use db::ZoomDb;
@@ -18,9 +18,8 @@ pub async fn zoom_flow(
     concurrency: usize,
     since: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
+    let cfg = crate::config::Config::load_or_init()?;
     let paths = ConfigPaths::default()?;
-    let mut cfg = load_config_from_path(&paths.config_file).await?;
-    cfg.expand_paths();
     let db = ZoomDb::new(&paths.config_dir)?;
 
     println!("Starting Zoom flow for course {}", course_id);
@@ -29,13 +28,25 @@ pub async fn zoom_flow(
     let scid = db.get_scid(course_id)?;
     let cookies = db.load_cookies()?;
     let headers = db.get_all_request_headers(course_id)?;
-    
+
     let headless = ZoomHeadless::new(&cfg, &db, course_id);
-    
-    let xsrf_token = headers.iter().find(|(k, _)| k.to_lowercase() == "x-xsrf-token").map(|(_, v)| v);
-    let zm_aid = headers.iter().find(|(k, _)| k.to_lowercase() == "x-zm-aid").map(|(_, v)| v);
-    let zm_cluster_id = headers.iter().find(|(k, _)| k.to_lowercase() == "x-zm-cluster-id").map(|(_, v)| v);
-    let zm_haid = headers.iter().find(|(k, _)| k.to_lowercase() == "x-zm-haid").map(|(_, v)| v);
+
+    let xsrf_token = headers
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
+        .map(|(_, v)| v);
+    let zm_aid = headers
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "x-zm-aid")
+        .map(|(_, v)| v);
+    let zm_cluster_id = headers
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "x-zm-cluster-id")
+        .map(|(_, v)| v);
+    let zm_haid = headers
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == "x-zm-haid")
+        .map(|(_, v)| v);
 
     info!(
         "SESSION FROM DB -> course_id={}: lti_scid={:?}, xsrf_token={:?}, zm_aid={:?}, zm_cluster_id={:?}, zm_haid={:?}, cookies_count={}",
@@ -48,11 +59,11 @@ pub async fn zoom_flow(
         cookies.len(),
     );
 
-    let has_min_creds = scid.is_some() 
-        && !cookies.is_empty() 
-        && xsrf_token.is_some() 
-        && zm_aid.is_some() 
-        && zm_cluster_id.is_some() 
+    let has_min_creds = scid.is_some()
+        && !cookies.is_empty()
+        && xsrf_token.is_some()
+        && zm_aid.is_some()
+        && zm_cluster_id.is_some()
         && zm_haid.is_some();
 
     let mut valid_session = false;
@@ -80,13 +91,16 @@ pub async fn zoom_flow(
         println!("Starting headless capture (SSO + LTI scid + cookies)...");
         headless.authenticate_and_capture().await?;
         println!("Headless capture finished.");
-        
+
         // Log what we captured
         let scid = db.get_scid(course_id)?;
         let cookies = db.load_cookies()?;
         let headers = db.get_all_request_headers(course_id)?;
-        let xsrf_token = headers.iter().find(|(k, _)| k.to_lowercase() == "x-xsrf-token").map(|(_, v)| v);
-        
+        let xsrf_token = headers
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
+            .map(|(_, v)| v);
+
         info!(
             "HEADLESS RESULT -> course_id={}: lti_scid={:?}, xsrf_token={:?}, cookies_count={}",
             course_id,
@@ -172,7 +186,9 @@ pub async fn zoom_flow(
 
     // 4. Capture play URLs and download immediately (one by one to avoid token expiration)
     println!("Starting capture and download (tokens expire quickly, processing one by one)...");
-    headless.capture_and_download_immediately(&cfg, &db, course_id, all_files, concurrency).await?;
+    headless
+        .capture_and_download_immediately(&cfg, &db, course_id, all_files, concurrency)
+        .await?;
 
     println!("All recordings processed!");
     Ok(())
@@ -184,4 +200,3 @@ fn map_api_err(err: ZoomApiError) -> Box<dyn Error> {
         other => Box::new(other),
     }
 }
-

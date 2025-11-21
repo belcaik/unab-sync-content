@@ -1,5 +1,5 @@
 use crate::canvas::{CanvasClient, Module};
-use crate::config::{load_config_from_path, ConfigPaths};
+use crate::config::ConfigPaths;
 use crate::http::build_http_client;
 use crate::progress::{progress_bar, spinner};
 use regex::Regex;
@@ -9,11 +9,7 @@ pub async fn run_discovery(
     filter_course_id: Option<u64>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let paths = ConfigPaths::default()?;
-    let mut cfg = load_config_from_path(&paths.config_file)
-        .await
-        .unwrap_or_default();
-    cfg.expand_paths();
+    let cfg = crate::config::Config::load_or_init()?;
 
     let canvas = CanvasClient::from_config().await?;
     let _http = build_http_client(&cfg);

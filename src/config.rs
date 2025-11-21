@@ -7,6 +7,10 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("unable to determine config directory")]
     NoConfigDir,
+    #[error("config file missing (created example at {0})")]
+    MissingConfigFile(String),
+    #[error("missing or invalid fields in config: {0:?}")]
+    MissingFields(Vec<String>),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -102,6 +106,68 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn load_or_init() -> Result<Self, ConfigError> {
+        let paths = ConfigPaths::default()?;
+        if !paths.config_file.exists() {
+            if let Some(parent) = paths.config_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let example = Config::default();
+            let toml = toml::to_string_pretty(&example)?;
+            std::fs::write(&paths.config_file, toml)?;
+
+            return Err(ConfigError::MissingConfigFile(
+                paths.config_file.display().to_string(),
+            ));
+        }
+
+        let content = std::fs::read_to_string(&paths.config_file)?;
+        let mut cfg: Config = toml::from_str(&content)?;
+        cfg.postprocess_and_validate()?;
+        Ok(cfg)
+    }
+
+    fn postprocess_and_validate(&mut self) -> Result<(), ConfigError> {
+        // Expand paths first
+        self.expand_paths();
+
+        let mut missing = Vec::new();
+
+        if self.download_root.trim().is_empty() {
+            missing.push("download_root".to_string());
+        }
+
+        if self.canvas.base_url.trim().is_empty() || self.canvas.base_url.contains("<tenant>") {
+            missing.push("canvas.base_url".to_string());
+        }
+
+        // Check token or token_cmd
+        let token_empty = self.canvas.token.as_deref().unwrap_or("").trim().is_empty();
+        let cmd_empty = self
+            .canvas
+            .token_cmd
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty();
+
+        if token_empty && cmd_empty {
+            missing.push("canvas.token or canvas.token_cmd".to_string());
+        }
+
+        if self.zoom.enabled {
+            if self.zoom.ffmpeg_path.trim().is_empty() {
+                missing.push("zoom.ffmpeg_path".to_string());
+            }
+        }
+
+        if !missing.is_empty() {
+            return Err(ConfigError::MissingFields(missing));
+        }
+
+        Ok(())
+    }
+
     /// Expand tildes in path-like fields. No-op if expansion fails.
     pub fn expand_paths(&mut self) {
         if let Some(home) = dirs_next::home_dir() {
@@ -197,13 +263,6 @@ impl Default for Logging {
 
 fn default_tool_id() -> u64 {
     187
-}
-
-/// Synchronous config loader (used before async runtime for logging init).
-pub fn load_config_sync(path: &Path) -> Result<Config, ConfigError> {
-    let text = std::fs::read_to_string(path)?;
-    let cfg: Config = toml::from_str(&text)?;
-    Ok(cfg)
 }
 
 #[cfg(test)]

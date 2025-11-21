@@ -1,4 +1,4 @@
-use crate::config::{load_config_from_path, Config, ConfigPaths};
+use crate::config::Config;
 use crate::http::{build_http_client, parse_next_link};
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
@@ -30,10 +30,7 @@ pub struct CanvasClient {
 
 impl CanvasClient {
     pub async fn from_config() -> Result<Self, CanvasError> {
-        let paths = ConfigPaths::default()?;
-        let cfg = load_config_from_path(&paths.config_file)
-            .await
-            .unwrap_or_default();
+        let cfg = Config::load_or_init()?;
         let http = build_http_client(&cfg);
         let base = Url::parse(&cfg.canvas.base_url)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid base_url"))?;

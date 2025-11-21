@@ -6,7 +6,6 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-
 pub async fn http_download(
     headers: &[(String, String)],
     url: &str,
@@ -101,24 +100,30 @@ pub fn build_ffmpeg_headers(
     cookies: &[crate::zoom::models::ZoomCookie],
     download_url: &str,
 ) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = asset.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    
+    let mut headers: Vec<(String, String)> = asset
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     // Extract domain from download URL
     let domain = if let Ok(url) = url::Url::parse(download_url) {
         url.host_str().unwrap_or("").to_string()
     } else {
         String::new()
     };
-    
+
     // Build Cookie header from saved cookies matching the domain
     let mut cookie_values = Vec::new();
     for cookie in cookies {
         // Match cookies for this domain (ssrweb.zoom.us, zoom.us, etc.)
-        if domain.ends_with(&cookie.domain) || cookie.domain.starts_with('.') && domain.ends_with(&cookie.domain[1..]) {
+        if domain.ends_with(&cookie.domain)
+            || cookie.domain.starts_with('.') && domain.ends_with(&cookie.domain[1..])
+        {
             cookie_values.push(format!("{}={}", cookie.name, cookie.value));
         }
     }
-    
+
     if !cookie_values.is_empty() {
         let cookie_header = cookie_values.join("; ");
 
@@ -126,8 +131,6 @@ pub fn build_ffmpeg_headers(
     } else {
         println!("⚠ Warning: No cookies found for domain {}", domain);
     }
-    
 
     headers
 }
-

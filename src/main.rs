@@ -11,7 +11,7 @@ mod syncer;
 mod zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
-use config::{load_config_from_path, save_config_to_path, Config, ConfigPaths};
+use config::{load_config_from_path, save_config_to_path, Config, ConfigError, ConfigPaths};
 use progress::progress_bar;
 use std::process::ExitCode;
 
@@ -116,16 +116,25 @@ async fn main() -> ExitCode {
 
     // Attempt to init logging from config before executing command.
     // If config missing, fall back to defaults.
+    // Attempt to init logging from config before executing command.
+    // We use load_or_init but ignore errors (logging fallback)
     {
-        if let Ok(paths) = config::ConfigPaths::default() {
-            if let Ok(mut cfg) = config::load_config_sync(&paths.config_file) {
-                cfg.expand_paths();
-                logger::init_logging(Some(&cfg));
-            } else {
+        match config::Config::load_or_init() {
+            Ok(cfg) => logger::init_logging(Some(&cfg)),
+            Err(config::ConfigError::MissingConfigFile(path)) => {
+                eprintln!(
+                    "u_crawler: created example config at {}. Please edit it.",
+                    path
+                );
+                // We exit immediately so the user notices they need to edit the config.
+                // This applies to all commands (since clap parsed args already).
+                std::process::exit(10);
+            }
+            Err(_) => {
+                // Other errors (e.g. validation) will be caught later by specific commands
+                // or we just fall back to default logging.
                 logger::init_logging(None);
             }
-        } else {
-            logger::init_logging(None);
         }
     }
 
@@ -206,25 +215,30 @@ async fn main() -> ExitCode {
 }
 
 async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
-    let paths = ConfigPaths::default()?;
-    let mut cfg = Config::default();
-    cfg.expand_paths();
-
-    tokio::fs::create_dir_all(&paths.config_dir).await?;
-    save_config_to_path(&cfg, &paths.config_file).await?;
-    tracing::info!(path = %paths.config_file.display(), "created config");
-    println!("created config at {}", paths.config_file.display());
+    match Config::load_or_init() {
+        Ok(_paths) => {
+            println!("Config file already exists and is valid.");
+        }
+        Err(ConfigError::MissingConfigFile(path)) => {
+            println!("Created default config at {}", path);
+        }
+        Err(e) => return Err(e.into()),
+    }
     Ok(())
 }
 
 async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::error::Error>> {
     let paths = ConfigPaths::default()?;
-    tokio::fs::create_dir_all(&paths.config_dir).await?;
 
-    // Load existing, or start from default
-    let mut cfg: Config = load_config_from_path(&paths.config_file)
-        .await
-        .unwrap_or_default();
+    // Load or init, but if it was just created (MissingConfigFile), we proceed with default config
+    let mut cfg = match Config::load_or_init() {
+        Ok(c) => c,
+        Err(ConfigError::MissingConfigFile(_)) => {
+            // It was just created, load it again (it's default)
+            load_config_from_path(&paths.config_file).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if let Some(base) = args.base_url {
         cfg.canvas.base_url = base;

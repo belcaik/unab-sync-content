@@ -179,7 +179,6 @@ impl ZoomDb {
             tx.commit()?;
         }
 
-
         Ok(valid)
     }
 
@@ -243,8 +242,6 @@ impl ZoomDb {
         Ok(headers)
     }
 
-
-
     pub fn save_meetings(
         &self,
         course_id: u64,
@@ -277,8 +274,6 @@ impl ZoomDb {
         Ok(())
     }
 
-
-
     pub fn save_files(
         &self,
         _course_id: u64,
@@ -310,6 +305,4 @@ impl ZoomDb {
         tx.commit()?;
         Ok(())
     }
-
-
 }

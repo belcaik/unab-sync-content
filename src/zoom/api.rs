@@ -43,10 +43,8 @@ pub struct ZoomClient {
 
 impl ZoomClient {
     pub async fn new(cfg: &Config, db: &ZoomDb, course_id: u64) -> Result<Self, ZoomApiError> {
-        let scid = db
-            .get_scid(course_id)
-            .map_err(ZoomApiError::Db)?;
-        
+        let scid = db.get_scid(course_id).map_err(ZoomApiError::Db)?;
+
         if let Some(ref s) = scid {
             info!("Loaded scid from DB: {}", s);
         } else {
@@ -76,21 +74,27 @@ impl ZoomClient {
             // We can construct a dummy URL from the domain.
             let url_str = format!("https://{}{}", c.domain.trim_start_matches('.'), c.path);
             if let Ok(url) = Url::parse(&url_str) {
-                 let _ = cookie_store.insert_raw(&cookie, &url);
+                let _ = cookie_store.insert_raw(&cookie, &url);
             }
         }
         let cookie_store = Arc::new(CookieStoreMutex::new(cookie_store));
 
         // Build headers
         let mut headers = HeaderMap::new();
-        headers.insert("User-Agent", HeaderValue::from_str(&effective_user_agent(cfg)).unwrap());
-        headers.insert("Referer", HeaderValue::from_static("https://applications.zoom.us/lti/advantage"));
+        headers.insert(
+            "User-Agent",
+            HeaderValue::from_str(&effective_user_agent(cfg)).unwrap(),
+        );
+        headers.insert(
+            "Referer",
+            HeaderValue::from_static("https://applications.zoom.us/lti/advantage"),
+        );
 
         // Load ajaxHeaders
         let stored_headers = db
             .get_all_request_headers(course_id)
             .map_err(ZoomApiError::Db)?;
-        
+
         info!(
             "ZoomClient headers from DB -> course_id={}, count={}",
             course_id,
@@ -108,7 +112,9 @@ impl ZoomClient {
         // Log the headers we just configured (filtering sensitive values if needed, but x-zm keys are useful)
         for (name, value) in headers.iter() {
             if let Ok(v) = value.to_str() {
-                if name.as_str().starts_with("x-zm") || name.as_str().eq_ignore_ascii_case("x-xsrf-token") {
+                if name.as_str().starts_with("x-zm")
+                    || name.as_str().eq_ignore_ascii_case("x-xsrf-token")
+                {
                     info!("ZoomClient header: {} = {}", name, v);
                 }
             }
@@ -131,7 +137,7 @@ impl ZoomClient {
             Ok(u) => u,
             Err(_) => return false,
         };
-        
+
         {
             let mut qp = url.query_pairs_mut();
             qp.append_pair("startTime", "");
@@ -147,7 +153,7 @@ impl ZoomClient {
         debug!(url = %url, "validating Zoom cookies");
 
         // We use a separate client or the existing one? Existing one has cookies.
-        // We need to ensure we don't follow redirects to detect 302 easily, 
+        // We need to ensure we don't follow redirects to detect 302 easily,
         // OR we check if the final URL is still the API URL.
         // But `self.client` is already built.
         // Let's just check status 200.
@@ -164,7 +170,7 @@ impl ZoomClient {
                             }
                         }
                     }
-                    // If content-type check fails or is missing, but status is 200, 
+                    // If content-type check fails or is missing, but status is 200,
                     // it might still be valid or it might be a 200 OK login page.
                     // Let's assume if it's not JSON it's suspicious for an API call.
                     warn!("Zoom cookies validation: HTTP 200 but Content-Type not JSON");
@@ -211,8 +217,10 @@ impl ZoomClient {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
                 warn!(status = %status, body = %text, "Zoom recordings request failed");
-                if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-                     return Err(ZoomApiError::Message(format!(
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return Err(ZoomApiError::Message(format!(
                         "Zoom returned {} (likely cookies/headers invalid): {}",
                         status, text
                     )));
@@ -220,9 +228,8 @@ impl ZoomClient {
                 return Err(ZoomApiError::Message(format!("HTTP {} - {}", status, text)));
             }
 
-
             let payload: RecordingListResponse = resp.json().await?;
-            
+
             if let Some(result) = &payload.result {
                 total_expected = total_expected.or(result.total);
                 if let Some(list) = &result.list {
@@ -230,16 +237,16 @@ impl ZoomClient {
                         break;
                     }
                     all.extend(list.clone());
-                    
+
                     // Check if we have all
                     if let Some(total) = total_expected {
                         if all.len() as i64 >= total {
                             break;
                         }
                     }
-                    
+
                     // Check if page is full
-                     if result.page_size.unwrap_or_default() as usize > list.len() {
+                    if result.page_size.unwrap_or_default() as usize > list.len() {
                         break;
                     }
                 } else {
@@ -281,13 +288,15 @@ impl ZoomClient {
         }
 
         let resp = self.client.get(url.clone()).send().await?;
-        
+
         if !resp.status().is_success() {
-             let status = resp.status();
-             if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-                 return Err(ZoomApiError::MissingState);
-             }
-             return Err(ZoomApiError::Http(resp.error_for_status().unwrap_err()));
+            let status = resp.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ZoomApiError::MissingState);
+            }
+            return Err(ZoomApiError::Http(resp.error_for_status().unwrap_err()));
         }
 
         trace!(status = %resp.status(), meeting_id = %meeting.meeting_id, "Zoom recording files response received");

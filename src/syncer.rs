@@ -1,5 +1,5 @@
 use crate::canvas::{Assignment, CanvasClient, FileObj, Module};
-use crate::config::{Config, ConfigPaths};
+use crate::config::Config;
 use crate::fsutil::{
     atomic_rename, atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
@@ -20,9 +20,7 @@ pub async fn run_sync(
     dry_run: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let paths = ConfigPaths::default()?;
-    let mut cfg = crate::config::load_config_from_path(&paths.config_file).await?;
-    cfg.expand_paths();
+    let cfg = Config::load_or_init()?;
 
     let http = build_http_client(&cfg);
     let httpctx = HttpCtx::new(&cfg, http);
