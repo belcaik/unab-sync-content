@@ -31,6 +31,7 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
+            // .with_head()
                 // Running in full headless mode (no GUI)
                 // Let's try headless first, but maybe provide an option?
                 // The user said "headless browser", so let's stick to headless unless debugging.
@@ -488,30 +489,73 @@ impl<'a> ZoomHeadless<'a> {
         // First, check for remembered account tiles (account picker)
         sleep(Duration::from_secs(2)).await;
 
-        // Look for account tiles - the clickable element is .table[role="button"] inside .tile-container
-        if let Ok(tiles) = page.find_elements(".table[role='button']").await {
-            if !tiles.is_empty() {
-                println!(
-                    "Found {} remembered account tile(s), attempting to click the first one...",
-                    tiles.len()
-                );
-                if let Some(tile) = tiles.first() {
-                    if let Err(e) = tile.click().await {
-                        println!("Warning: Failed to click account tile: {:?}", e);
-                    } else {
-                        println!("Clicked remembered account tile");
-                        sleep(Duration::from_secs(3)).await;
+        let email_input_present = page.find_element("input[type='email']").await.is_ok()
+            || page.find_element("input[name='loginfmt']").await.is_ok();
 
-                        // Handle "Stay signed in?" if it appears after clicking tile
-                        if page.content().await?.contains("Stay signed in?") {
-                            println!("Handling 'Stay signed in' prompt...");
-                            if page.find_element("#idSIButton9").await.is_ok() {
-                                page.find_element("#idSIButton9").await?.click().await?;
-                            }
+        // Look for account tiles - the clickable element is .table[role="button"] inside .tile-container.
+        // Only attempt this flow if we do not already see the email input.
+        if !email_input_present {
+            if let Ok(tiles) = page.find_elements(".table[role='button']").await {
+                if !tiles.is_empty() {
+                    let mut matching_tile_idx = None;
+                    let mut first_email_tile_idx = None;
+                    let mut use_other_tile_idx = None;
+
+                    let normalized_email = self
+                        .config
+                        .canvas
+                        .sso_email
+                        .as_ref()
+                        .map(|email| email.to_lowercase());
+
+                    for (idx, tile) in tiles.iter().enumerate() {
+                        let text = tile.inner_text().await?.unwrap_or_default();
+                        let lowered = text.to_lowercase();
+
+                        if lowered.contains("sign-in options")
+                            || lowered.contains("other ways to sign in")
+                            || lowered.contains("otros metodos")
+                            || lowered.contains("otras formas")
+                        {
+                            continue;
                         }
 
-                        sleep(Duration::from_secs(5)).await;
-                        return Ok(());
+                        if lowered.contains("use another account")
+                            || lowered.contains("usar otra cuenta")
+                            || lowered.contains("otra cuenta")
+                        {
+                            if use_other_tile_idx.is_none() {
+                                use_other_tile_idx = Some(idx);
+                            }
+                            continue;
+                        }
+
+                        if lowered.contains('@') {
+                            if first_email_tile_idx.is_none() {
+                                first_email_tile_idx = Some(idx);
+                            }
+                            if let Some(email) = &normalized_email {
+                                if lowered.contains(email) {
+                                    matching_tile_idx = Some(idx);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let selected_idx = match (matching_tile_idx, normalized_email.as_ref()) {
+                        (Some(idx), _) => Some(idx),
+                        (None, Some(_)) => use_other_tile_idx.or(first_email_tile_idx),
+                        (None, None) => first_email_tile_idx,
+                    };
+
+                    if let Some(idx) = selected_idx {
+                        println!("Found remembered account tile, clicking...");
+                        if let Err(e) = tiles[idx].click().await {
+                            println!("Warning: Failed to click account tile: {:?}", e);
+                        } else {
+                            sleep(Duration::from_secs(3)).await;
+                        }
                     }
                 }
             }
@@ -521,37 +565,57 @@ impl<'a> ZoomHeadless<'a> {
         if let Some(email) = &self.config.canvas.sso_email {
             println!("Attempting to enter email...");
             // Selector for email input. Usually 'input[type="email"]' or 'input[name="loginfmt"]'
-            if page.find_element("input[type='email']").await.is_ok() {
-                page.find_element("input[type='email']")
-                    .await?
-                    .click()
-                    .await?
-                    .type_str(email)
-                    .await?;
-                page.find_element("input[type='submit']")
-                    .await?
-                    .click()
-                    .await?; // "Next" button
+            if let Ok(input) = page.find_element("input[type='email']").await {
+                input.click().await?.type_str(email).await?;
+                if let Ok(button) = page.find_element("input[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("button[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("#idSIButton9").await {
+                    button.click().await?;
+                }
+                sleep(Duration::from_secs(2)).await;
+            } else if let Ok(input) = page.find_element("input[name='loginfmt']").await {
+                input.click().await?.type_str(email).await?;
+                if let Ok(button) = page.find_element("input[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("button[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("#idSIButton9").await {
+                    button.click().await?;
+                }
                 sleep(Duration::from_secs(2)).await;
             }
+        } else {
+            println!("Warning: sso_email not set; skipping email entry.");
         }
 
         if let Some(password) = &self.config.canvas.sso_password {
             println!("Attempting to enter password...");
             // Selector for password input. 'input[type="password"]' or 'input[name="passwd"]'
-            if page.find_element("input[type='password']").await.is_ok() {
-                page.find_element("input[type='password']")
-                    .await?
-                    .click()
-                    .await?
-                    .type_str(password)
-                    .await?;
-                page.find_element("input[type='submit']")
-                    .await?
-                    .click()
-                    .await?; // "Sign in" button
+            if let Ok(input) = page.find_element("input[type='password']").await {
+                input.click().await?.type_str(password).await?;
+                if let Ok(button) = page.find_element("input[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("button[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("#idSIButton9").await {
+                    button.click().await?;
+                }
+                sleep(Duration::from_secs(2)).await;
+            } else if let Ok(input) = page.find_element("input[name='passwd']").await {
+                input.click().await?.type_str(password).await?;
+                if let Ok(button) = page.find_element("input[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("button[type='submit']").await {
+                    button.click().await?;
+                } else if let Ok(button) = page.find_element("#idSIButton9").await {
+                    button.click().await?;
+                }
                 sleep(Duration::from_secs(2)).await;
             }
+        } else {
+            println!("Warning: sso_password not set; skipping password entry.");
         }
 
         // "Stay signed in?" - usually has a "Yes" button (input[type="submit"] or button)
