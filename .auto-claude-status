@@ -1,0 +1,25 @@
+{
+  "active": true,
+  "spec": "002-improve-documentation",
+  "state": "complete",
+  "subtasks": {
+    "completed": 4,
+    "total": 4,
+    "in_progress": 0,
+    "failed": 0
+  },
+  "phase": {
+    "current": "Add Troubleshooting",
+    "id": null,
+    "total": 1
+  },
+  "workers": {
+    "active": 0,
+    "max": 1
+  },
+  "session": {
+    "number": 5,
+    "started_at": "2026-01-15T01:11:36.423924"
+  },
+  "last_update": "2026-01-15T01:21:35.970612"
+}

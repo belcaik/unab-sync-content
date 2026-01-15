@@ -58,7 +58,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Operaciones avanzadas con Zoom (CDP, listados, descargas)
+    /// Advanced Zoom operations (CDP, listing, downloads)
     Zoom {
         #[command(subcommand)]
         command: ZoomCommands,
