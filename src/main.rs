@@ -346,6 +346,8 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(count = course_dirs.len(), "found course directories");
 
+    println!("Backup Status:\n");
+
     // Load state from each course directory
     for course_dir in &course_dirs {
         let state_path = course_dir.join("state.json");
@@ -356,16 +358,64 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
+        // Calculate statistics
+        let file_count = state.items.len();
+        let mut total_size: u64 = 0;
+        let mut last_updated: Option<String> = None;
+
+        for item in state.items.values() {
+            // Sum up file sizes
+            if let Some(size) = item.size {
+                total_size += size;
+            }
+
+            // Find most recent updated_at
+            if let Some(ref updated) = item.updated_at {
+                match &last_updated {
+                    None => last_updated = Some(updated.clone()),
+                    Some(current) => {
+                        if updated > current {
+                            last_updated = Some(updated.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         info!(
             course = course_name,
-            items = state.items.len(),
+            items = file_count,
+            size = total_size,
             "loaded course state"
         );
 
-        // Basic output for now - detailed stats will be added in next subtask
+        // Display course statistics
         println!("Course: {}", course_name);
-        println!("  Items tracked: {}", state.items.len());
+        println!("  Files: {}", file_count);
+        println!("  Storage: {}", format_bytes(total_size));
+        if let Some(timestamp) = last_updated {
+            println!("  Last sync: {}", timestamp);
+        } else {
+            println!("  Last sync: Never");
+        }
+        println!();
     }
 
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
 }
