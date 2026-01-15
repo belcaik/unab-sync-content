@@ -1,0 +1,39 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read(./**)",
+      "Write(./**)",
+      "Edit(./**)",
+      "Glob(./**)",
+      "Grep(./**)",
+      "Read(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/**)",
+      "Write(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/**)",
+      "Edit(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/**)",
+      "Glob(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/**)",
+      "Grep(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/**)",
+      "Read(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/.auto-claude/specs/002-improve-documentation/**)",
+      "Write(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/.auto-claude/specs/002-improve-documentation/**)",
+      "Edit(/home/belcaik/Dev/u_crawler/.auto-claude/worktrees/tasks/002-improve-documentation/.auto-claude/specs/002-improve-documentation/**)",
+      "Read(/home/belcaik/Dev/u_crawler/.auto-claude/**)",
+      "Write(/home/belcaik/Dev/u_crawler/.auto-claude/**)",
+      "Edit(/home/belcaik/Dev/u_crawler/.auto-claude/**)",
+      "Glob(/home/belcaik/Dev/u_crawler/.auto-claude/**)",
+      "Grep(/home/belcaik/Dev/u_crawler/.auto-claude/**)",
+      "Bash(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "mcp__context7__resolve-library-id(*)",
+      "mcp__context7__get-library-docs(*)",
+      "mcp__graphiti-memory__search_nodes(*)",
+      "mcp__graphiti-memory__search_facts(*)",
+      "mcp__graphiti-memory__add_episode(*)",
+      "mcp__graphiti-memory__get_episodes(*)",
+      "mcp__graphiti-memory__get_entity_edge(*)"
+    ]
+  }
+}
