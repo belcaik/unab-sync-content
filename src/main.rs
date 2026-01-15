@@ -348,6 +348,10 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Backup Status:\n");
 
+    // Track totals across all courses
+    let mut total_files: usize = 0;
+    let mut total_storage: u64 = 0;
+
     // Load state from each course directory
     for course_dir in &course_dirs {
         let state_path = course_dir.join("state.json");
@@ -360,13 +364,13 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
 
         // Calculate statistics
         let file_count = state.items.len();
-        let mut total_size: u64 = 0;
+        let mut course_size: u64 = 0;
         let mut last_updated: Option<String> = None;
 
         for item in state.items.values() {
             // Sum up file sizes
             if let Some(size) = item.size {
-                total_size += size;
+                course_size += size;
             }
 
             // Find most recent updated_at
@@ -382,17 +386,21 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Accumulate totals
+        total_files += file_count;
+        total_storage += course_size;
+
         info!(
             course = course_name,
             items = file_count,
-            size = total_size,
+            size = course_size,
             "loaded course state"
         );
 
         // Display course statistics
         println!("Course: {}", course_name);
         println!("  Files: {}", file_count);
-        println!("  Storage: {}", format_bytes(total_size));
+        println!("  Storage: {}", format_bytes(course_size));
         if let Some(timestamp) = last_updated {
             println!("  Last sync: {}", timestamp);
         } else {
@@ -400,6 +408,15 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!();
     }
+
+    // Display totals summary
+    println!("─────────────────────────────");
+    println!(
+        "Total: {} courses, {} files, {}",
+        course_dirs.len(),
+        total_files,
+        format_bytes(total_storage)
+    );
 
     Ok(())
 }
