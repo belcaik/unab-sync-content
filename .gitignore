@@ -3,3 +3,6 @@ secret
 # Added by cargo
 
 /target
+
+# Auto Claude data directory
+.auto-claude/
