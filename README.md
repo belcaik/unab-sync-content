@@ -236,6 +236,96 @@ The new `zoom flow` command automates the entire cycle:
 
 The final result is stored under `download_root/Zoom/<course_id>/`. Each download uses `.part` and `Range` to allow safe retries.
 
+Troubleshooting
+---------------
+
+### Common Issues
+
+#### ffmpeg not found
+
+**Problem:** Error message "ffmpeg missing" or exit code 13.
+
+**Solution:**
+- Verify ffmpeg is installed: `ffmpeg -version`
+- On Windows, ensure ffmpeg is in your PATH or set `zoom.ffmpeg_path` in config.toml to the full path (e.g., `C:\ffmpeg\bin\ffmpeg.exe`)
+- On Linux/macOS, install via package manager or set absolute path in config
+
+#### Zoom authentication fails
+
+**Problem:** CDP flow times out or doesn't capture credentials.
+
+**Solution:**
+- Ensure browser is launched with remote debugging:
+  ```bash
+  chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
+  ```
+- Log into Canvas manually in that browser instance before running `zoom flow`
+- Complete any SSO prompts (Microsoft, etc.) in the popup tab when asked
+- Try increasing timeout or use `--debug-port` if using a different port
+
+#### Canvas authentication fails
+
+**Problem:** "auth error" or exit code 11.
+
+**Solution:**
+- Verify your Personal Access Token (PAT) is valid and not expired
+- Check base-url matches your Canvas instance (e.g., `https://canvas.instructure.com`)
+- If using `token_cmd`, ensure the command executes successfully:
+  ```bash
+  # Test your token command
+  pass show canvas/pat
+  ```
+- Re-run authentication: `cargo run -- auth canvas --base-url <url> --token <PAT>`
+
+#### Rate limit errors
+
+**Problem:** Network/rate-limit error (exit code 12).
+
+**Solution:**
+- Reduce `max_rps` in config.toml (e.g., from 2 to 1)
+- Reduce `concurrency` for downloads (e.g., from 4 to 2)
+- Wait a few minutes before retrying
+- Check if your Canvas instance has stricter rate limits
+
+#### Partial download failures
+
+**Problem:** Some files fail to download (exit code 15).
+
+**Solution:**
+- Re-run the same command; downloads are resumable (`.part` files)
+- Check disk space and permissions in `download_root`
+- Use `--verbose` to see which items failed and why
+- Check logs at `~/.config/u_crawler/u_crawler.log` with `level = "debug"`
+
+#### Zoom recordings don't download
+
+**Problem:** Zoom videos are listed but fail to download.
+
+**Solution:**
+- Verify you have download permissions for the recordings in Zoom
+- Ensure ffmpeg is working: `ffmpeg -version`
+- Check that CDP captured valid headers (exit code 14 indicates no download rights)
+- Try manual flow: `zoom sniff-cdp`, then `zoom list`, then `zoom dl`
+- Review logs for specific error messages
+
+#### Config file not found
+
+**Problem:** Tool can't find or read config.toml.
+
+**Solution:**
+- Run `cargo run -- init` to create default config
+- Manually create `~/.config/u_crawler/config.toml` (or `%APPDATA%\u_crawler\config.toml` on Windows)
+- Verify file permissions allow reading
+- Check that the directory exists
+
+### Getting More Help
+
+If issues persist:
+1. Set `level = "debug"` in `[logging]` section of config.toml
+2. Re-run the failing command
+3. Check the log file at `~/.config/u_crawler/u_crawler.log`
+4. Include relevant log excerpts when reporting issues
+
 Notes
 -----
 
