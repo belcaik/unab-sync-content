@@ -59,19 +59,19 @@ cargo run -- sync --course-id 123456         # one course
 cargo run -- sync --course-id 123456 --verbose   # also show skipped items
 ```
 
-8) Respaldar grabaciones Zoom del curso (sniff + captura + descarga en un solo flujo)
+8) Back up Zoom course recordings (sniff + capture + download in a single flow)
 
 ```
-# Lanza previamente Chromium/Edge con debug remoto:
+# First launch Chromium/Edge with remote debugging:
 #   chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
 
 cargo run -- zoom flow --course-id 123456
 
-# Opcionales:
-#   --debug-port <puerto>    puerto CDP (default 9222)
-#   --keep-tab               deja abierta la pestaña de captura
-#   --concurrency <n>        descargas en paralelo (default 1)
-#   --since YYYY-MM-DD       filtra reuniones desde esa fecha
+# Optional:
+#   --debug-port <port>      CDP port (default 9222)
+#   --keep-tab               keep the capture tab open
+#   --concurrency <n>        parallel downloads (default 1)
+#   --since YYYY-MM-DD       filter meetings from that date
 ```
 
 Configuration
@@ -99,8 +99,8 @@ file  = "~/.config/u_crawler/u_crawler.log"
 
 [zoom]
 enabled = true
-ffmpeg_path = "ffmpeg"                       # ruta al binario ffmpeg
-cookie_file = "~/.config/u_crawler/zoom_cookies.txt"  # legado (no se usa con CDP)
+ffmpeg_path = "ffmpeg"                       # path to ffmpeg binary
+cookie_file = "~/.config/u_crawler/zoom_cookies.txt"  # legacy (not used with CDP)
 user_agent = "Mozilla/5.0"
 external_tool_id = 187
 ```
@@ -108,25 +108,25 @@ external_tool_id = 187
 Zoom recordings workflow
 -----------------------
 
-The new `zoom flow` command automatiza todo el ciclo:
+The new `zoom flow` command automates the entire cycle:
 
-1. **Preparación**
-   - Inicia Chromium/Edge con `--remote-debugging-port` (default 9222) apuntando al perfil donde ya iniciaste sesión en Canvas/SSO.
-   - Asegúrate de tener `ffmpeg` disponible (configurable en `zoom.ffmpeg_path`).
+1. **Preparation**
+   - Launch Chromium/Edge with `--remote-debugging-port` (default 9222) pointing to the profile where you've already logged into Canvas/SSO.
+   - Make sure you have `ffmpeg` available (configurable in `zoom.ffmpeg_path`).
 2. **Sniff CDP**
-   - La herramienta abre `courses/{course}/external_tools/{external_tool_id}` en una pestaña controlada.
-   - Captura `lti_scid`, cookies de `applications.zoom.us`, cabeceras API y, si detecta botones de descarga, clona las peticiones MP4.
-   - Durante el flujo CDP puede pedirte completar SSO (Microsoft); hazlo en la pestaña emergente.
-3. **Listado y captura**
-   - Se consulta `applications.zoom.us` para enumerar reuniones y `playUrl` asociados.
-   - Para cada `playUrl` se abre una pestaña efímera vía CDP, se siguen redirecciones y se almacenan las cabeceras firmadas necesarias para descargar.
-4. **Descarga**
-   - primero intenta `ffmpeg -c copy` con los encabezados capturados;
-   - si Zoom rechaza el lector de `ffmpeg`, hace fallback a descarga HTTP directa reanudable y luego guarda el MP4.
+   - The tool opens `courses/{course}/external_tools/{external_tool_id}` in a controlled tab.
+   - Captures `lti_scid`, `applications.zoom.us` cookies, API headers, and if it detects download buttons, clones the MP4 requests.
+   - During the CDP flow it may ask you to complete SSO (Microsoft); do so in the popup tab.
+3. **Listing and capture**
+   - Queries `applications.zoom.us` to enumerate meetings and associated `playUrl`s.
+   - For each `playUrl` an ephemeral tab is opened via CDP, redirects are followed, and the signed headers necessary for downloading are stored.
+4. **Download**
+   - first attempts `ffmpeg -c copy` with the captured headers;
+   - if Zoom rejects `ffmpeg`'s reader, falls back to resumable direct HTTP download and then saves the MP4.
 
-El resultado final se almacena bajo `download_root/Zoom/<course_id>/`. Cada descarga usa `.part` y `Range` para permitir reintentos seguros.
+The final result is stored under `download_root/Zoom/<course_id>/`. Each download uses `.part` and `Range` to allow safe retries.
 
-Notas
+Notes
 -----
 
 - Sync writes Markdown for module pages and assignment instructions, and downloads linked attachments (PDF/DOCX/PNG/etc.), preserving file extensions.
@@ -134,8 +134,8 @@ Notas
 - `ignored_courses` prevents syncing specific courses in both bulk and per-course modes.
 - Dry-run prints a plan without writing files or state; `--verbose` in normal mode prints details about skipped items (unchanged pages/files).
 - Logs are written to the file configured in `[logging]`. For troubleshooting API issues, set `level = "debug"` and rerun commands.
-- `zoom flow` es idempotente: si una descarga falla puedes repetir el comando; reutilizará cabeceras ya guardadas y reanudará desde `.part`.
-- El comando también mantiene disponibles las utilidades anteriores (`zoom sniff-cdp`, `zoom list`, `zoom fetch-urls`, `zoom dl`) para flujos avanzados o manuales.
+- `zoom flow` is idempotent: if a download fails you can repeat the command; it will reuse already saved headers and resume from `.part`.
+- The command also keeps the previous utilities available (`zoom sniff-cdp`, `zoom list`, `zoom fetch-urls`, `zoom dl`) for advanced or manual workflows.
 
 Exit Codes
 ----------
