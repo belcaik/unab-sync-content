@@ -65,7 +65,11 @@ enum Commands {
         command: ZoomCommands,
     },
     /// Show last run, pending items, failed jobs
-    Status,
+    Status {
+        /// Show detailed information including failed items
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Verify checksums, remove .part leftovers
     Clean,
 }
@@ -200,7 +204,7 @@ async fn main() -> ExitCode {
                 }
             },
         },
-        Commands::Status => match handle_status().await {
+        Commands::Status { verbose } => match handle_status(verbose).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 tracing::error!(error = %e, "status failed");
@@ -311,7 +315,7 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::path::PathBuf;
     use tracing::info;
 
@@ -366,6 +370,9 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
         let file_count = state.items.len();
         let mut course_size: u64 = 0;
         let mut last_updated: Option<String> = None;
+        let failed_items: Vec<_> = state.items.iter()
+            .filter(|(_, item)| item.last_error.is_some())
+            .collect();
 
         for item in state.items.values() {
             // Sum up file sizes
@@ -406,6 +413,29 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!("  Last sync: Never");
         }
+
+        // Display failed downloads if any
+        if !failed_items.is_empty() {
+            println!("  Failed downloads: {} items need retry", failed_items.len());
+            if verbose {
+                for (key, item) in &failed_items {
+                    let attempts = item.error_count.unwrap_or(1);
+                    println!("    - {} (failed {} time(s))", key, attempts);
+                    if let Some(err) = &item.last_error {
+                        // Truncate long errors
+                        let err_short: String = if err.len() > 60 {
+                            format!("{}...", &err[..60])
+                        } else {
+                            err.clone()
+                        };
+                        println!("      Error: {}", err_short);
+                    }
+                }
+            } else {
+                println!("      Run with --verbose to see details");
+            }
+        }
+
         println!();
     }
 
@@ -417,6 +447,8 @@ async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
         total_files,
         format_bytes(total_storage)
     );
+    println!();
+    println!("Tip: Run 'u_crawler sync --dry-run' to check for remote changes");
 
     Ok(())
 }
