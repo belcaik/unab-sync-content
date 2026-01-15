@@ -1,6 +1,116 @@
 u_crawler — Canvas/Zoom course backup CLI
 =================================================
 
+Installation
+------------
+
+### Prerequisites
+
+Before installing `u_crawler`, ensure you have:
+
+1. **Rust toolchain** (1.70 or later)
+2. **ffmpeg** (required for Zoom recording downloads)
+3. **Chromium or Edge browser** (for Zoom authentication via CDP)
+
+### Windows Installation
+
+1. **Install Rust:**
+   - Download and run the installer from [rustup.rs](https://rustup.rs/)
+   - Follow the prompts to complete installation
+   - Restart your terminal to update PATH
+
+2. **Install ffmpeg:**
+   - Download from [ffmpeg.org](https://ffmpeg.org/download.html#build-windows)
+   - Extract to a folder (e.g., `C:\ffmpeg`)
+   - Add `C:\ffmpeg\bin` to your system PATH
+
+3. **Install u_crawler:**
+   ```powershell
+   git clone https://github.com/yourusername/u_crawler.git
+   cd u_crawler
+   cargo build --release
+   ```
+
+4. **Optionally add to PATH:**
+   ```powershell
+   # Add target\release to your PATH, or copy the executable
+   copy target\release\u_crawler.exe C:\Windows\System32\
+   ```
+
+### macOS Installation
+
+1. **Install Rust:**
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source $HOME/.cargo/env
+   ```
+
+2. **Install ffmpeg:**
+   ```bash
+   # Using Homebrew
+   brew install ffmpeg
+   ```
+
+3. **Install u_crawler:**
+   ```bash
+   git clone https://github.com/yourusername/u_crawler.git
+   cd u_crawler
+   cargo build --release
+   ```
+
+4. **Optionally add to PATH:**
+   ```bash
+   # Add to your shell profile (.zshrc, .bash_profile, etc.)
+   export PATH="$HOME/path/to/u_crawler/target/release:$PATH"
+   ```
+
+### Linux Installation
+
+1. **Install Rust:**
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source $HOME/.cargo/env
+   ```
+
+2. **Install ffmpeg:**
+   ```bash
+   # Ubuntu/Debian
+   sudo apt update && sudo apt install ffmpeg
+
+   # Fedora
+   sudo dnf install ffmpeg
+
+   # Arch Linux
+   sudo pacman -S ffmpeg
+   ```
+
+3. **Install u_crawler:**
+   ```bash
+   git clone https://github.com/yourusername/u_crawler.git
+   cd u_crawler
+   cargo build --release
+   ```
+
+4. **Optionally install system-wide:**
+   ```bash
+   sudo cp target/release/u_crawler /usr/local/bin/
+   ```
+
+### Verify Installation
+
+After installation, verify everything is working:
+
+```bash
+# Check Rust
+rustc --version
+
+# Check ffmpeg
+ffmpeg -version
+
+# Check u_crawler
+cargo run -- --help
+```
+
 Quickstart
 ----------
 
