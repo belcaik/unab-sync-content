@@ -3,6 +3,7 @@ use u_crawler::config;
 use u_crawler::logger;
 use u_crawler::progress;
 use u_crawler::recordings;
+use u_crawler::state::State;
 use u_crawler::syncer;
 use u_crawler::zoom;
 
@@ -199,10 +200,14 @@ async fn main() -> ExitCode {
                 }
             },
         },
-        Commands::Status => {
-            println!("status: stub (implement in M5)");
-            ExitCode::SUCCESS
-        }
+        Commands::Status => match handle_status().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "status failed");
+                eprintln!("error: {e}");
+                ExitCode::from(12)
+            }
+        },
         Commands::Clean => {
             println!("clean: stub (implement in M5)");
             ExitCode::SUCCESS
@@ -303,5 +308,64 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
         }
         pb.finish_and_clear();
     }
+    Ok(())
+}
+
+async fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
+    use std::path::PathBuf;
+    use tracing::info;
+
+    let cfg = Config::load_or_init()?;
+    let download_root = PathBuf::from(&cfg.download_root);
+
+    info!(path = %download_root.display(), "scanning download root for courses");
+
+    // Check if download_root exists
+    if !download_root.exists() {
+        println!("No backup directory found at {}", download_root.display());
+        println!("Run 'u_crawler sync' to create your first backup.");
+        return Ok(());
+    }
+
+    // Scan for course directories
+    let mut entries = tokio::fs::read_dir(&download_root).await?;
+    let mut course_dirs = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            course_dirs.push(path);
+        }
+    }
+
+    if course_dirs.is_empty() {
+        println!("No courses found in {}", download_root.display());
+        println!("Run 'u_crawler sync' to create your first backup.");
+        return Ok(());
+    }
+
+    info!(count = course_dirs.len(), "found course directories");
+
+    // Load state from each course directory
+    for course_dir in &course_dirs {
+        let state_path = course_dir.join("state.json");
+        let state = State::load(&state_path).await;
+
+        let course_name = course_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        info!(
+            course = course_name,
+            items = state.items.len(),
+            "loaded course state"
+        );
+
+        // Basic output for now - detailed stats will be added in next subtask
+        println!("Course: {}", course_name);
+        println!("  Items tracked: {}", state.items.len());
+    }
+
     Ok(())
 }
