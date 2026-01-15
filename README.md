@@ -1,78 +1,127 @@
-u_crawler — Canvas/Zoom course backup CLI
-=================================================
+# u_crawler
 
-Installation
-------------
+A command-line tool for backing up Canvas LMS courses and Zoom cloud recordings.
 
-### Prerequisites
+## Overview
 
-Before installing `u_crawler`, ensure you have:
+u_crawler automates the backup of your educational content from Canvas Learning Management System, including:
 
-1. **Rust toolchain** (1.70 or later)
-2. **ffmpeg** (required for Zoom recording downloads)
-3. **Chromium or Edge browser** (for Zoom authentication via CDP)
+- **Course content**: Module pages, assignment instructions, and announcements exported as Markdown
+- **Attachments**: PDFs, documents, images, and other files linked in your courses
+- **Zoom recordings**: Cloud recordings from Zoom meetings integrated with Canvas
 
-### Windows Installation
+The tool supports resumable downloads, rate limiting, and incremental syncs to efficiently maintain up-to-date backups.
 
-1. **Install Rust:**
-   - Download and run the installer from [rustup.rs](https://rustup.rs/)
-   - Follow the prompts to complete installation
-   - Restart your terminal to update PATH
+## Table of Contents
 
-2. **Install ffmpeg:**
-   - Download from [ffmpeg.org](https://ffmpeg.org/download.html#build-windows)
-   - Extract to a folder (e.g., `C:\ffmpeg`)
-   - Add `C:\ffmpeg\bin` to your system PATH
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [Windows](#windows)
+  - [macOS](#macos)
+  - [Linux](#linux)
+  - [Verifying Installation](#verifying-installation)
+- [Quick Start](#quick-start)
+- [Commands](#commands)
+  - [init](#init)
+  - [auth](#auth)
+  - [scan](#scan)
+  - [sync](#sync)
+  - [zoom](#zoom)
+- [Configuration](#configuration)
+- [Zoom Recording Workflow](#zoom-recording-workflow)
+- [Troubleshooting](#troubleshooting)
+- [Exit Codes](#exit-codes)
+- [License](#license)
 
-3. **Install u_crawler:**
+## Features
+
+- **Canvas course backup**: Export module pages and assignments as Markdown files
+- **Attachment downloads**: Automatically download linked files (PDF, DOCX, PNG, etc.)
+- **Zoom integration**: Download cloud recordings from Zoom-enabled courses
+- **Incremental sync**: Only download new or modified content
+- **Resumable downloads**: Interrupted downloads resume from where they stopped
+- **Rate limiting**: Configurable request throttling to avoid API limits
+- **Dry-run mode**: Preview changes before writing files
+- **Course filtering**: Include or exclude specific courses from sync operations
+
+## Prerequisites
+
+Before installing u_crawler, ensure you have:
+
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| Rust toolchain | 1.70+ | Building from source |
+| ffmpeg | Any recent | Downloading Zoom recordings |
+| Chromium or Edge | Any recent | Zoom authentication via Chrome DevTools Protocol |
+
+## Installation
+
+### Windows
+
+1. **Install Rust**
+
+   Download and run the installer from [rustup.rs](https://rustup.rs/), then restart your terminal.
+
+2. **Install ffmpeg**
+
+   Download from [ffmpeg.org](https://ffmpeg.org/download.html#build-windows), extract to a folder (e.g., `C:\ffmpeg`), and add `C:\ffmpeg\bin` to your system PATH.
+
+3. **Build u_crawler**
+
    ```powershell
    git clone https://github.com/yourusername/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
 
-4. **Optionally add to PATH:**
+4. **Add to PATH (optional)**
+
    ```powershell
-   # Add target\release to your PATH, or copy the executable
    copy target\release\u_crawler.exe C:\Windows\System32\
    ```
 
-### macOS Installation
+### macOS
 
-1. **Install Rust:**
+1. **Install Rust**
+
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source $HOME/.cargo/env
+   source "$HOME/.cargo/env"
    ```
 
-2. **Install ffmpeg:**
+2. **Install ffmpeg**
+
    ```bash
-   # Using Homebrew
    brew install ffmpeg
    ```
 
-3. **Install u_crawler:**
+3. **Build u_crawler**
+
    ```bash
    git clone https://github.com/yourusername/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
 
-4. **Optionally add to PATH:**
+4. **Add to PATH (optional)**
+
    ```bash
-   # Add to your shell profile (.zshrc, .bash_profile, etc.)
+   # Add to your shell profile (.zshrc or .bash_profile)
    export PATH="$HOME/path/to/u_crawler/target/release:$PATH"
    ```
 
-### Linux Installation
+### Linux
 
-1. **Install Rust:**
+1. **Install Rust**
+
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source $HOME/.cargo/env
+   source "$HOME/.cargo/env"
    ```
 
-2. **Install ffmpeg:**
+2. **Install ffmpeg**
+
    ```bash
    # Ubuntu/Debian
    sudo apt update && sudo apt install ffmpeg
@@ -84,266 +133,360 @@ Before installing `u_crawler`, ensure you have:
    sudo pacman -S ffmpeg
    ```
 
-3. **Install u_crawler:**
+3. **Build u_crawler**
+
    ```bash
    git clone https://github.com/yourusername/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
 
-4. **Optionally install system-wide:**
+4. **Install system-wide (optional)**
+
    ```bash
    sudo cp target/release/u_crawler /usr/local/bin/
    ```
 
-### Verify Installation
+### Verifying Installation
 
-After installation, verify everything is working:
+Confirm all components are installed correctly:
 
 ```bash
-# Check Rust
-rustc --version
-
-# Check ffmpeg
-ffmpeg -version
-
-# Check u_crawler
-cargo run -- --help
+rustc --version          # Should show 1.70.0 or later
+ffmpeg -version          # Should display ffmpeg version info
+cargo run -- --help      # Should show u_crawler help
 ```
 
-Quickstart
-----------
+## Quick Start
 
-1) Build and see help
+### 1. Initialize configuration
 
-```
-cargo build
-cargo run -- --help
-```
+Create the default configuration file:
 
-2) Initialize config (writes to `~/.config/u_crawler/config.toml`)
-
-```
+```bash
 cargo run -- init
 ```
 
-3) Authenticate Canvas
+This creates `~/.config/u_crawler/config.toml` (or `%APPDATA%\u_crawler\config.toml` on Windows).
+
+### 2. Authenticate with Canvas
 
 Using a Personal Access Token (PAT):
 
-```
-cargo run -- auth canvas --base-url https://<tenant>.instructure.com --token <PAT>
-```
-
-Or retrieve the PAT from an external command (not stored in plaintext):
-
-```
-cargo run -- auth canvas --base-url https://<tenant>.instructure.com \
-  --token-cmd "pass show canvas/pat"
+```bash
+cargo run -- auth canvas --base-url https://your-school.instructure.com --token YOUR_TOKEN
 ```
 
-4) List your active courses
+Or retrieve the token from a password manager:
 
+```bash
+cargo run -- auth canvas --base-url https://your-school.instructure.com \
+    --token-cmd "pass show canvas/pat"
 ```
+
+### 3. List your courses
+
+```bash
 cargo run -- scan
 ```
 
-5) Inspect one course (modules + derived file count)
+### 4. Sync course content
 
+Preview what would be downloaded:
+
+```bash
+cargo run -- sync --dry-run
 ```
+
+Download all courses:
+
+```bash
+cargo run -- sync
+```
+
+Download a specific course:
+
+```bash
+cargo run -- sync --course-id 123456
+```
+
+### 5. Back up Zoom recordings
+
+First, launch a browser with remote debugging enabled:
+
+```bash
+chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
+```
+
+Then run the Zoom backup:
+
+```bash
+cargo run -- zoom flow --course-id 123456
+```
+
+## Commands
+
+### init
+
+Creates a default configuration file.
+
+```bash
+cargo run -- init
+```
+
+### auth
+
+Configures authentication credentials for Canvas.
+
+```bash
+# Using a token directly
+cargo run -- auth canvas --base-url URL --token TOKEN
+
+# Using a command to retrieve the token
+cargo run -- auth canvas --base-url URL --token-cmd "command"
+```
+
+### scan
+
+Lists courses and inspects their content.
+
+```bash
+# List all active courses
+cargo run -- scan
+
+# Inspect a specific course
 cargo run -- scan --course-id 123456
 ```
 
-6) Dry-run sync (no writes) to see what would be saved/downloaded
+### sync
 
-```
-cargo run -- sync --dry-run                  # all allowed courses
-cargo run -- sync --course-id 123456 --dry-run
-```
+Downloads course content to the local filesystem.
 
-7) Run sync (writes Markdown + downloads attachments)
+| Flag | Description |
+|------|-------------|
+| `--course-id ID` | Sync only the specified course |
+| `--dry-run` | Preview changes without downloading |
+| `--verbose` | Show skipped items and additional details |
 
-```
-cargo run -- sync                            # all allowed courses
-cargo run -- sync --course-id 123456         # one course
-cargo run -- sync --course-id 123456 --verbose   # also show skipped items
-```
+```bash
+# Sync all courses
+cargo run -- sync
 
-8) Back up Zoom course recordings (sniff + capture + download in a single flow)
-
-```
-# First launch Chromium/Edge with remote debugging:
-#   chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
-
-cargo run -- zoom flow --course-id 123456
-
-# Optional:
-#   --debug-port <port>      CDP port (default 9222)
-#   --keep-tab               keep the capture tab open
-#   --concurrency <n>        parallel downloads (default 1)
-#   --since YYYY-MM-DD       filter meetings from that date
+# Sync one course with verbose output
+cargo run -- sync --course-id 123456 --verbose
 ```
 
-Configuration
--------------
+### zoom
 
-Config file: `~/.config/u_crawler/config.toml`
+Manages Zoom recording downloads. The primary command is `zoom flow`, which handles the entire process automatically.
 
-Example config:
+| Flag | Description |
+|------|-------------|
+| `--course-id ID` | Target course (required) |
+| `--debug-port PORT` | CDP port (default: 9222) |
+| `--keep-tab` | Keep the browser tab open after capture |
+| `--concurrency N` | Number of parallel downloads (default: 1) |
+| `--since DATE` | Only download recordings after this date (YYYY-MM-DD) |
 
+```bash
+cargo run -- zoom flow --course-id 123456 --since 2024-01-01
 ```
-download_root = "~/Documents/UNAB/data/Canvas"
-concurrency = 4                  # download concurrency
-max_rps = 2                      # requests per second
-user_agent = ""                 # optional custom UA
 
+For advanced use cases, individual subcommands are available:
+
+- `zoom sniff-cdp` - Capture authentication credentials
+- `zoom list` - List available recordings
+- `zoom fetch-urls` - Retrieve download URLs
+- `zoom dl` - Download recordings
+
+## Configuration
+
+Configuration is stored in `~/.config/u_crawler/config.toml` (Linux/macOS) or `%APPDATA%\u_crawler\config.toml` (Windows).
+
+### Example Configuration
+
+```toml
+# General settings
+download_root = "~/Documents/Canvas-Backup"
+concurrency = 4          # Parallel downloads
+max_rps = 2              # API requests per second
+user_agent = ""          # Custom user agent (optional)
+
+# Canvas LMS settings
 [canvas]
-base_url = "https://<tenant>.instructure.com"
-token = ""                      # optional if token_cmd is used
+base_url = "https://your-school.instructure.com"
+token = ""               # Leave empty if using token_cmd
 token_cmd = "pass show canvas/pat"
 ignored_courses = ["153095", "153607"]
 
+# Logging settings
 [logging]
-level = "info"                  # trace|debug|info|warn|error
-file  = "~/.config/u_crawler/u_crawler.log"
+level = "info"           # trace | debug | info | warn | error
+file = "~/.config/u_crawler/u_crawler.log"
 
+# Zoom settings
 [zoom]
 enabled = true
-ffmpeg_path = "ffmpeg"                       # path to ffmpeg binary
-cookie_file = "~/.config/u_crawler/zoom_cookies.txt"  # legacy (not used with CDP)
+ffmpeg_path = "ffmpeg"
+cookie_file = "~/.config/u_crawler/zoom_cookies.txt"
 user_agent = "Mozilla/5.0"
 external_tool_id = 187
 ```
 
-Zoom recordings workflow
------------------------
+### Configuration Options
 
-The new `zoom flow` command automates the entire cycle:
+| Option | Description | Default |
+|--------|-------------|---------|
+| `download_root` | Directory for downloaded files | Required |
+| `concurrency` | Number of parallel downloads | 4 |
+| `max_rps` | Maximum API requests per second | 2 |
+| `canvas.base_url` | Your Canvas instance URL | Required |
+| `canvas.token` | Personal Access Token | - |
+| `canvas.token_cmd` | Command to retrieve token | - |
+| `canvas.ignored_courses` | Course IDs to skip | [] |
+| `logging.level` | Log verbosity | info |
+| `zoom.enabled` | Enable Zoom features | true |
+| `zoom.ffmpeg_path` | Path to ffmpeg binary | ffmpeg |
+| `zoom.external_tool_id` | Zoom LTI tool ID in Canvas | - |
 
-1. **Preparation**
-   - Launch Chromium/Edge with `--remote-debugging-port` (default 9222) pointing to the profile where you've already logged into Canvas/SSO.
-   - Make sure you have `ffmpeg` available (configurable in `zoom.ffmpeg_path`).
-2. **Sniff CDP**
-   - The tool opens `courses/{course}/external_tools/{external_tool_id}` in a controlled tab.
-   - Captures `lti_scid`, `applications.zoom.us` cookies, API headers, and if it detects download buttons, clones the MP4 requests.
-   - During the CDP flow it may ask you to complete SSO (Microsoft); do so in the popup tab.
-3. **Listing and capture**
-   - Queries `applications.zoom.us` to enumerate meetings and associated `playUrl`s.
-   - For each `playUrl` an ephemeral tab is opened via CDP, redirects are followed, and the signed headers necessary for downloading are stored.
-4. **Download**
-   - first attempts `ffmpeg -c copy` with the captured headers;
-   - if Zoom rejects `ffmpeg`'s reader, falls back to resumable direct HTTP download and then saves the MP4.
+## Zoom Recording Workflow
 
-The final result is stored under `download_root/Zoom/<course_id>/`. Each download uses `.part` and `Range` to allow safe retries.
+The `zoom flow` command automates the complete process of downloading Zoom cloud recordings:
 
-Troubleshooting
----------------
+### Prerequisites
 
-### Common Issues
+1. Launch a Chromium-based browser with remote debugging enabled:
 
-#### ffmpeg not found
+   ```bash
+   chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
+   ```
 
-**Problem:** Error message "ffmpeg missing" or exit code 13.
+2. Log into Canvas in that browser instance and complete any SSO authentication.
 
-**Solution:**
-- Verify ffmpeg is installed: `ffmpeg -version`
-- On Windows, ensure ffmpeg is in your PATH or set `zoom.ffmpeg_path` in config.toml to the full path (e.g., `C:\ffmpeg\bin\ffmpeg.exe`)
-- On Linux/macOS, install via package manager or set absolute path in config
+3. Ensure ffmpeg is available (check with `ffmpeg -version`).
 
-#### Zoom authentication fails
+### How It Works
 
-**Problem:** CDP flow times out or doesn't capture credentials.
+1. **Credential Capture**: Opens the Zoom external tool in Canvas via Chrome DevTools Protocol (CDP), capturing authentication cookies and API headers.
 
-**Solution:**
-- Ensure browser is launched with remote debugging:
-  ```bash
-  chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
-  ```
-- Log into Canvas manually in that browser instance before running `zoom flow`
-- Complete any SSO prompts (Microsoft, etc.) in the popup tab when asked
-- Try increasing timeout or use `--debug-port` if using a different port
+2. **Recording Discovery**: Queries the Zoom API to enumerate available meetings and their download URLs.
 
-#### Canvas authentication fails
+3. **URL Resolution**: Opens each recording page in an ephemeral browser tab to capture the signed download headers.
 
-**Problem:** "auth error" or exit code 11.
+4. **Download**: Attempts to download using `ffmpeg -c copy`. If that fails, falls back to direct HTTP download with resume support.
 
-**Solution:**
-- Verify your Personal Access Token (PAT) is valid and not expired
-- Check base-url matches your Canvas instance (e.g., `https://canvas.instructure.com`)
-- If using `token_cmd`, ensure the command executes successfully:
-  ```bash
-  # Test your token command
-  pass show canvas/pat
-  ```
-- Re-run authentication: `cargo run -- auth canvas --base-url <url> --token <PAT>`
+### Output Structure
 
-#### Rate limit errors
+Recordings are saved to:
 
-**Problem:** Network/rate-limit error (exit code 12).
+```
+<download_root>/Zoom/<course_id>/<meeting_title>_<date>.mp4
+```
 
-**Solution:**
-- Reduce `max_rps` in config.toml (e.g., from 2 to 1)
-- Reduce `concurrency` for downloads (e.g., from 4 to 2)
+Downloads use `.part` files and HTTP Range requests, allowing safe resumption if interrupted.
+
+## Troubleshooting
+
+### ffmpeg Not Found
+
+**Symptoms**: Error "ffmpeg missing" or exit code 13.
+
+**Solutions**:
+- Verify installation: `ffmpeg -version`
+- On Windows: Add ffmpeg to PATH or set `zoom.ffmpeg_path` to the full path
+- On Linux/macOS: Install via package manager or set absolute path in config
+
+### Canvas Authentication Fails
+
+**Symptoms**: "auth error" or exit code 11.
+
+**Solutions**:
+- Verify your Personal Access Token is valid and not expired
+- Confirm `base_url` matches your Canvas instance exactly
+- Test your `token_cmd` manually to ensure it returns the token
+- Re-run: `cargo run -- auth canvas --base-url URL --token TOKEN`
+
+### Zoom Authentication Fails
+
+**Symptoms**: CDP flow times out or fails to capture credentials.
+
+**Solutions**:
+- Ensure browser is launched with `--remote-debugging-port=9222`
+- Log into Canvas in that browser before running `zoom flow`
+- Complete SSO prompts when they appear
+- Use `--debug-port` if your browser uses a different port
+
+### Rate Limit Errors
+
+**Symptoms**: Network errors or exit code 12.
+
+**Solutions**:
+- Reduce `max_rps` in config (e.g., from 2 to 1)
+- Reduce `concurrency` (e.g., from 4 to 2)
 - Wait a few minutes before retrying
-- Check if your Canvas instance has stricter rate limits
 
-#### Partial download failures
+### Partial Download Failures
 
-**Problem:** Some files fail to download (exit code 15).
+**Symptoms**: Some files fail to download (exit code 15).
 
-**Solution:**
-- Re-run the same command; downloads are resumable (`.part` files)
-- Check disk space and permissions in `download_root`
-- Use `--verbose` to see which items failed and why
-- Check logs at `~/.config/u_crawler/u_crawler.log` with `level = "debug"`
+**Solutions**:
+- Re-run the command; downloads are resumable
+- Check available disk space
+- Verify write permissions for `download_root`
+- Use `--verbose` to identify specific failures
+- Check logs with `level = "debug"`
 
-#### Zoom recordings don't download
+### Zoom Recordings Won't Download
 
-**Problem:** Zoom videos are listed but fail to download.
+**Symptoms**: Recordings are listed but fail to download.
 
-**Solution:**
-- Verify you have download permissions for the recordings in Zoom
-- Ensure ffmpeg is working: `ffmpeg -version`
-- Check that CDP captured valid headers (exit code 14 indicates no download rights)
-- Try manual flow: `zoom sniff-cdp`, then `zoom list`, then `zoom dl`
-- Review logs for specific error messages
+**Solutions**:
+- Verify you have download permissions in Zoom
+- Confirm ffmpeg works: `ffmpeg -version`
+- Exit code 14 indicates insufficient permissions
+- Try the manual flow: `zoom sniff-cdp`, `zoom list`, `zoom dl`
+- Check logs for specific error messages
 
-#### Config file not found
+### Configuration File Not Found
 
-**Problem:** Tool can't find or read config.toml.
+**Symptoms**: Tool can't find config.toml.
 
-**Solution:**
-- Run `cargo run -- init` to create default config
-- Manually create `~/.config/u_crawler/config.toml` (or `%APPDATA%\u_crawler\config.toml` on Windows)
-- Verify file permissions allow reading
-- Check that the directory exists
+**Solutions**:
+- Run `cargo run -- init` to create the default config
+- Verify the config directory exists
+- Check file permissions
 
-### Getting More Help
+### Debug Mode
 
-If issues persist:
-1. Set `level = "debug"` in `[logging]` section of config.toml
-2. Re-run the failing command
-3. Check the log file at `~/.config/u_crawler/u_crawler.log`
-4. Include relevant log excerpts when reporting issues
+For detailed diagnostics, enable debug logging:
 
-Notes
------
+```toml
+[logging]
+level = "debug"
+```
 
-- Sync writes Markdown for module pages and assignment instructions, and downloads linked attachments (PDF/DOCX/PNG/etc.), preserving file extensions.
-- Names are sanitized to stable ASCII with underscores; repeated separators are collapsed.
-- `ignored_courses` prevents syncing specific courses in both bulk and per-course modes.
-- Dry-run prints a plan without writing files or state; `--verbose` in normal mode prints details about skipped items (unchanged pages/files).
-- Logs are written to the file configured in `[logging]`. For troubleshooting API issues, set `level = "debug"` and rerun commands.
-- `zoom flow` is idempotent: if a download fails you can repeat the command; it will reuse already saved headers and resume from `.part`.
-- The command also keeps the previous utilities available (`zoom sniff-cdp`, `zoom list`, `zoom fetch-urls`, `zoom dl`) for advanced or manual workflows.
+Then check `~/.config/u_crawler/u_crawler.log` after running commands.
 
-Exit Codes
-----------
+## Exit Codes
 
-- 0: success
-- 10: config error
-- 11: auth error
-- 12: network/rate-limit error (exhausted)
-- 13: ffmpeg missing/failure
-- 14: permissions (no download right)
-- 15: partial (some items failed)
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 10 | Configuration error |
+| 11 | Authentication error |
+| 12 | Network or rate limit error |
+| 13 | ffmpeg missing or failed |
+| 14 | Permission denied (no download rights) |
+| 15 | Partial failure (some items failed) |
+
+## Additional Notes
+
+- **Incremental sync**: The sync command only downloads new or modified content.
+- **File naming**: Names are sanitized to ASCII with underscores; repeated separators are collapsed.
+- **Idempotent operations**: Commands can be safely re-run; they resume from where they stopped.
+- **Ignored courses**: Use `ignored_courses` to exclude specific courses from bulk operations.
+- **Dry-run mode**: Always preview with `--dry-run` before large sync operations.
+
+## License
+
+See [LICENSE](LICENSE) for details.
