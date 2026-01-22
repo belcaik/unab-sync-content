@@ -31,7 +31,7 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
-            // .with_head()
+                // .with_head()
                 // Running in full headless mode (no GUI)
                 // Let's try headless first, but maybe provide an option?
                 // The user said "headless browser", so let's stick to headless unless debugging.
@@ -102,7 +102,10 @@ impl<'a> ZoomHeadless<'a> {
         // Pre-compile regexes
         let re_scid = Regex::new(r#"scid\s*:\s*['"]([^'"]+)['"]"#).unwrap();
         let re_ajax = Regex::new(r#"(?s)ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
-        let re_kv = Regex::new(r#"\{\s*key\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]+)['"]\s*\}"#).unwrap();
+        let re_kv = Regex::new(
+            r#"\{\s*key\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]+)['"]\s*\}"#,
+        )
+        .unwrap();
         let re_xsrf = Regex::new(r#"(?i)['"]?x-xsrf-token['"]?\s*:\s*['"]([^'"]+)['"]"#).unwrap();
 
         // Spawn Fetch interception task

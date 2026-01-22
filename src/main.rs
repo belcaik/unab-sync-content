@@ -370,7 +370,9 @@ async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> 
         let file_count = state.items.len();
         let mut course_size: u64 = 0;
         let mut last_updated: Option<String> = None;
-        let failed_items: Vec<_> = state.items.iter()
+        let failed_items: Vec<_> = state
+            .items
+            .iter()
             .filter(|(_, item)| item.last_error.is_some())
             .collect();
 
@@ -416,7 +418,10 @@ async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> 
 
         // Display failed downloads if any
         if !failed_items.is_empty() {
-            println!("  Failed downloads: {} items need retry", failed_items.len());
+            println!(
+                "  Failed downloads: {} items need retry",
+                failed_items.len()
+            );
             if verbose {
                 for (key, item) in &failed_items {
                     let attempts = item.error_count.unwrap_or(1);

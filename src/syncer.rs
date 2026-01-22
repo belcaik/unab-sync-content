@@ -270,7 +270,9 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                    match download_if_needed(httpctx, &f, &dest, state, verbose)
+                                        .await
+                                    {
                                         Ok(()) => {
                                             info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                         }
@@ -280,15 +282,22 @@ async fn sync_module(
                                             let current_state = state.get(&keyf);
                                             let error_count = current_state
                                                 .and_then(|s| s.error_count)
-                                                .unwrap_or(0) + 1;
-                                            state.set(keyf, ItemState {
-                                                etag: current_state.and_then(|s| s.etag.clone()),
-                                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                                size: current_state.and_then(|s| s.size),
-                                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                                last_error: Some(e.to_string()),
-                                                error_count: Some(error_count),
-                                            });
+                                                .unwrap_or(0)
+                                                + 1;
+                                            state.set(
+                                                keyf,
+                                                ItemState {
+                                                    etag: current_state
+                                                        .and_then(|s| s.etag.clone()),
+                                                    updated_at: current_state
+                                                        .and_then(|s| s.updated_at.clone()),
+                                                    size: current_state.and_then(|s| s.size),
+                                                    content_hash: current_state
+                                                        .and_then(|s| s.content_hash.clone()),
+                                                    last_error: Some(e.to_string()),
+                                                    error_count: Some(error_count),
+                                                },
+                                            );
                                         }
                                     }
                                 }
@@ -298,17 +307,21 @@ async fn sync_module(
                                 // Record error in state
                                 let keyf = format!("file:{}", fid);
                                 let current_state = state.get(&keyf);
-                                let error_count = current_state
-                                    .and_then(|s| s.error_count)
-                                    .unwrap_or(0) + 1;
-                                state.set(keyf, ItemState {
-                                    etag: current_state.and_then(|s| s.etag.clone()),
-                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                    size: current_state.and_then(|s| s.size),
-                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                    last_error: Some(e.to_string()),
-                                    error_count: Some(error_count),
-                                });
+                                let error_count =
+                                    current_state.and_then(|s| s.error_count).unwrap_or(0) + 1;
+                                state.set(
+                                    keyf,
+                                    ItemState {
+                                        etag: current_state.and_then(|s| s.etag.clone()),
+                                        updated_at: current_state
+                                            .and_then(|s| s.updated_at.clone()),
+                                        size: current_state.and_then(|s| s.size),
+                                        content_hash: current_state
+                                            .and_then(|s| s.content_hash.clone()),
+                                        last_error: Some(e.to_string()),
+                                        error_count: Some(error_count),
+                                    },
+                                );
                             }
                         }
                     }
@@ -410,7 +423,9 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                    match download_if_needed(httpctx, &f, &dest, state, verbose)
+                                        .await
+                                    {
                                         Ok(()) => {
                                             info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                         }
@@ -420,15 +435,22 @@ async fn sync_module(
                                             let current_state = state.get(&keyf);
                                             let error_count = current_state
                                                 .and_then(|s| s.error_count)
-                                                .unwrap_or(0) + 1;
-                                            state.set(keyf, ItemState {
-                                                etag: current_state.and_then(|s| s.etag.clone()),
-                                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                                size: current_state.and_then(|s| s.size),
-                                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                                last_error: Some(e.to_string()),
-                                                error_count: Some(error_count),
-                                            });
+                                                .unwrap_or(0)
+                                                + 1;
+                                            state.set(
+                                                keyf,
+                                                ItemState {
+                                                    etag: current_state
+                                                        .and_then(|s| s.etag.clone()),
+                                                    updated_at: current_state
+                                                        .and_then(|s| s.updated_at.clone()),
+                                                    size: current_state.and_then(|s| s.size),
+                                                    content_hash: current_state
+                                                        .and_then(|s| s.content_hash.clone()),
+                                                    last_error: Some(e.to_string()),
+                                                    error_count: Some(error_count),
+                                                },
+                                            );
                                         }
                                     }
                                 }
@@ -438,17 +460,21 @@ async fn sync_module(
                                 // Record error in state
                                 let keyf = format!("file:{}", fid);
                                 let current_state = state.get(&keyf);
-                                let error_count = current_state
-                                    .and_then(|s| s.error_count)
-                                    .unwrap_or(0) + 1;
-                                state.set(keyf, ItemState {
-                                    etag: current_state.and_then(|s| s.etag.clone()),
-                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                    size: current_state.and_then(|s| s.size),
-                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                    last_error: Some(e.to_string()),
-                                    error_count: Some(error_count),
-                                });
+                                let error_count =
+                                    current_state.and_then(|s| s.error_count).unwrap_or(0) + 1;
+                                state.set(
+                                    keyf,
+                                    ItemState {
+                                        etag: current_state.and_then(|s| s.etag.clone()),
+                                        updated_at: current_state
+                                            .and_then(|s| s.updated_at.clone()),
+                                        size: current_state.and_then(|s| s.size),
+                                        content_hash: current_state
+                                            .and_then(|s| s.content_hash.clone()),
+                                        last_error: Some(e.to_string()),
+                                        error_count: Some(error_count),
+                                    },
+                                );
                             }
                         }
                     }
@@ -504,17 +530,22 @@ async fn sync_module(
                                         warn!(course_id, module_id = m.id, file_id = fid, error = %e, "download failed");
                                         let keyf = format!("file:{}", fid);
                                         let current_state = state.get(&keyf);
-                                        let error_count = current_state
-                                            .and_then(|s| s.error_count)
-                                            .unwrap_or(0) + 1;
-                                        state.set(keyf, ItemState {
-                                            etag: current_state.and_then(|s| s.etag.clone()),
-                                            updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                            size: current_state.and_then(|s| s.size),
-                                            content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                            last_error: Some(e.to_string()),
-                                            error_count: Some(error_count),
-                                        });
+                                        let error_count =
+                                            current_state.and_then(|s| s.error_count).unwrap_or(0)
+                                                + 1;
+                                        state.set(
+                                            keyf,
+                                            ItemState {
+                                                etag: current_state.and_then(|s| s.etag.clone()),
+                                                updated_at: current_state
+                                                    .and_then(|s| s.updated_at.clone()),
+                                                size: current_state.and_then(|s| s.size),
+                                                content_hash: current_state
+                                                    .and_then(|s| s.content_hash.clone()),
+                                                last_error: Some(e.to_string()),
+                                                error_count: Some(error_count),
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -524,17 +555,20 @@ async fn sync_module(
                             // Record error in state
                             let keyf = format!("file:{}", fid);
                             let current_state = state.get(&keyf);
-                            let error_count = current_state
-                                .and_then(|s| s.error_count)
-                                .unwrap_or(0) + 1;
-                            state.set(keyf, ItemState {
-                                etag: current_state.and_then(|s| s.etag.clone()),
-                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                size: current_state.and_then(|s| s.size),
-                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                last_error: Some(e.to_string()),
-                                error_count: Some(error_count),
-                            });
+                            let error_count =
+                                current_state.and_then(|s| s.error_count).unwrap_or(0) + 1;
+                            state.set(
+                                keyf,
+                                ItemState {
+                                    etag: current_state.and_then(|s| s.etag.clone()),
+                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                    size: current_state.and_then(|s| s.size),
+                                    content_hash: current_state
+                                        .and_then(|s| s.content_hash.clone()),
+                                    last_error: Some(e.to_string()),
+                                    error_count: Some(error_count),
+                                },
+                            );
                         }
                     }
                 }
@@ -632,7 +666,9 @@ async fn sync_module(
                                         }
                                     } else {
                                         ensure_dir(dest.parent().unwrap()).await?;
-                                        match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                        match download_if_needed(httpctx, &f, &dest, state, verbose)
+                                            .await
+                                        {
                                             Ok(()) => {
                                                 info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                             }
@@ -642,15 +678,22 @@ async fn sync_module(
                                                 let current_state = state.get(&keyf);
                                                 let error_count = current_state
                                                     .and_then(|s| s.error_count)
-                                                    .unwrap_or(0) + 1;
-                                                state.set(keyf, ItemState {
-                                                    etag: current_state.and_then(|s| s.etag.clone()),
-                                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                                    size: current_state.and_then(|s| s.size),
-                                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                                    last_error: Some(e.to_string()),
-                                                    error_count: Some(error_count),
-                                                });
+                                                    .unwrap_or(0)
+                                                    + 1;
+                                                state.set(
+                                                    keyf,
+                                                    ItemState {
+                                                        etag: current_state
+                                                            .and_then(|s| s.etag.clone()),
+                                                        updated_at: current_state
+                                                            .and_then(|s| s.updated_at.clone()),
+                                                        size: current_state.and_then(|s| s.size),
+                                                        content_hash: current_state
+                                                            .and_then(|s| s.content_hash.clone()),
+                                                        last_error: Some(e.to_string()),
+                                                        error_count: Some(error_count),
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -660,17 +703,21 @@ async fn sync_module(
                                     // Record error in state
                                     let keyf = format!("file:{}", fid);
                                     let current_state = state.get(&keyf);
-                                    let error_count = current_state
-                                        .and_then(|s| s.error_count)
-                                        .unwrap_or(0) + 1;
-                                    state.set(keyf, ItemState {
-                                        etag: current_state.and_then(|s| s.etag.clone()),
-                                        updated_at: current_state.and_then(|s| s.updated_at.clone()),
-                                        size: current_state.and_then(|s| s.size),
-                                        content_hash: current_state.and_then(|s| s.content_hash.clone()),
-                                        last_error: Some(e.to_string()),
-                                        error_count: Some(error_count),
-                                    });
+                                    let error_count =
+                                        current_state.and_then(|s| s.error_count).unwrap_or(0) + 1;
+                                    state.set(
+                                        keyf,
+                                        ItemState {
+                                            etag: current_state.and_then(|s| s.etag.clone()),
+                                            updated_at: current_state
+                                                .and_then(|s| s.updated_at.clone()),
+                                            size: current_state.and_then(|s| s.size),
+                                            content_hash: current_state
+                                                .and_then(|s| s.content_hash.clone()),
+                                            last_error: Some(e.to_string()),
+                                            error_count: Some(error_count),
+                                        },
+                                    );
                                 }
                             }
                         }

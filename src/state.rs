@@ -14,7 +14,7 @@ pub struct ItemState {
     pub updated_at: Option<String>,
     pub size: Option<u64>,
     pub content_hash: Option<String>,
-    #[serde(default)]  // For backward compatibility with existing state.json files
+    #[serde(default)] // For backward compatibility with existing state.json files
     pub last_error: Option<String>,
     #[serde(default)]
     pub error_count: Option<u32>,
