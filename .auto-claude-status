@@ -1,25 +1,25 @@
 {
   "active": true,
-  "spec": "001-consistent-documentation-in-english",
-  "state": "complete",
+  "spec": "003-implement-status-command",
+  "state": "building",
   "subtasks": {
-    "completed": 7,
-    "total": 7,
-    "in_progress": 0,
+    "completed": 4,
+    "total": 5,
+    "in_progress": 1,
     "failed": 0
   },
   "phase": {
-    "current": "",
-    "id": 0,
-    "total": 0
+    "current": "Testing and Verification",
+    "id": null,
+    "total": 2
   },
   "workers": {
     "active": 0,
     "max": 1
   },
   "session": {
-    "number": 0,
-    "started_at": "2026-01-15T01:08:03.326150"
+    "number": 3,
+    "started_at": "2026-01-15T01:58:28.824008"
   },
-  "last_update": "2026-01-15T01:08:03.383082"
+  "last_update": "2026-01-15T02:01:15.736582"
 }

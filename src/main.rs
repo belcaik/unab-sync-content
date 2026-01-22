@@ -3,6 +3,7 @@ use u_crawler::config;
 use u_crawler::logger;
 use u_crawler::progress;
 use u_crawler::recordings;
+use u_crawler::state::State;
 use u_crawler::syncer;
 use u_crawler::zoom;
 
@@ -64,7 +65,11 @@ enum Commands {
         command: ZoomCommands,
     },
     /// Show last run, pending items, failed jobs
-    Status,
+    Status {
+        /// Show detailed information including failed items
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Verify checksums, remove .part leftovers
     Clean,
 }
@@ -199,10 +204,14 @@ async fn main() -> ExitCode {
                 }
             },
         },
-        Commands::Status => {
-            println!("status: stub (implement in M5)");
-            ExitCode::SUCCESS
-        }
+        Commands::Status { verbose } => match handle_status(verbose).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "status failed");
+                eprintln!("error: {e}");
+                ExitCode::from(12)
+            }
+        },
         Commands::Clean => {
             println!("clean: stub (implement in M5)");
             ExitCode::SUCCESS
@@ -304,4 +313,158 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
         pb.finish_and_clear();
     }
     Ok(())
+}
+
+async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::path::PathBuf;
+    use tracing::info;
+
+    let cfg = Config::load_or_init()?;
+    let download_root = PathBuf::from(&cfg.download_root);
+
+    info!(path = %download_root.display(), "scanning download root for courses");
+
+    // Check if download_root exists
+    if !download_root.exists() {
+        println!("No backup directory found at {}", download_root.display());
+        println!("Run 'u_crawler sync' to create your first backup.");
+        return Ok(());
+    }
+
+    // Scan for course directories
+    let mut entries = tokio::fs::read_dir(&download_root).await?;
+    let mut course_dirs = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_dir() {
+            course_dirs.push(path);
+        }
+    }
+
+    if course_dirs.is_empty() {
+        println!("No courses found in {}", download_root.display());
+        println!("Run 'u_crawler sync' to create your first backup.");
+        return Ok(());
+    }
+
+    info!(count = course_dirs.len(), "found course directories");
+
+    println!("Backup Status:\n");
+
+    // Track totals across all courses
+    let mut total_files: usize = 0;
+    let mut total_storage: u64 = 0;
+
+    // Load state from each course directory
+    for course_dir in &course_dirs {
+        let state_path = course_dir.join("state.json");
+        let state = State::load(&state_path).await;
+
+        let course_name = course_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Calculate statistics
+        let file_count = state.items.len();
+        let mut course_size: u64 = 0;
+        let mut last_updated: Option<String> = None;
+        let failed_items: Vec<_> = state.items.iter()
+            .filter(|(_, item)| item.last_error.is_some())
+            .collect();
+
+        for item in state.items.values() {
+            // Sum up file sizes
+            if let Some(size) = item.size {
+                course_size += size;
+            }
+
+            // Find most recent updated_at
+            if let Some(ref updated) = item.updated_at {
+                match &last_updated {
+                    None => last_updated = Some(updated.clone()),
+                    Some(current) => {
+                        if updated > current {
+                            last_updated = Some(updated.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Accumulate totals
+        total_files += file_count;
+        total_storage += course_size;
+
+        info!(
+            course = course_name,
+            items = file_count,
+            size = course_size,
+            "loaded course state"
+        );
+
+        // Display course statistics
+        println!("Course: {}", course_name);
+        println!("  Files: {}", file_count);
+        println!("  Storage: {}", format_bytes(course_size));
+        if let Some(timestamp) = last_updated {
+            println!("  Last sync: {}", timestamp);
+        } else {
+            println!("  Last sync: Never");
+        }
+
+        // Display failed downloads if any
+        if !failed_items.is_empty() {
+            println!("  Failed downloads: {} items need retry", failed_items.len());
+            if verbose {
+                for (key, item) in &failed_items {
+                    let attempts = item.error_count.unwrap_or(1);
+                    println!("    - {} (failed {} time(s))", key, attempts);
+                    if let Some(err) = &item.last_error {
+                        // Truncate long errors
+                        let err_short: String = if err.len() > 60 {
+                            format!("{}...", &err[..60])
+                        } else {
+                            err.clone()
+                        };
+                        println!("      Error: {}", err_short);
+                    }
+                }
+            } else {
+                println!("      Run with --verbose to see details");
+            }
+        }
+
+        println!();
+    }
+
+    // Display totals summary
+    println!("─────────────────────────────");
+    println!(
+        "Total: {} courses, {} files, {}",
+        course_dirs.len(),
+        total_files,
+        format_bytes(total_storage)
+    );
+    println!();
+    println!("Tip: Run 'u_crawler sync --dry-run' to check for remote changes");
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
 }

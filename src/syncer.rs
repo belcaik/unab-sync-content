@@ -215,6 +215,8 @@ async fn sync_module(
                                 updated_at: page.updated_at,
                                 size: Some(md.len() as u64),
                                 content_hash: Some(hash),
+                                last_error: None,
+                                error_count: None,
                             },
                         );
                         info!(
@@ -268,12 +270,45 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    download_if_needed(httpctx, &f, &dest, state, verbose).await?;
-                                    info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                    match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                        Ok(()) => {
+                                            info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                        }
+                                        Err(e) => {
+                                            warn!(course_id, module_id = m.id, file_id = fid, error = %e, "download failed");
+                                            let keyf = format!("file:{}", fid);
+                                            let current_state = state.get(&keyf);
+                                            let error_count = current_state
+                                                .and_then(|s| s.error_count)
+                                                .unwrap_or(0) + 1;
+                                            state.set(keyf, ItemState {
+                                                etag: current_state.and_then(|s| s.etag.clone()),
+                                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                                size: current_state.and_then(|s| s.size),
+                                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                                last_error: Some(e.to_string()),
+                                                error_count: Some(error_count),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
                                 warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file metadata (discovered)");
+                                // Record error in state
+                                let keyf = format!("file:{}", fid);
+                                let current_state = state.get(&keyf);
+                                let error_count = current_state
+                                    .and_then(|s| s.error_count)
+                                    .unwrap_or(0) + 1;
+                                state.set(keyf, ItemState {
+                                    etag: current_state.and_then(|s| s.etag.clone()),
+                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                    size: current_state.and_then(|s| s.size),
+                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                    last_error: Some(e.to_string()),
+                                    error_count: Some(error_count),
+                                });
                             }
                         }
                     }
@@ -327,6 +362,8 @@ async fn sync_module(
                                 updated_at: page.updated_at,
                                 size: Some(md.len() as u64),
                                 content_hash: Some(hash),
+                                last_error: None,
+                                error_count: None,
                             },
                         );
                         info!(course_id, module_id = m.id, path = %dest.display(), "wrote page markdown");
@@ -373,12 +410,45 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    download_if_needed(httpctx, &f, &dest, state, verbose).await?;
-                                    info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                    match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                        Ok(()) => {
+                                            info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                        }
+                                        Err(e) => {
+                                            warn!(course_id, module_id = m.id, file_id = fid, error = %e, "download failed");
+                                            let keyf = format!("file:{}", fid);
+                                            let current_state = state.get(&keyf);
+                                            let error_count = current_state
+                                                .and_then(|s| s.error_count)
+                                                .unwrap_or(0) + 1;
+                                            state.set(keyf, ItemState {
+                                                etag: current_state.and_then(|s| s.etag.clone()),
+                                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                                size: current_state.and_then(|s| s.size),
+                                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                                last_error: Some(e.to_string()),
+                                                error_count: Some(error_count),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
-                                warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file (page link)")
+                                warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file (page link)");
+                                // Record error in state
+                                let keyf = format!("file:{}", fid);
+                                let current_state = state.get(&keyf);
+                                let error_count = current_state
+                                    .and_then(|s| s.error_count)
+                                    .unwrap_or(0) + 1;
+                                state.set(keyf, ItemState {
+                                    etag: current_state.and_then(|s| s.etag.clone()),
+                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                    size: current_state.and_then(|s| s.size),
+                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                    last_error: Some(e.to_string()),
+                                    error_count: Some(error_count),
+                                });
                             }
                         }
                     }
@@ -426,12 +496,45 @@ async fn sync_module(
                                 }
                             } else {
                                 ensure_dir(dest.parent().unwrap()).await?;
-                                download_if_needed(httpctx, &f, &dest, state, verbose).await?;
-                                info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                    Ok(()) => {
+                                        info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                    }
+                                    Err(e) => {
+                                        warn!(course_id, module_id = m.id, file_id = fid, error = %e, "download failed");
+                                        let keyf = format!("file:{}", fid);
+                                        let current_state = state.get(&keyf);
+                                        let error_count = current_state
+                                            .and_then(|s| s.error_count)
+                                            .unwrap_or(0) + 1;
+                                        state.set(keyf, ItemState {
+                                            etag: current_state.and_then(|s| s.etag.clone()),
+                                            updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                            size: current_state.and_then(|s| s.size),
+                                            content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                            last_error: Some(e.to_string()),
+                                            error_count: Some(error_count),
+                                        });
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
                             warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file metadata");
+                            // Record error in state
+                            let keyf = format!("file:{}", fid);
+                            let current_state = state.get(&keyf);
+                            let error_count = current_state
+                                .and_then(|s| s.error_count)
+                                .unwrap_or(0) + 1;
+                            state.set(keyf, ItemState {
+                                etag: current_state.and_then(|s| s.etag.clone()),
+                                updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                size: current_state.and_then(|s| s.size),
+                                content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                last_error: Some(e.to_string()),
+                                error_count: Some(error_count),
+                            });
                         }
                     }
                 }
@@ -480,6 +583,8 @@ async fn sync_module(
                                     updated_at: assign.updated_at.clone(),
                                     size: Some(md.len() as u64),
                                     content_hash: Some(hash),
+                                    last_error: None,
+                                    error_count: None,
                                 },
                             );
                             info!(course_id, module_id = m.id, path = %dest.display(), "wrote assignment markdown");
@@ -527,13 +632,45 @@ async fn sync_module(
                                         }
                                     } else {
                                         ensure_dir(dest.parent().unwrap()).await?;
-                                        download_if_needed(httpctx, &f, &dest, state, verbose)
-                                            .await?;
-                                        info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                        match download_if_needed(httpctx, &f, &dest, state, verbose).await {
+                                            Ok(()) => {
+                                                info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
+                                            }
+                                            Err(e) => {
+                                                warn!(course_id, module_id = m.id, file_id = fid, error = %e, "download failed");
+                                                let keyf = format!("file:{}", fid);
+                                                let current_state = state.get(&keyf);
+                                                let error_count = current_state
+                                                    .and_then(|s| s.error_count)
+                                                    .unwrap_or(0) + 1;
+                                                state.set(keyf, ItemState {
+                                                    etag: current_state.and_then(|s| s.etag.clone()),
+                                                    updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                                    size: current_state.and_then(|s| s.size),
+                                                    content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                                    last_error: Some(e.to_string()),
+                                                    error_count: Some(error_count),
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file (assignment)")
+                                    warn!(course_id, module_id = m.id, file_id = fid, error = %e, "unable to fetch file (assignment)");
+                                    // Record error in state
+                                    let keyf = format!("file:{}", fid);
+                                    let current_state = state.get(&keyf);
+                                    let error_count = current_state
+                                        .and_then(|s| s.error_count)
+                                        .unwrap_or(0) + 1;
+                                    state.set(keyf, ItemState {
+                                        etag: current_state.and_then(|s| s.etag.clone()),
+                                        updated_at: current_state.and_then(|s| s.updated_at.clone()),
+                                        size: current_state.and_then(|s| s.size),
+                                        content_hash: current_state.and_then(|s| s.content_hash.clone()),
+                                        last_error: Some(e.to_string()),
+                                        error_count: Some(error_count),
+                                    });
                                 }
                             }
                         }
@@ -636,6 +773,8 @@ async fn download_if_needed(
             updated_at: f.updated_at.clone(),
             size: final_size,
             content_hash: None,
+            last_error: None,
+            error_count: None,
         },
     );
     Ok(())
