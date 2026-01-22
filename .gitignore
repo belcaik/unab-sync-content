@@ -6,3 +6,7 @@ secret
 
 # Auto Claude data directory
 .auto-claude/
+
+# Local CI testing
+.actrc
+.secrets
