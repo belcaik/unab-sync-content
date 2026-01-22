@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-## [Unreleased]
+## [0.0.1] - 2026-01-22
 
 ### Bug Fixes
 
@@ -14,14 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Adjust Conventional Commits section formatting
-- update README for improved usage instructions and configuration details
+- Update README for improved usage instructions and configuration details
 
 ### Features
 
 - Initialize u_crawler project with basic CLI and configuration management
-- **logging**: Add file logger and config
-- **canvas**: Add HTTP client, pagination, and scan listing
-- **sync**: Add sync engine with markdown pages and attachment downloads
+- **logging**: Add file logger and config\n\n- tracing-based file logger writing to configured path\n- [logging] level+file in config with tilde expansion\n- initialize logger early in main and add error logs\n- README: logging section and examples
+- **canvas**: Add HTTP client, pagination, and scan listing\n\n- HTTP client with UA and compression\n- Link header parser and tests\n- Canvas client: list courses, modules, files, get page\n- Wire scan to list modules and derived file count
+- **sync**: Add sync engine with markdown pages and attachment downloads\n\n- Save module pages to Markdown, compute content hash\n- Download file attachments with ETag skip and Range resume\n- Add fs utilities and persistent JSON state per course
 - **zoom**: Implement Zoom API client and CDP sniffing functionality
 - Enhance Zoom integration with replay header management and download automation
 - Add flow command for capturing and downloading Zoom recordings
@@ -38,10 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add initial configuration files for project setup
 - Revamp README for improved clarity and structure
 - Add initial configuration and status files for project setup
+- Add changelog generation workflow and initial changelog file
 
 ### Miscellaneous
 
-- Sanitize example config and update Cargo.lock
+- Sanitize example config and update Cargo.lock\n\n- Remove accidental token from assets/config.toml\n- Update lockfile for new dependencies
 - Enhance CI/CD workflows with improved build and release processes
 - Update .gitignore to include local CI testing files
 - Refactor release workflow to simplify tag handling and improve asset upload process
