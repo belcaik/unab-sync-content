@@ -5,7 +5,6 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"  # Pre-releases like v1.0.0-beta.1
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,22 +17,13 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
     steps:
       - uses: actions/checkout@v4
-      - name: Get version from tag
-        id: tag
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       - name: Create GitHub Release
-        id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.version }}
-          name: Release ${{ steps.tag.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.tag.outputs.version, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
 
   build-and-upload:
@@ -44,23 +34,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (glibc)
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
 
-          # Linux x86_64 (musl - static binary)
           - name: linux-x86_64-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            archive: tar.gz
 
-          # Windows x86_64
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -83,16 +67,18 @@ jobs:
 
       - name: Prepare archive (Unix)
         if: runner.os != 'Windows'
+        id: archive_unix
         run: |
           ARCHIVE_NAME="${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.name }}"
           mkdir -p "$ARCHIVE_NAME"
           cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" "$ARCHIVE_NAME/"
           cp README.md LICENSE* "$ARCHIVE_NAME/" 2>/dev/null || true
           tar czvf "$ARCHIVE_NAME.tar.gz" "$ARCHIVE_NAME"
-          echo "ASSET=$ARCHIVE_NAME.tar.gz" >> $GITHUB_ENV
+          echo "asset_path=$ARCHIVE_NAME.tar.gz" >> $GITHUB_OUTPUT
 
       - name: Prepare archive (Windows)
         if: runner.os == 'Windows'
+        id: archive_windows
         shell: pwsh
         run: |
           $ARCHIVE_NAME = "${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.name }}"
@@ -101,9 +87,16 @@ jobs:
           Copy-Item README.md -Destination "$ARCHIVE_NAME/" -ErrorAction SilentlyContinue
           Get-ChildItem LICENSE* -ErrorAction SilentlyContinue | Copy-Item -Destination "$ARCHIVE_NAME/"
           Compress-Archive -Path "$ARCHIVE_NAME/*" -DestinationPath "$ARCHIVE_NAME.zip"
-          echo "ASSET=$ARCHIVE_NAME.zip" >> $env:GITHUB_ENV
+          echo "asset_path=$ARCHIVE_NAME.zip" >> $env:GITHUB_OUTPUT
 
-      - name: Upload release asset
+      - name: Upload release asset (Unix)
+        if: runner.os != 'Windows'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: ${{ steps.archive_unix.outputs.asset_path }}
+
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.archive_windows.outputs.asset_path }}
