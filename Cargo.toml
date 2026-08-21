@@ -3,6 +3,13 @@ name = "u_crawler"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+# Matches the CI gate, so a local `cargo clippy` fails on the same things.
+too_many_arguments = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+large_enum_variant = "deny"
+
 [dependencies]
 tokio = { version = "1.39", features = ["fs", "macros", "rt-multi-thread", "process"] }
 clap = { version = "4.5", features = ["derive"] }
