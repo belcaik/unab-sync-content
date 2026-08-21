@@ -41,7 +41,7 @@ pub enum Dest<'a> {
 /// Deliberately independent of *which* feature discovered the file: the same
 /// file reachable from both a module and an announcement is one item, fetched
 /// once.
-fn state_key(file_id: u64) -> String {
+pub fn state_key(file_id: u64) -> String {
     format!("file:{file_id}")
 }
 
