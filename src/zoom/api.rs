@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::http::HttpCtx;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{
     RecordingFileResponse, RecordingListResponse, RecordingSummary, RecordingsResult,
@@ -32,7 +33,7 @@ pub enum ZoomApiError {
 }
 
 pub struct ZoomClient {
-    client: Client,
+    http: HttpCtx,
     scid: String,
     base_url: Url,
 }
@@ -105,16 +106,14 @@ impl ZoomClient {
             }
         }
 
-        // Log the headers we just configured (filtering sensitive values if needed, but x-zm keys are useful)
-        for (name, value) in headers.iter() {
-            if let Ok(v) = value.to_str() {
-                if name.as_str().starts_with("x-zm")
-                    || name.as_str().eq_ignore_ascii_case("x-xsrf-token")
-                {
-                    info!("ZoomClient header: {} = {}", name, v);
-                }
-            }
-        }
+        // Log which session headers are configured, never their values: these are
+        // live credentials and the log file is append-only for the install's life.
+        let configured: Vec<&str> = headers
+            .keys()
+            .map(|n| n.as_str())
+            .filter(|n| n.starts_with("x-zm") || n.eq_ignore_ascii_case("x-xsrf-token"))
+            .collect();
+        info!(?configured, "zoom client session headers");
 
         let client = Client::builder()
             .cookie_provider(cookie_store)
@@ -122,7 +121,9 @@ impl ZoomClient {
             .build()?;
 
         Ok(Self {
-            client,
+            // Wrapped so Zoom API calls are paced and retried like every other
+            // request in the crate.
+            http: HttpCtx::new(cfg, client),
             scid,
             base_url: Url::parse(ZOOM_BASE)?,
         })
@@ -148,12 +149,10 @@ impl ZoomClient {
 
         debug!(url = %url, "validating Zoom cookies");
 
-        // We use a separate client or the existing one? Existing one has cookies.
         // We need to ensure we don't follow redirects to detect 302 easily,
         // OR we check if the final URL is still the API URL.
-        // But `self.client` is already built.
         // Let's just check status 200.
-        match self.client.get(url).send().await {
+        match self.http.send(self.http.client.get(url)).await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 200 {
@@ -207,7 +206,7 @@ impl ZoomClient {
             }
             info!(page, url = %url, "fetching Zoom recordings page");
 
-            let resp = self.client.get(url.clone()).send().await?;
+            let resp = self.http.send(self.http.client.get(url.clone())).await?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -282,7 +281,7 @@ impl ZoomClient {
             qp.append_pair("lti_scid", &self.scid);
         }
 
-        let resp = self.client.get(url.clone()).send().await?;
+        let resp = self.http.send(self.http.client.get(url.clone())).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

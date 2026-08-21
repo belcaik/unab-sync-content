@@ -538,9 +538,13 @@ impl<'a> ZoomHeadless<'a> {
                 Ok(()) => warn!("✓ Downloaded successfully!"),
                 Err(FfmpegError::Process { .. }) => {
                     warn!("ffmpeg failed, trying HTTP fallback");
-                    if let Err(e) =
-                        crate::zoom::download::http_download(&headers, &asset.download_url, &dest)
-                            .await
+                    if let Err(e) = crate::zoom::download::http_download(
+                        cfg,
+                        &headers,
+                        &asset.download_url,
+                        &dest,
+                    )
+                    .await
                     {
                         warn!("✗ HTTP download also failed: {:?}", e);
                     } else {
