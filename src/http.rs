@@ -64,6 +64,9 @@ pub fn parse_next_link(link_header: &str) -> Option<Url> {
     None
 }
 
+/// Upper bound on a server-supplied `Retry-After`.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct HttpCtx {
     pub client: Client,
@@ -101,34 +104,101 @@ impl HttpCtx {
             *last = Instant::now();
         }
 
-        let mut attempt = 0;
-        loop {
-            let resp = rb.try_clone().expect("clone request").send().await?;
-            if resp.status().as_u16() == 429 {
-                let wait = resp
-                    .headers()
-                    .get(header::RETRY_AFTER)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| Duration::from_millis(500 * (attempt + 1) as u64));
-                warn!(attempt, wait_ms = %wait.as_millis(), "rate limited (429), backing off");
-                sleep(wait).await;
-            } else if resp.status().is_server_error() && attempt < self.max_retries {
-                let back = Duration::from_millis(300 * (1 << attempt));
-                warn!(attempt, status = %resp.status().as_u16(), backoff_ms = %back.as_millis(), "server error, retrying");
-                sleep(back).await;
-            } else {
+        // A streaming body cannot be replayed, so such a request gets one attempt.
+        if rb.try_clone().is_none() {
+            return rb.send().await;
+        }
+
+        for attempt in 0..=self.max_retries {
+            let resp = rb
+                .try_clone()
+                .expect("checked clonable above")
+                .send()
+                .await?;
+
+            let backoff = match Self::retry_after(&resp, attempt) {
+                Some(d) => d,
+                None => return Ok(resp),
+            };
+            if attempt == self.max_retries {
+                warn!(
+                    attempt,
+                    status = %resp.status().as_u16(),
+                    "retries exhausted, returning last response"
+                );
                 return Ok(resp);
             }
-            attempt += 1;
+            warn!(attempt, status = %resp.status().as_u16(), backoff_ms = %backoff.as_millis(), "retrying");
+            sleep(backoff).await;
         }
+
+        // `max_retries` is a `usize`, so the loop above always runs at least once and
+        // every path out of it returns.
+        unreachable!("retry loop always returns")
+    }
+
+    /// Returns how long to wait before retrying, or `None` if the response is final.
+    fn retry_after(resp: &Response, attempt: usize) -> Option<Duration> {
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            let hinted = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            // `Retry-After` is server-controlled; cap it so a hostile or buggy value
+            // cannot park the process for hours.
+            return Some(match hinted {
+                Some(d) => d.min(MAX_RETRY_AFTER),
+                None => Duration::from_millis(500 * (attempt as u64 + 1)),
+            });
+        }
+        if status.is_server_error() {
+            return Some(Duration::from_millis(300 * (1 << attempt.min(6))));
+        }
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response(status: u16, retry_after: Option<&str>) -> Response {
+        let mut b = http::Response::builder().status(status);
+        if let Some(v) = retry_after {
+            b = b.header(header::RETRY_AFTER, v);
+        }
+        Response::from(b.body("").unwrap())
+    }
+
+    #[test]
+    fn retry_after_is_none_for_success() {
+        assert!(HttpCtx::retry_after(&response(200, None), 0).is_none());
+    }
+
+    #[test]
+    fn retry_after_is_none_for_client_errors_other_than_429() {
+        assert!(HttpCtx::retry_after(&response(404, None), 0).is_none());
+    }
+
+    #[test]
+    fn retry_after_honours_the_server_hint_on_429() {
+        let d = HttpCtx::retry_after(&response(429, Some("7")), 0).unwrap();
+        assert_eq!(d, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn retry_after_caps_a_hostile_server_hint() {
+        let d = HttpCtx::retry_after(&response(429, Some("999999")), 0).unwrap();
+        assert_eq!(d, MAX_RETRY_AFTER);
+    }
+
+    #[test]
+    fn retry_after_backs_off_on_server_errors() {
+        assert!(HttpCtx::retry_after(&response(503, None), 0).is_some());
+    }
 
     #[test]
     fn link_header_parses_next() {

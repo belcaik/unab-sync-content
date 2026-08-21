@@ -117,16 +117,53 @@ pub async fn run_sync(
         }
         module_progress.finish_and_clear();
 
-        // Sync Zoom recordings for this course
-        println!("Starting Zoom sync for course {}...", c.id);
-        match crate::zoom::zoom_flow(c.id, 1, None).await {
-            Ok(()) => {
-                println!("✓ Zoom sync completed for course {}", c.id);
+        // Sync announcements for this course
+        if cfg.announcements.enabled {
+            match crate::announcements::run_for_course(
+                &cfg,
+                &canvas,
+                &httpctx,
+                &c,
+                &course_dir,
+                &mut state,
+                dry_run,
+                verbose,
+            )
+            .await
+            {
+                Ok(s) => {
+                    if dry_run && s.announcements > 0 {
+                        println!(
+                            "DRY-RUN announcements for course {}: {} (links: {}, media: {})",
+                            c.id, s.announcements, s.links, s.media
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(course_id = c.id, error = %e, "announcements failed for course");
+                    eprintln!("Warning: announcements failed for course {}: {}", c.id, e);
+                }
             }
-            Err(e) => {
-                warn!(course_id = c.id, error = %e, "zoom flow failed for course");
-                eprintln!("Warning: Zoom sync failed for course {}: {}", c.id, e);
-                // Continue with other courses even if Zoom fails
+        }
+
+        // Sync Zoom recordings for this course.
+        //
+        // The Zoom flow launches a browser, performs an interactive SSO and downloads
+        // video, so it must not run under --dry-run, and it must honour zoom.enabled.
+        if !cfg.zoom.enabled {
+            info!(course_id = c.id, "zoom disabled in config; skipping");
+        } else if dry_run {
+            println!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
+        } else {
+            println!("Starting Zoom sync for course {}...", c.id);
+            match crate::zoom::zoom_flow(c.id, None).await {
+                Ok(()) => {
+                    println!("✓ Zoom sync completed for course {}", c.id);
+                }
+                Err(e) => {
+                    warn!(course_id = c.id, error = %e, "zoom flow failed for course");
+                    // Continue with other courses even if Zoom fails
+                }
             }
         }
 

@@ -2934,6 +2934,7 @@ dependencies = [
  "futures-util",
  "hex",
  "html2md",
+ "http",
  "indicatif",
  "regex",
  "reqwest",

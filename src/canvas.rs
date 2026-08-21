@@ -218,6 +218,24 @@ pub struct Assignment {
     pub updated_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Announcement {
+    pub id: u64,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub posted_at: Option<String>,
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub author: Option<AnnouncementAuthor>,
+    #[serde(default)]
+    pub attachments: Vec<FileObj>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnnouncementAuthor {
+    pub display_name: Option<String>,
+}
+
 impl CanvasClient {
     pub async fn get_page(&self, course_id: u64, page_url: &str) -> Result<PageObj, CanvasError> {
         let url = self
@@ -278,6 +296,53 @@ impl CanvasClient {
                 Err(CanvasError::Decode(e.to_string()))
             }
         }
+    }
+
+    pub async fn list_announcements(
+        &self,
+        course_id: u64,
+    ) -> Result<Vec<Announcement>, CanvasError> {
+        let mut out = Vec::new();
+        let mut next = Some(
+            self.base
+                .join(&format!(
+                    "/api/v1/courses/{}/discussion_topics?only_announcements=true&per_page=100",
+                    course_id
+                ))
+                .unwrap(),
+        );
+        while let Some(url) = next.take() {
+            debug!(method = "GET", course_id = course_id, url = %url, "canvas request (announcements)");
+            let resp = self
+                .http
+                .get(url.clone())
+                .header(header::AUTHORIZATION, self.auth_header_val())
+                .send()
+                .await?;
+            let status = resp.status();
+            let link = resp
+                .headers()
+                .get(header::LINK)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.to_string());
+            let text = resp.text().await?;
+            if !status.is_success() {
+                let snippet = text.chars().take(1000).collect::<String>();
+                error!(status = %status.as_u16(), body = %snippet, course_id, "canvas non-success response (announcements)");
+                return Err(CanvasError::Status(status.as_u16(), snippet));
+            }
+            let mut page: Vec<Announcement> = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    let snippet = text.chars().take(1000).collect::<String>();
+                    error!(error = %e, body = %snippet, course_id, "canvas decode failure (announcements)");
+                    return Err(CanvasError::Decode(e.to_string()));
+                }
+            };
+            out.append(&mut page);
+            next = link.as_deref().and_then(parse_next_link);
+        }
+        Ok(out)
     }
 
     pub async fn list_assignments(&self, course_id: u64) -> Result<Vec<Assignment>, CanvasError> {

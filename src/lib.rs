@@ -1,3 +1,4 @@
+pub mod announcements;
 pub mod canvas;
 pub mod config;
 pub mod ffmpeg;

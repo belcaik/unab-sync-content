@@ -13,11 +13,7 @@ use models::{RecordingSummary, ZoomRecordingFile};
 use std::error::Error;
 use tracing::info;
 
-pub async fn zoom_flow(
-    course_id: u64,
-    concurrency: usize,
-    since: Option<String>,
-) -> Result<(), Box<dyn Error>> {
+pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<dyn Error>> {
     let cfg = crate::config::Config::load_or_init()?;
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
@@ -48,15 +44,17 @@ pub async fn zoom_flow(
         .find(|(k, _)| k.to_lowercase() == "x-zm-haid")
         .map(|(_, v)| v);
 
+    // Log only whether each credential is present. These are live session tokens and
+    // the logger appends to a file for the lifetime of the install.
     info!(
-        "SESSION FROM DB -> course_id={}: lti_scid={:?}, xsrf_token={:?}, zm_aid={:?}, zm_cluster_id={:?}, zm_haid={:?}, cookies_count={}",
         course_id,
-        scid,
-        xsrf_token,
-        zm_aid,
-        zm_cluster_id,
-        zm_haid,
-        cookies.len(),
+        has_scid = scid.is_some(),
+        has_xsrf_token = xsrf_token.is_some(),
+        has_zm_aid = zm_aid.is_some(),
+        has_zm_cluster_id = zm_cluster_id.is_some(),
+        has_zm_haid = zm_haid.is_some(),
+        cookies_count = cookies.len(),
+        "loaded zoom session from db"
     );
 
     let has_min_creds = scid.is_some()
@@ -102,11 +100,11 @@ pub async fn zoom_flow(
             .map(|(_, v)| v);
 
         info!(
-            "HEADLESS RESULT -> course_id={}: lti_scid={:?}, xsrf_token={:?}, cookies_count={}",
             course_id,
-            scid,
-            xsrf_token,
-            cookies.len(),
+            has_scid = scid.is_some(),
+            has_xsrf_token = xsrf_token.is_some(),
+            cookies_count = cookies.len(),
+            "headless capture result"
         );
     }
 
@@ -186,9 +184,7 @@ pub async fn zoom_flow(
 
     // 4. Capture play URLs and download immediately (one by one to avoid token expiration)
     println!("Starting capture and download (tokens expire quickly, processing one by one)...");
-    headless
-        .capture_and_download_immediately(&cfg, &db, course_id, all_files, concurrency)
-        .await?;
+    headless.capture_and_download_immediately(all_files).await?;
 
     println!("All recordings processed!");
     Ok(())

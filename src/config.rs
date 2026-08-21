@@ -34,6 +34,25 @@ pub struct Config {
     pub logging: Logging,
     pub canvas: Canvas,
     pub zoom: Zoom,
+    #[serde(default)]
+    pub announcements: Announcements,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Announcements {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub download_media: bool,
+}
+
+impl Default for Announcements {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            download_media: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -101,6 +120,7 @@ impl Default for Config {
                 user_agent: "Mozilla/5.0".to_string(),
                 external_tool_id: 187,
             },
+            announcements: Announcements::default(),
         }
     }
 }

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **announcements**: Add `announcements` subcommand and sync integration that downloads every course's announcements as markdown, extracts links/media from the body, and downloads Canvas-hosted attachments alongside an `index.json` per course
 - Initialize u_crawler project with basic CLI and configuration management
 - **logging**: Add file logger and config
 - **canvas**: Add HTTP client, pagination, and scan listing
@@ -49,5 +50,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Refactor
 
 - Improve code readability by formatting and restructuring error handling in sync_module and handle_status functions
-
 

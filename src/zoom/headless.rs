@@ -31,13 +31,6 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
-                // .with_head()
-                // Running in full headless mode (no GUI)
-                // Let's try headless first, but maybe provide an option?
-                // The user said "headless browser", so let's stick to headless unless debugging.
-                // Actually, for SSO, sometimes headful is required if there are captchas or complex interactions,
-                // but standard Azure AD usually works in headless if user agent is set correctly.
-                // Let's use the config user agent.
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
                 .arg("--disable-dev-shm-usage")
@@ -621,16 +614,46 @@ impl<'a> ZoomHeadless<'a> {
             println!("Warning: sso_password not set; skipping password entry.");
         }
 
-        // "Stay signed in?" - usually has a "Yes" button (input[type="submit"] or button)
-        if page.content().await?.contains("Stay signed in?") {
-            println!("Handling 'Stay signed in' prompt...");
-            // The "Yes" button often has id "idSIButton9"
-            if page.find_element("#idSIButton9").await.is_ok() {
-                page.find_element("#idSIButton9").await?.click().await?;
+        // "Stay signed in?" prompt - poll for it since the page may still be loading after password submission.
+        // Microsoft shows this as "Stay signed in?" (English) or "¿Mantener la sesión iniciada?" (Spanish).
+        let kmsi_start = Instant::now();
+        while kmsi_start.elapsed() < Duration::from_secs(15) {
+            let url = page.url().await?.unwrap_or_default();
+
+            // If we already left the Microsoft login domain, SSO is done
+            if !url.contains("login.microsoftonline.com") {
+                println!("SSO complete, redirected to: {}", url);
+                break;
             }
+
+            if let Ok(html) = page.content().await {
+                let html_lower = html.to_lowercase();
+                if html_lower.contains("stay signed in")
+                    || html_lower.contains("mantener la sesión iniciada")
+                    || html_lower.contains("mantener la sesion iniciada")
+                    || html_lower.contains("keep me signed in")
+                    || html_lower.contains("no volver a mostrar")
+                    || html_lower.contains("don't show this again")
+                {
+                    println!("Handling 'Stay signed in' prompt...");
+                    if let Ok(button) = page.find_element("#idSIButton9").await {
+                        button.click().await?;
+                    } else if let Ok(button) = page.find_element("input[type='submit']").await {
+                        button.click().await?;
+                    }
+                    sleep(Duration::from_secs(3)).await;
+                    break;
+                }
+            }
+
+            sleep(Duration::from_millis(500)).await;
         }
 
+        // Wait for final redirects back to Canvas/Zoom
         sleep(Duration::from_secs(5)).await;
+
+        let final_url = page.url().await?.unwrap_or_default();
+        println!("Post-SSO URL: {}", final_url);
         Ok(())
     }
 
@@ -768,17 +791,16 @@ impl<'a> ZoomHeadless<'a> {
 
     pub async fn capture_and_download_immediately(
         &self,
-        cfg: &crate::config::Config,
-        _db: &ZoomDb,
-        course_id: u64,
         files: Vec<ZoomRecordingFile>,
-        _concurrency: usize, // Not used since we process one-by-one
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
         use crate::fsutil::sanitize_filename_preserve_ext;
         use crate::zoom::models::ReplayHeader;
         use std::collections::HashMap;
         use std::path::PathBuf;
+
+        let cfg = self.config;
+        let course_id = self.course_id;
 
         ensure_ffmpeg_available(&cfg.zoom.ffmpeg_path).await?;
 
