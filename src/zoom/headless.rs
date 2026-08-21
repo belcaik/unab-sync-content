@@ -111,10 +111,6 @@ impl<'a> ZoomHeadless<'a> {
 
                 // We only care if we have a response status code (response stage)
                 if event.response_status_code.is_some() {
-                    // let url = event.request.url.clone();
-                    // println!("Fetch Interception: Response Paused for {}", url);
-
-                    // Get body
                     match page_inner
                         .execute(
                             chromiumoxide::cdp::browser_protocol::fetch::GetResponseBodyParams::new(
@@ -334,18 +330,6 @@ impl<'a> ZoomHeadless<'a> {
                 if let Some(h) = &data.1 {
                     captured_headers = h.clone();
                 }
-                // The API headers capture logic was removed from the old network listener.
-                // If API headers are still needed, a separate Fetch interception or network listener
-                // for specific API calls would be required. For now, it will remain empty.
-                // The user's instruction only provided scid capture via Fetch.
-                // For now, we'll keep the `captured_headers` variable but it won't be populated by this new logic.
-                // If the user wants to capture API headers via Fetch, they need to provide that pattern.
-                // For now, we'll assume the `captured_headers` map will remain empty unless explicitly added.
-                // The original code had:
-                // if data.1.is_none() && url.contains("/api/v1/lti/rich/recording") { ... data.1 = Some(headers); }
-                // This part is not covered by the new Fetch interception.
-                // To keep the functionality, we would need to add another Fetch pattern for API calls.
-                // For now, following the instruction, this part of `captured_headers` will not be filled.
             }
 
             if scid.is_some() {

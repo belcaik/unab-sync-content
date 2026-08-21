@@ -27,10 +27,6 @@ pub enum ZoomApiError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Db(#[from] Box<dyn std::error::Error>),
-    #[error(transparent)]
-    Cookie(#[from] cookie::ParseError),
-    #[error(transparent)]
-    CookieStore(#[from] cookie_store::Error),
     #[error("{0}")]
     Message(String),
 }
@@ -268,7 +264,6 @@ impl ZoomClient {
             status: Some(true),
             code: Some(200),
             result: Some(RecordingsResult {
-                page_num: None,
                 page_size: Some(all.len() as i32),
                 total: Some(all.len() as i64),
                 list: Some(all),

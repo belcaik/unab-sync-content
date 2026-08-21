@@ -59,7 +59,6 @@ pub struct RecordingListResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingsResult {
-    pub page_num: Option<i32>,
     pub page_size: Option<i32>,
     pub total: Option<i64>,
     pub list: Option<Vec<RecordingSummary>>,
