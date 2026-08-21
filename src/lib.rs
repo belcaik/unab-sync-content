@@ -1,9 +1,11 @@
 pub mod announcements;
 pub mod canvas;
 pub mod config;
+pub mod download;
 pub mod ffmpeg;
 pub mod fsutil;
 pub mod http;
+pub mod links;
 pub mod logger;
 pub mod progress;
 pub mod recordings;

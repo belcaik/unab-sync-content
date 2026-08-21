@@ -1,18 +1,15 @@
-use crate::canvas::{Assignment, CanvasClient, FileObj, Module};
+use crate::canvas::{Assignment, CanvasClient, Module};
 use crate::config::Config;
-use crate::fsutil::{
-    atomic_rename, atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
-};
+use crate::download::{download_if_needed, Dest};
+use crate::fsutil::{atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext};
 use crate::http::{build_http_client, HttpCtx};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
 use html2md::parse_html;
 use regex::Regex;
-use reqwest::header;
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 pub async fn run_sync(
@@ -307,10 +304,10 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    match download_if_needed(httpctx, &f, &dest, state, verbose)
+                                    match download_if_needed(httpctx, &f, Dest::Exact(&dest), state)
                                         .await
                                     {
-                                        Ok(()) => {
+                                        Ok(_) => {
                                             info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                         }
                                         Err(e) => {
@@ -460,10 +457,10 @@ async fn sync_module(
                                     }
                                 } else {
                                     ensure_dir(dest.parent().unwrap()).await?;
-                                    match download_if_needed(httpctx, &f, &dest, state, verbose)
+                                    match download_if_needed(httpctx, &f, Dest::Exact(&dest), state)
                                         .await
                                     {
-                                        Ok(()) => {
+                                        Ok(_) => {
                                             info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                         }
                                         Err(e) => {
@@ -559,8 +556,10 @@ async fn sync_module(
                                 }
                             } else {
                                 ensure_dir(dest.parent().unwrap()).await?;
-                                match download_if_needed(httpctx, &f, &dest, state, verbose).await {
-                                    Ok(()) => {
+                                match download_if_needed(httpctx, &f, Dest::Exact(&dest), state)
+                                    .await
+                                {
+                                    Ok(_) => {
                                         info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                     }
                                     Err(e) => {
@@ -703,10 +702,15 @@ async fn sync_module(
                                         }
                                     } else {
                                         ensure_dir(dest.parent().unwrap()).await?;
-                                        match download_if_needed(httpctx, &f, &dest, state, verbose)
-                                            .await
+                                        match download_if_needed(
+                                            httpctx,
+                                            &f,
+                                            Dest::Exact(&dest),
+                                            state,
+                                        )
+                                        .await
                                         {
-                                            Ok(()) => {
+                                            Ok(_) => {
                                                 info!(course_id, module_id = m.id, file_id = fid, path = %dest.display(), "downloaded file [{}]", f_ext);
                                             }
                                             Err(e) => {
@@ -765,103 +769,6 @@ async fn sync_module(
         }
     }
     Ok((pages_planned, files_planned))
-}
-
-async fn download_if_needed(
-    httpctx: &HttpCtx,
-    f: &FileObj,
-    dest: &Path,
-    state: &mut State,
-    verbose: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let key = format!("file:{}", f.id);
-    let url = f
-        .download_url
-        .as_ref()
-        .or(f.url.as_ref())
-        .ok_or("missing file url")?;
-
-    // Probe HEAD for ETag/size
-    let head = httpctx.send(httpctx.client.head(url)).await?;
-    let status = head.status();
-    if !status.is_success() {
-        warn!(file_id = f.id, status = %status.as_u16(), "head non-success, will GET");
-    }
-    let etag = head
-        .headers()
-        .get(header::ETAG)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string());
-    let mut size = head
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    if size.is_none() {
-        size = f.size;
-    }
-
-    let prev = state.get(&key);
-    if let (Some(prev), Some(et)) = (prev, etag.as_ref()) {
-        if prev.etag.as_deref() == Some(et) {
-            info!(file_id = f.id, path = %dest.display(), "unchanged (etag)");
-            if verbose {
-                info!(file_id = f.id, path = %dest.display(), "verbose skip (unchanged file)");
-            }
-            return Ok(());
-        }
-    }
-
-    // Prepare dest and part
-    let part = dest.with_extension("part");
-    let mut start = 0u64;
-    if let Ok(meta) = tokio::fs::metadata(&part).await {
-        start = meta.len();
-    }
-
-    // GET with Range if resuming
-    let mut req = httpctx.client.get(url);
-    if start > 0 {
-        req = req.header(header::RANGE, format!("bytes={}-", start));
-    }
-    let resp = httpctx.send(req).await?;
-    if !(resp.status().is_success() || resp.status().as_u16() == 206) {
-        return Err(format!("GET failed: {}", resp.status()).into());
-    }
-
-    // Stream to part
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&part)
-        .await?;
-    let mut stream = resp.bytes_stream();
-    use futures_util::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        file.write_all(&bytes).await?;
-    }
-    file.flush().await?;
-    atomic_rename(&part, dest).await?;
-    info!(file_id = f.id, path = %dest.display(), "downloaded");
-
-    // Update state
-    let final_size = match tokio::fs::metadata(dest).await {
-        Ok(m) => Some(m.len()),
-        Err(_) => size,
-    };
-    state.set(
-        key,
-        ItemState {
-            etag,
-            updated_at: f.updated_at.clone(),
-            size: final_size,
-            content_hash: None,
-            last_error: None,
-            error_count: None,
-        },
-    );
-    Ok(())
 }
 
 fn sha1_hex(data: &[u8]) -> String {

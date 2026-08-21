@@ -93,15 +93,20 @@ impl HttpCtx {
     }
 
     pub async fn send(&self, rb: RequestBuilder) -> reqwest::Result<Response> {
-        let _permit = self.limiter.acquire().await.expect("semaphore");
-        // RPS pacing
-        {
+        let _permit = self.limiter.acquire().await.ok();
+
+        // RPS pacing: reserve this request's slot, then release the lock *before*
+        // sleeping. Holding the guard across the await would serialise every request
+        // at this gate and make the concurrency semaphore above it meaningless.
+        let wake_at = {
             let mut last = self.last.lock().await;
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                sleep(self.min_interval - elapsed).await;
-            }
-            *last = Instant::now();
+            let slot = (*last + self.min_interval).max(Instant::now());
+            *last = slot;
+            slot
+        };
+        let now = Instant::now();
+        if wake_at > now {
+            sleep(wake_at - now).await;
         }
 
         // A streaming body cannot be replayed, so such a request gets one attempt.
