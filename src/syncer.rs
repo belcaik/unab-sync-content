@@ -174,7 +174,6 @@ pub async fn run_sync(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Number of items a module sync wrote, or would write under `--dry-run`.
 #[derive(Debug, Default, Clone, Copy)]
 struct SyncCounts {
