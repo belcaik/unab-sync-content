@@ -1,4 +1,4 @@
-use crate::canvas::{CanvasClient, FileObj};
+use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::config::Config;
 use crate::download::{download_if_needed, Dest};
 use crate::fsutil::{atomic_write, ensure_dir, sanitize_component};
@@ -51,7 +51,7 @@ pub async fn run_discovery(
     }
 
     let course_pb = progress_bar(selected.len() as u64, "Scanning announcements");
-    let mut totals = (0usize, 0usize, 0usize); // announcements, links, media
+    let mut totals = CourseSummary::default();
     for course in selected {
         course_pb.inc(1);
         course_pb.set_message(format!("Course {}", course.id));
@@ -62,24 +62,22 @@ pub async fn run_discovery(
         let state_path = course_dir.join("state.json");
         let mut state = State::load(&state_path).await;
 
-        let summary = run_for_course(
+        let summary = AnnouncementSync::new(
             &cfg,
             &canvas,
             &httpctx,
-            &course,
+            course.id,
             &course_dir,
-            &mut state,
             dry_run,
             false,
         )
+        .run(&course.name, &mut state)
         .await
         .unwrap_or_else(|e| {
             warn!(course_id = course.id, error = %e, "announcements failed for course");
             CourseSummary::default()
         });
-        totals.0 += summary.announcements;
-        totals.1 += summary.links;
-        totals.2 += summary.media;
+        totals += summary;
 
         if !dry_run {
             state.save(&state_path).await?;
@@ -90,18 +88,27 @@ pub async fn run_discovery(
     println!(
         "{}Announcements: {} | links: {} | media refs: {}",
         if dry_run { "DRY-RUN: " } else { "" },
-        totals.0,
-        totals.1,
-        totals.2,
+        totals.announcements,
+        totals.links,
+        totals.media,
     );
     Ok(())
 }
 
-#[derive(Debug, Default)]
+/// What one course's announcement sync produced.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct CourseSummary {
     pub announcements: usize,
     pub links: usize,
     pub media: usize,
+}
+
+impl std::ops::AddAssign for CourseSummary {
+    fn add_assign(&mut self, rhs: Self) {
+        self.announcements += rhs.announcements;
+        self.links += rhs.links;
+        self.media += rhs.media;
+    }
 }
 
 fn course_dir_for(cfg: &Config, course: &crate::canvas::Course) -> PathBuf {
@@ -117,235 +124,297 @@ fn course_dir_for(cfg: &Config, course: &crate::canvas::Course) -> PathBuf {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_for_course(
-    cfg: &Config,
-    canvas: &CanvasClient,
-    httpctx: &HttpCtx,
-    course: &crate::canvas::Course,
-    course_dir: &Path,
-    state: &mut State,
+/// One course's announcement sync.
+///
+/// Holds what every announcement in the course needs, so the per-announcement
+/// helpers take two arguments rather than eight.
+pub struct AnnouncementSync<'a> {
+    cfg: &'a Config,
+    canvas: &'a CanvasClient,
+    httpctx: &'a HttpCtx,
+    course_id: u64,
+    ann_dir: PathBuf,
+    media_dir: PathBuf,
     dry_run: bool,
     verbose: bool,
-) -> Result<CourseSummary, Box<dyn std::error::Error>> {
-    let ann_dir = course_dir.join("announcements");
-    let media_dir = ann_dir.join("media");
-    if !dry_run {
-        ensure_dir(&ann_dir).await?;
+}
+
+impl<'a> AnnouncementSync<'a> {
+    pub fn new(
+        cfg: &'a Config,
+        canvas: &'a CanvasClient,
+        httpctx: &'a HttpCtx,
+        course_id: u64,
+        course_dir: &Path,
+        dry_run: bool,
+        verbose: bool,
+    ) -> Self {
+        let ann_dir = course_dir.join("announcements");
+        let media_dir = ann_dir.join("media");
+        Self {
+            cfg,
+            canvas,
+            httpctx,
+            course_id,
+            ann_dir,
+            media_dir,
+            dry_run,
+            verbose,
+        }
     }
 
-    let sp = spinner(&format!("Loading announcements for {}", course.name));
-    let announcements = match canvas.list_announcements(course.id).await {
-        Ok(v) => v,
-        Err(e) => {
-            sp.finish_and_clear();
-            warn!(course_id = course.id, error = %e, "list_announcements failed; skipping");
-            return Ok(CourseSummary::default());
+    /// Whether media should actually be fetched. A dry run never writes.
+    fn downloads_media(&self) -> bool {
+        self.cfg.announcements.download_media && !self.dry_run
+    }
+
+    /// The path recorded in index.json, relative to the course directory.
+    fn relative_media_path(path: &Path) -> Option<String> {
+        let name = path.file_name()?.to_str()?;
+        Some(format!("announcements/media/{name}"))
+    }
+
+    /// Downloads one Canvas-hosted file, returning its course-relative path.
+    ///
+    /// A failure is logged and yields `None`: one missing attachment must not
+    /// abandon the announcement it came from.
+    async fn fetch_media(&self, file: &FileObj, state: &mut State) -> Option<String> {
+        match download_if_needed(
+            self.httpctx,
+            file,
+            Dest::InDir {
+                dir: &self.media_dir,
+                name: &media_name(file),
+            },
+            state,
+        )
+        .await
+        {
+            Ok(path) => Self::relative_media_path(&path),
+            Err(e) => {
+                warn!(course_id = self.course_id, file_id = file.id, error = %e, "media download failed");
+                state.record_error(crate::download::state_key(file.id), &e);
+                None
+            }
         }
-    };
-    sp.finish_and_clear();
+    }
 
-    let mut summary = CourseSummary::default();
-    let mut records: Vec<AnnouncementRecord> = Vec::with_capacity(announcements.len());
+    /// Resolves the media referenced in an announcement body, downloading the
+    /// Canvas-hosted ones when configured to.
+    async fn resolve_body_media(
+        &self,
+        refs: Vec<MediaRef>,
+        state: &mut State,
+    ) -> Result<Vec<MediaRef>, Box<dyn std::error::Error>> {
+        let mut out = Vec::with_capacity(refs.len());
+        for mut m in refs {
+            if let (true, Some(fid)) = (self.downloads_media(), m.file_id) {
+                match self.canvas.get_file(fid).await {
+                    Ok(f) => m.local_path = self.fetch_media(&f, state).await,
+                    Err(e) => {
+                        warn!(course_id = self.course_id, file_id = fid, error = %e, "media metadata fetch failed");
+                        state.record_error(crate::download::state_key(fid), &e);
+                    }
+                }
+            }
+            out.push(m);
+        }
+        Ok(out)
+    }
 
-    let pb = progress_bar(
-        announcements.len() as u64,
-        &format!("Announcements in {}", course.name),
-    );
-    for ann in announcements {
-        pb.inc(1);
-        let title = ann
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("announcement_{}", ann.id));
-        pb.set_message(title.clone());
-        let html = ann.message.clone().unwrap_or_default();
-        let extracted = extract_links(&html);
-        summary.announcements += 1;
-        summary.links += extracted.all.len();
-        summary.media += extracted.media.len();
+    /// Resolves the attachments the API returned alongside the announcement.
+    async fn resolve_attachments(
+        &self,
+        attachments: &[FileObj],
+        state: &mut State,
+    ) -> Vec<MediaRef> {
+        let mut out = Vec::with_capacity(attachments.len());
+        for att in attachments {
+            // The reference is recorded either way; only the download is
+            // conditional, so both cases share one construction.
+            let local_path = if self.downloads_media() {
+                self.fetch_media(att, state).await
+            } else {
+                None
+            };
+            out.push(MediaRef {
+                url: att
+                    .url
+                    .clone()
+                    .or_else(|| att.download_url.clone())
+                    .unwrap_or_default(),
+                kind: classify_by_filename(
+                    att.display_name
+                        .as_deref()
+                        .or(att.filename.as_deref())
+                        .unwrap_or(""),
+                ),
+                file_id: Some(att.id),
+                local_path,
+            });
+        }
+        out
+    }
 
+    /// The markdown filename for an announcement: date, slug, id.
+    fn body_filename(ann: &Announcement, title: &str) -> String {
         let date_prefix = ann
             .posted_at
             .as_deref()
             .and_then(|s| s.get(0..10))
-            .map(|d| format!("{}_", d))
+            .map(|d| format!("{d}_"))
             .unwrap_or_default();
-        let slug = sanitize_component(&title);
-        let slug_short: String = slug.chars().take(60).collect();
-        let body_filename = format!("{}{}_{}.md", date_prefix, slug_short, ann.id);
-        let body_path = ann_dir.join(&body_filename);
+        let slug: String = sanitize_component(title).chars().take(60).collect();
+        format!("{date_prefix}{slug}_{}.md", ann.id)
+    }
 
+    /// Writes the announcement body as markdown unless it is already current.
+    async fn write_body(
+        &self,
+        ann: &Announcement,
+        md: &str,
+        path: &Path,
+        state: &mut State,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let key = format!("announcement:{}", ann.id);
-        let prev = state.get(&key).cloned();
-        let unchanged = match (&prev, ann.posted_at.as_deref()) {
-            (Some(p), Some(posted)) => p.updated_at.as_deref() == Some(posted),
+        let unchanged = match (state.get(&key), ann.posted_at.as_deref()) {
+            (Some(prev), Some(posted)) => prev.updated_at.as_deref() == Some(posted),
             _ => false,
         };
 
-        let md = parse_html(&html);
-        let body_md_path_rel = format!("announcements/{}", body_filename);
+        if unchanged && path.exists() {
+            if self.verbose {
+                info!(
+                    course_id = self.course_id,
+                    announcement_id = ann.id,
+                    "announcement unchanged"
+                );
+            }
+            return Ok(());
+        }
 
-        if dry_run {
+        atomic_write(path, md.as_bytes()).await?;
+        state.set(
+            key,
+            ItemState {
+                etag: None,
+                updated_at: ann.posted_at.clone(),
+                size: Some(md.len() as u64),
+                content_hash: None,
+                last_error: None,
+                error_count: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Processes one announcement into the record that goes in index.json.
+    async fn process(
+        &self,
+        ann: Announcement,
+        state: &mut State,
+    ) -> Result<(AnnouncementRecord, CourseSummary), Box<dyn std::error::Error>> {
+        let title = ann
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("announcement_{}", ann.id));
+        let html = ann.message.clone().unwrap_or_default();
+        let extracted = extract_links(&html);
+
+        let mut summary = CourseSummary {
+            announcements: 1,
+            links: extracted.all.len(),
+            media: extracted.media.len(),
+        };
+
+        let filename = Self::body_filename(&ann, &title);
+        let body_path = self.ann_dir.join(&filename);
+
+        if self.dry_run {
             info!(
-                course_id = course.id,
+                course_id = self.course_id,
                 announcement_id = ann.id,
                 links = extracted.all.len(),
                 media = extracted.media.len(),
                 "dry-run announcement"
             );
-        } else if unchanged && body_path.exists() {
-            if verbose {
-                info!(
-                    course_id = course.id,
-                    announcement_id = ann.id,
-                    "announcement unchanged"
-                );
-            }
         } else {
-            atomic_write(&body_path, md.as_bytes()).await?;
-            state.set(
-                key.clone(),
-                ItemState {
-                    etag: None,
-                    updated_at: ann.posted_at.clone(),
-                    size: Some(md.len() as u64),
-                    content_hash: None,
-                    last_error: None,
-                    error_count: None,
-                },
-            );
+            self.write_body(&ann, &parse_html(&html), &body_path, state)
+                .await?;
         }
 
-        // Download media (Canvas-hosted files) and inline attachments
-        let mut media_with_paths: Vec<MediaRef> = Vec::with_capacity(extracted.media.len());
-        if cfg.announcements.download_media && !dry_run {
-            ensure_dir(&media_dir).await?;
+        if self.downloads_media() {
+            ensure_dir(&self.media_dir).await?;
         }
-        for m in extracted.media.iter().cloned() {
-            let mut m = m;
-            if cfg.announcements.download_media && !dry_run {
-                if let Some(fid) = m.file_id {
-                    info!(course_id = course.id, announcement_id = ann.id, file_id = fid, url = %m.url, "discovered canvas media in announcement body");
-                    match canvas.get_file(fid).await {
-                        Ok(f) => match download_if_needed(
-                            httpctx,
-                            &f,
-                            Dest::InDir {
-                                dir: &media_dir,
-                                name: &media_name(&f),
-                            },
-                            state,
-                        )
-                        .await
-                        {
-                            Ok(path) => {
-                                m.local_path = Some(format!(
-                                    "announcements/media/{}",
-                                    path.file_name().and_then(|s| s.to_str()).unwrap_or("")
-                                ));
-                            }
-                            Err(e) => {
-                                warn!(course_id = course.id, file_id = fid, error = %e, "media download failed");
-                            }
-                        },
-                        Err(e) => {
-                            warn!(course_id = course.id, file_id = fid, error = %e, "media metadata fetch failed");
-                        }
-                    }
-                }
-            }
-            media_with_paths.push(m);
-        }
+        let mut media = self.resolve_body_media(extracted.media, state).await?;
+        let attachments = self.resolve_attachments(&ann.attachments, state).await;
+        summary.media += attachments.len();
+        media.extend(attachments);
 
-        // Inline attachments returned by the API
-        for att in &ann.attachments {
-            if cfg.announcements.download_media && !dry_run {
-                if let Err(e) = ensure_dir(&media_dir).await {
-                    warn!(error = %e, "ensure media_dir");
-                }
-                match download_if_needed(
-                    httpctx,
-                    att,
-                    Dest::InDir {
-                        dir: &media_dir,
-                        name: &media_name(att),
-                    },
-                    state,
-                )
-                .await
-                {
-                    Ok(path) => {
-                        media_with_paths.push(MediaRef {
-                            url: att
-                                .url
-                                .clone()
-                                .or(att.download_url.clone())
-                                .unwrap_or_default(),
-                            kind: classify_by_filename(
-                                att.display_name
-                                    .as_deref()
-                                    .or(att.filename.as_deref())
-                                    .unwrap_or(""),
-                            ),
-                            file_id: Some(att.id),
-                            local_path: Some(format!(
-                                "announcements/media/{}",
-                                path.file_name().and_then(|s| s.to_str()).unwrap_or("")
-                            )),
-                        });
-                        summary.media += 1;
-                    }
-                    Err(e) => {
-                        warn!(course_id = course.id, file_id = att.id, error = %e, "attachment download failed");
-                    }
-                }
-            } else {
-                media_with_paths.push(MediaRef {
-                    url: att
-                        .url
-                        .clone()
-                        .or(att.download_url.clone())
-                        .unwrap_or_default(),
-                    kind: classify_by_filename(
-                        att.display_name
-                            .as_deref()
-                            .or(att.filename.as_deref())
-                            .unwrap_or(""),
-                    ),
-                    file_id: Some(att.id),
-                    local_path: None,
-                });
-                summary.media += 1;
-            }
-        }
-
-        records.push(AnnouncementRecord {
-            id: ann.id,
-            title,
-            posted_at: ann.posted_at.clone(),
-            html_url: ann.html_url.clone(),
-            author: ann.author.as_ref().and_then(|a| a.display_name.clone()),
-            body_md_path: if dry_run {
-                None
-            } else {
-                Some(body_md_path_rel)
+        Ok((
+            AnnouncementRecord {
+                id: ann.id,
+                title,
+                posted_at: ann.posted_at,
+                html_url: ann.html_url,
+                author: ann.author.and_then(|a| a.display_name),
+                body_md_path: (!self.dry_run).then(|| format!("announcements/{filename}")),
+                links: extracted.all,
+                media,
+                zoom_links: extracted.zoom,
             },
-            links: extracted.all,
-            media: media_with_paths,
-            zoom_links: extracted.zoom,
-        });
-    }
-    pb.finish_and_clear();
-
-    if !dry_run {
-        let index_path = ann_dir.join("index.json");
-        let json = serde_json::to_vec_pretty(&records)?;
-        atomic_write(&index_path, &json).await?;
-        info!(course_id = course.id, count = records.len(), path = %index_path.display(), "wrote announcements index");
+            summary,
+        ))
     }
 
-    Ok(summary)
+    /// Mirrors every announcement in the course and writes the index.
+    pub async fn run(
+        &self,
+        course_name: &str,
+        state: &mut State,
+    ) -> Result<CourseSummary, Box<dyn std::error::Error>> {
+        if !self.dry_run {
+            ensure_dir(&self.ann_dir).await?;
+        }
+
+        let sp = spinner(&format!("Loading announcements for {course_name}"));
+        let announcements = match self.canvas.list_announcements(self.course_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                sp.finish_and_clear();
+                warn!(course_id = self.course_id, error = %e, "list_announcements failed; skipping");
+                return Ok(CourseSummary::default());
+            }
+        };
+        sp.finish_and_clear();
+
+        let pb = progress_bar(
+            announcements.len() as u64,
+            &format!("Announcements in {course_name}"),
+        );
+        let mut totals = CourseSummary::default();
+        let mut records = Vec::with_capacity(announcements.len());
+
+        for ann in announcements {
+            pb.inc(1);
+            pb.set_message(
+                ann.title
+                    .clone()
+                    .unwrap_or_else(|| format!("announcement_{}", ann.id)),
+            );
+            let (record, summary) = self.process(ann, state).await?;
+            totals += summary;
+            records.push(record);
+        }
+        pb.finish_and_clear();
+
+        if !self.dry_run {
+            let index_path = self.ann_dir.join("index.json");
+            atomic_write(&index_path, &serde_json::to_vec_pretty(&records)?).await?;
+            info!(course_id = self.course_id, count = records.len(), path = %index_path.display(), "wrote announcements index");
+        }
+        Ok(totals)
+    }
 }
 
 /// The preferred on-disk name for an announcement's media file.

@@ -113,16 +113,16 @@ pub async fn run_sync(
 
         // Sync announcements for this course
         if cfg.announcements.enabled {
-            match crate::announcements::run_for_course(
+            match crate::announcements::AnnouncementSync::new(
                 &cfg,
                 &canvas,
                 &httpctx,
-                &c,
+                c.id,
                 &course_dir,
-                &mut state,
                 dry_run,
                 verbose,
             )
+            .run(&c.name, &mut state)
             .await
             {
                 Ok(s) => {
@@ -135,7 +135,6 @@ pub async fn run_sync(
                 }
                 Err(e) => {
                     warn!(course_id = c.id, error = %e, "announcements failed for course");
-                    eprintln!("Warning: announcements failed for course {}: {}", c.id, e);
                 }
             }
         }
