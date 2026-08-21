@@ -4,10 +4,7 @@ use crate::links::extract_zoom_urls;
 use crate::progress::{progress_bar, spinner};
 use tracing::info;
 
-pub async fn run_discovery(
-    filter_course_id: Option<u64>,
-    dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
     let cfg = crate::config::Config::load_or_init()?;
 
     let canvas = CanvasClient::from_config().await?;

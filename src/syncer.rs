@@ -17,7 +17,7 @@ pub async fn run_sync(
     filter_course_id: Option<u64>,
     dry_run: bool,
     verbose: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let cfg = Config::load_or_init()?;
 
     let http = build_http_client(&cfg);
@@ -211,11 +211,7 @@ impl ModuleCtx<'_> {
     ///
     /// Failures are recorded against the item's state rather than propagated: one
     /// unavailable file must not abandon the rest of the module.
-    async fn sync_file(
-        &mut self,
-        file_id: u64,
-        state: &mut State,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+    async fn sync_file(&mut self, file_id: u64, state: &mut State) -> anyhow::Result<usize> {
         if !self.processed.insert(file_id) {
             return Ok(0);
         }
@@ -280,7 +276,7 @@ impl ModuleCtx<'_> {
         updated_at: Option<String>,
         state: &mut State,
         what: &str,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<usize> {
         let (course_id, module_id) = (self.course_id, self.module_id);
         let hash = sha1_hex(md.as_bytes());
 
@@ -329,7 +325,7 @@ impl CourseSync<'_> {
         m: &Module,
         assignments: &std::collections::HashMap<u64, Assignment>,
         state: &mut State,
-    ) -> Result<SyncCounts, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<SyncCounts> {
         let course_id = self.course_id;
         let canvas = self.canvas;
         let dry_run = self.dry_run;

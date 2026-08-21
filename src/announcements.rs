@@ -25,10 +25,7 @@ pub struct AnnouncementRecord {
     pub zoom_links: Vec<String>,
 }
 
-pub async fn run_discovery(
-    filter_course_id: Option<u64>,
-    dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
     let cfg = Config::load_or_init()?;
     let http = build_http_client(&cfg);
     let httpctx = HttpCtx::new(&cfg, http);
@@ -205,7 +202,7 @@ impl<'a> AnnouncementSync<'a> {
         &self,
         refs: Vec<MediaRef>,
         state: &mut State,
-    ) -> Result<Vec<MediaRef>, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<Vec<MediaRef>> {
         let mut out = Vec::with_capacity(refs.len());
         for mut m in refs {
             if let (true, Some(fid)) = (self.downloads_media(), m.file_id) {
@@ -275,7 +272,7 @@ impl<'a> AnnouncementSync<'a> {
         md: &str,
         path: &Path,
         state: &mut State,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let key = format!("announcement:{}", ann.id);
         let unchanged = match (state.get(&key), ann.posted_at.as_deref()) {
             (Some(prev), Some(posted)) => prev.updated_at.as_deref() == Some(posted),
@@ -313,7 +310,7 @@ impl<'a> AnnouncementSync<'a> {
         &self,
         ann: Announcement,
         state: &mut State,
-    ) -> Result<(AnnouncementRecord, CourseSummary), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<(AnnouncementRecord, CourseSummary)> {
         let title = ann
             .title
             .clone()
@@ -368,11 +365,7 @@ impl<'a> AnnouncementSync<'a> {
     }
 
     /// Mirrors every announcement in the course and writes the index.
-    pub async fn run(
-        &self,
-        course_name: &str,
-        state: &mut State,
-    ) -> Result<CourseSummary, Box<dyn std::error::Error>> {
+    pub async fn run(&self, course_name: &str, state: &mut State) -> anyhow::Result<CourseSummary> {
         if !self.dry_run {
             ensure_dir(&self.ann_dir).await?;
         }

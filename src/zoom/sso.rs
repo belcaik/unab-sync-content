@@ -41,7 +41,7 @@ impl SsoCreds {
 }
 
 /// Clicks whichever submit control this step of the flow is using.
-async fn click_submit(page: &Page) -> Result<bool, Box<dyn std::error::Error>> {
+async fn click_submit(page: &Page) -> anyhow::Result<bool> {
     for selector in SUBMIT_SELECTORS {
         if let Ok(button) = page.find_element(*selector).await {
             button.click().await?;
@@ -55,11 +55,7 @@ async fn click_submit(page: &Page) -> Result<bool, Box<dyn std::error::Error>> {
 ///
 /// Returns whether a field was found; a missing field is normal, since the flow
 /// skips whichever steps the browser profile already satisfies.
-async fn fill_and_submit(
-    page: &Page,
-    selectors: &[&str],
-    value: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+async fn fill_and_submit(page: &Page, selectors: &[&str], value: &str) -> anyhow::Result<bool> {
     for selector in selectors {
         if let Ok(input) = page.find_element(*selector).await {
             input.click().await?.type_str(value).await?;
@@ -71,7 +67,7 @@ async fn fill_and_submit(
     Ok(false)
 }
 
-pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     // Simple heuristic for Microsoft SSO
     // 1. Check for email input
     // 2. Check for password input
@@ -121,10 +117,7 @@ pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> Result<(), Box<dyn std
     Ok(())
 }
 
-async fn handle_ms_account(
-    page: &Page,
-    creds: &SsoCreds,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     // First, check for remembered account tiles (account picker)
     sleep(Duration::from_secs(2)).await;
 
@@ -255,7 +248,7 @@ async fn handle_ms_account(
     Ok(())
 }
 
-async fn is_zoom_login_page(page: &Page) -> Result<bool, Box<dyn std::error::Error>> {
+async fn is_zoom_login_page(page: &Page) -> anyhow::Result<bool> {
     let url = page.url().await?.unwrap_or_default();
     let html = page.content().await?;
 
@@ -264,10 +257,7 @@ async fn is_zoom_login_page(page: &Page) -> Result<bool, Box<dyn std::error::Err
         || html.contains("Sign in with Microsoft"))
 }
 
-pub async fn handle_zoom_play_sso(
-    page: &Page,
-    creds: &SsoCreds,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     // Step 1: Wait for page to settle after navigation
     sleep(Duration::from_secs(3)).await;
 
@@ -338,7 +328,9 @@ pub async fn handle_zoom_play_sso(
     }
 
     if !clicked {
-        return Err("Could not find 'Sign in with Microsoft' button on Zoom login page".into());
+        return Err(anyhow::anyhow!(
+            "Could not find 'Sign in with Microsoft' button on Zoom login page"
+        ));
     }
 
     // Step 5: Wait for redirect to Microsoft
@@ -358,7 +350,9 @@ pub async fn handle_zoom_play_sso(
     }
 
     if !on_microsoft {
-        return Err("Timeout waiting for redirect to Microsoft login".into());
+        return Err(anyhow::anyhow!(
+            "Timeout waiting for redirect to Microsoft login"
+        ));
     }
 
     // Step 6: Handle Microsoft authentication (account picker or credentials)
@@ -379,7 +373,9 @@ pub async fn handle_zoom_play_sso(
     }
 
     if !back_on_zoom {
-        return Err("Timeout waiting to return to Zoom after Microsoft authentication".into());
+        return Err(anyhow::anyhow!(
+            "Timeout waiting to return to Zoom after Microsoft authentication"
+        ));
     }
 
     // Give the player time to initialize

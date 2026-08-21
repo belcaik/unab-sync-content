@@ -8,14 +8,13 @@ pub mod sso;
 
 use crate::config::ConfigPaths;
 use crate::progress::progress_bar;
-use api::{ZoomApiError, ZoomClient};
+use api::ZoomClient;
 use db::ZoomDb;
 use headless::ZoomHeadless;
 use models::{RecordingSummary, ZoomRecordingFile};
-use std::error::Error;
 use tracing::info;
 
-pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<dyn Error>> {
+pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
     let cfg = crate::config::Config::load_or_init()?;
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
@@ -62,14 +61,9 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<
     println!("Starting listing and download for course {}", course_id);
 
     // 2. List recordings using captured credentials
-    let client = ZoomClient::new(&cfg, &db, course_id)
-        .await
-        .map_err(map_api_err)?;
+    let client = ZoomClient::new(&cfg, &db, course_id).await?;
 
-    let listing = client
-        .list_recordings(since.as_deref())
-        .await
-        .map_err(map_api_err)?;
+    let listing = client.list_recordings(since.as_deref()).await?;
     db.save_meetings(course_id, &listing)?;
 
     let meetings: Vec<RecordingSummary> = listing
@@ -105,10 +99,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<
     for summary in meetings {
         meeting_progress.inc(1);
         meeting_progress.set_message(format!("Meeting {}", summary.meeting_id));
-        let files = client
-            .fetch_recording_files(&summary)
-            .await
-            .map_err(map_api_err)?;
+        let files = client.fetch_recording_files(&summary).await?;
         if files.is_empty() {
             meeting_progress.println(format!(
                 "- {}: Zoom did not report downloadable files",
@@ -139,11 +130,4 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<
 
     println!("All recordings processed!");
     Ok(())
-}
-
-fn map_api_err(err: ZoomApiError) -> Box<dyn Error> {
-    match err {
-        ZoomApiError::Db(e) => e,
-        other => Box::new(other),
-    }
 }

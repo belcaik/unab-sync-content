@@ -20,15 +20,31 @@ pub struct ZoomHeadless<'a> {
     course_id: u64,
 }
 
+/// What the CDP interception tasks have captured so far.
+///
+/// The identifiers arrive across several intercepted responses, so this
+/// accumulates rather than being written once.
+#[derive(Debug, Default)]
+struct Captured {
+    scid: Option<String>,
+    headers: Option<HashMap<String, String>>,
+}
+
+/// Locks shared capture state, recovering from a poisoned mutex.
+///
+/// The guarded value is plain accumulated data with no invariant a panicking
+/// task could leave broken, so a poisoned lock is worth recovering from rather
+/// than propagating as a second panic.
+fn lock_captured(m: &Mutex<Captured>) -> std::sync::MutexGuard<'_, Captured> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Collects the page's cookies for the given domains, in the shape the
 /// recordings database and the downloader expect.
 ///
 /// The domain set differs by caller: capturing a session needs `zoom.us`, while
 /// downloading also needs the CDN the media is served from.
-async fn harvest_cookies(
-    page: &Page,
-    domains: &[&str],
-) -> Result<Vec<ZoomCookie>, Box<dyn std::error::Error>> {
+async fn harvest_cookies(page: &Page, domains: &[&str]) -> anyhow::Result<Vec<ZoomCookie>> {
     Ok(page
         .get_cookies()
         .await?
@@ -55,13 +71,14 @@ impl<'a> ZoomHeadless<'a> {
         }
     }
 
-    pub async fn authenticate_and_capture(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn authenticate_and_capture(&self) -> anyhow::Result<()> {
         let (mut browser, mut handler) = Browser::launch(
             BrowserConfig::builder()
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
                 .arg("--disable-dev-shm-usage")
-                .build()?,
+                .build()
+                .map_err(|e| anyhow::anyhow!("could not build browser config: {e}"))?,
         )
         .await?;
 
@@ -85,11 +102,8 @@ impl<'a> ZoomHeadless<'a> {
             // We still proceed to refresh cookies and verify scid
         }
 
-        // Shared state for captured data: (scid, api_headers)
-        let captured_data = Arc::new(Mutex::new((
-            None::<String>,
-            None::<HashMap<String, String>>,
-        )));
+        // Filled in by the interception tasks below, read by the polling loop.
+        let captured_data = Arc::new(Mutex::new(Captured::default()));
         let captured_data_clone_for_fetch = captured_data.clone(); // Renamed to avoid conflict with new `captured_data_clone`
 
         // Enable Fetch domain for interception
@@ -108,16 +122,12 @@ impl<'a> ZoomHeadless<'a> {
 
         let mut request_paused_events = page
             .event_listener::<chromiumoxide::cdp::browser_protocol::fetch::EventRequestPaused>()
-            .await
-            .unwrap();
+            .await?;
 
         let page_clone = page.clone();
         let captured_data_clone = captured_data.clone(); // This is the one used by the new task
 
-        let mut request_events = page
-            .event_listener::<EventRequestWillBeSent>()
-            .await
-            .unwrap();
+        let mut request_events = page.event_listener::<EventRequestWillBeSent>().await?;
 
         // Spawn Fetch interception task
         tokio::spawn(async move {
@@ -167,17 +177,17 @@ impl<'a> ZoomHeadless<'a> {
 
                             let found = app_conf::parse(&content);
                             if !found.is_empty() {
-                                let mut data = captured_data_clone.lock().unwrap();
+                                let mut data = lock_captured(&captured_data_clone);
                                 if let Some(scid) = found.scid {
                                     println!("Captured lti_scid from Fetch");
-                                    data.0 = Some(scid);
+                                    data.scid = Some(scid);
                                 }
                                 if !found.headers.is_empty() {
                                     println!(
                                         "Captured {} session headers from Fetch",
                                         found.headers.len()
                                     );
-                                    data.1
+                                    data.headers
                                         .get_or_insert_with(HashMap::new)
                                         .extend(found.headers);
                                 }
@@ -203,21 +213,21 @@ impl<'a> ZoomHeadless<'a> {
         let _capture_task = tokio::spawn(async move {
             while let Some(event) = request_events.next().await {
                 let url = event.request.url.clone();
-                let mut data = captured_data_clone_for_fetch.lock().unwrap();
+                let mut data = lock_captured(&captured_data_clone_for_fetch);
 
-                if data.0.is_none() && url.contains("lti_scid=") {
+                if data.scid.is_none() && url.contains("lti_scid=") {
                     if let Ok(parsed) = Url::parse(&url) {
                         for (k, v) in parsed.query_pairs() {
                             if k == "lti_scid" {
                                 println!("Captured lti_scid from URL: {}", v);
-                                data.0 = Some(v.to_string());
+                                data.scid = Some(v.to_string());
                             }
                         }
                     }
                 }
 
                 // Capture headers for Zoom API calls
-                if data.1.is_none() && url.contains("/api/v1/lti/rich/recording") {
+                if data.headers.is_none() && url.contains("/api/v1/lti/rich/recording") {
                     let headers_val = serde_json::to_value(event.request.headers.clone())
                         .unwrap_or(serde_json::Value::Null);
                     let mut headers = HashMap::new();
@@ -229,7 +239,7 @@ impl<'a> ZoomHeadless<'a> {
                         }
                     }
                     println!("Captured Zoom API headers");
-                    data.1 = Some(headers);
+                    data.headers = Some(headers);
                 }
             }
         });
@@ -256,11 +266,11 @@ impl<'a> ZoomHeadless<'a> {
         while start.elapsed() < Duration::from_secs(60) {
             // Check shared state
             {
-                let data = captured_data.lock().unwrap();
-                if let Some(s) = &data.0 {
+                let data = lock_captured(&captured_data);
+                if let Some(s) = &data.scid {
                     scid = Some(s.clone());
                 }
-                if let Some(h) = &data.1 {
+                if let Some(h) = &data.headers {
                     captured_headers = h.clone();
                 }
             }
@@ -279,7 +289,7 @@ impl<'a> ZoomHeadless<'a> {
             self.db.save_scid(self.course_id, &s)?;
             println!("Saved lti_scid to DB: {}", s);
         } else {
-            return Err("Failed to capture lti_scid".into());
+            return Err(anyhow::anyhow!("Failed to capture lti_scid"));
         }
 
         if !captured_headers.is_empty() {
@@ -308,7 +318,7 @@ impl<'a> ZoomHeadless<'a> {
         if !cookies.is_empty() {
             self.db.replace_cookies(&cookies)?;
         } else {
-            return Err("Failed to capture Zoom cookies".into());
+            return Err(anyhow::anyhow!("Failed to capture Zoom cookies"));
         }
 
         // Verification log
@@ -332,7 +342,7 @@ impl<'a> ZoomHeadless<'a> {
     pub async fn capture_and_download_immediately(
         &self,
         files: Vec<ZoomRecordingFile>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
         use crate::fsutil::sanitize_filename_preserve_ext;
         use crate::zoom::models::ReplayHeader;
@@ -381,7 +391,8 @@ impl<'a> ZoomHeadless<'a> {
                 // Running in full headless mode (no GUI)
                 .arg("--no-sandbox")
                 .arg("--disable-gpu")
-                .build()?,
+                .build()
+                .map_err(|e| anyhow::anyhow!("could not build browser config: {e}"))?,
         )
         .await?;
 
@@ -573,7 +584,7 @@ impl<'a> ZoomHeadless<'a> {
 /// Helper function to scan existing .mp4 files in the recordings directory
 fn scan_existing_recordings(
     dir: &std::path::Path,
-) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error>> {
+) -> anyhow::Result<std::collections::HashSet<String>> {
     let mut existing = std::collections::HashSet::new();
     if dir.exists() {
         for entry in std::fs::read_dir(dir)? {

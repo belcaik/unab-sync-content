@@ -10,7 +10,7 @@ pub async fn http_download(
     headers: &[(String, String)],
     url: &str,
     dest: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
@@ -62,7 +62,11 @@ pub async fn http_download(
 
     let response = request.send().await?;
     if !(response.status().is_success() || response.status().as_u16() == 206) {
-        return Err(format!("HTTP {} while downloading {}", response.status(), url).into());
+        return Err(anyhow::anyhow!(
+            "HTTP {} while downloading {}",
+            response.status(),
+            url
+        ));
     }
 
     let mut file = tokio::fs::OpenOptions::new()

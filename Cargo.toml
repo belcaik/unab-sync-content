@@ -10,6 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 directories = "5.0"
 thiserror = "1.0"
+anyhow = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "deflate", "stream", "rustls-tls", "cookies"] }
 serde_json = "1.0"
 url = "2.5"

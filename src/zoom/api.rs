@@ -26,7 +26,7 @@ pub enum ZoomApiError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Db(#[from] Box<dyn std::error::Error>),
+    Db(#[from] crate::zoom::db::ZoomDbError),
     #[error("{0}")]
     Message(String),
 }
@@ -41,13 +41,11 @@ impl ZoomClient {
     pub async fn new(cfg: &Config, db: &ZoomDb, course_id: u64) -> Result<Self, ZoomApiError> {
         let scid = db.get_scid(course_id).map_err(ZoomApiError::Db)?;
 
-        if let Some(ref s) = scid {
-            info!("Loaded scid from DB: {}", s);
-        } else {
-            warn!("No scid found in DB for course {}", course_id);
+        let Some(scid) = scid else {
+            warn!(course_id, "no scid found in DB");
             return Err(ZoomApiError::MissingState);
-        }
-        let scid = scid.unwrap();
+        };
+        info!(course_id, "loaded scid from DB");
 
         let cookies = db.load_cookies().map_err(ZoomApiError::Db)?;
         info!("Loaded {} cookies from DB", cookies.len());
@@ -79,7 +77,9 @@ impl ZoomClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             "User-Agent",
-            HeaderValue::from_str(&effective_user_agent(cfg)).unwrap(),
+            // A user_agent from config may contain characters no header can carry.
+            HeaderValue::from_str(&effective_user_agent(cfg))
+                .map_err(|_| ZoomApiError::Message("invalid user_agent in config".into()))?,
         );
         headers.insert(
             "Referer",
@@ -299,10 +299,15 @@ impl ZoomClient {
         let mut out = Vec::new();
         if let Some(result) = payload.result {
             if let Some(entries) = result.recording_files {
-                for entry in entries.into_iter().filter(|e| e.play_url.is_some()) {
+                // Entries without a play_url cannot be captured, so they are dropped
+                // here rather than filtered and then unwrapped.
+                for entry in entries {
+                    let Some(play_url) = entry.play_url else {
+                        continue;
+                    };
                     out.push(ZoomRecordingFile {
                         meeting_id: meeting.meeting_id.clone(),
-                        play_url: entry.play_url.unwrap(),
+                        play_url,
                         download_url: entry.download_url.clone(),
                         file_type: entry.file_type.clone(),
                         recording_start: entry.recording_start.clone(),

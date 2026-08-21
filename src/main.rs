@@ -227,7 +227,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_init() -> anyhow::Result<()> {
     match Config::load_or_init() {
         Ok(_paths) => {
             println!("Config file already exists and is valid.");
@@ -240,7 +240,7 @@ async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_auth_canvas(args: CanvasAuthArgs) -> anyhow::Result<()> {
     let paths = ConfigPaths::new()?;
 
     // Load or init, but if it was just created (MissingConfigFile), we proceed with default config
@@ -272,7 +272,7 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
     use canvas::CanvasClient;
     let client = CanvasClient::from_config().await?;
 
@@ -323,7 +323,7 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_status(verbose: bool) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use tracing::info;
 

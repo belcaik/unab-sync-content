@@ -1,5 +1,5 @@
 use crate::config::{Config, ConfigPaths};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -21,18 +21,28 @@ pub fn init_logging(cfg: Option<&Config>) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Open file in append mode
-    let file = OpenOptions::new()
+    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // An unwritable log path must not stop the program: fall back to stderr.
+    let Ok(file) = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file_path)
-        .unwrap_or_else(|_| File::create(&file_path).expect("create log file"));
+    else {
+        fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+        tracing::warn!(path = %file_path.display(), "could not open log file; logging to stderr");
+        return;
+    };
 
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file);
-    // Leak guard so it lives for process lifetime
-    Box::leak(Box::new(_guard));
+    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+    // The guard flushes the appender on drop, so it must outlive every log call.
+    // Leaking it ties that to the process lifetime.
+    Box::leak(Box::new(guard));
 
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
     fmt()
         .with_env_filter(filter)
         .with_writer(non_blocking)

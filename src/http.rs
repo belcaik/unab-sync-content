@@ -27,7 +27,13 @@ pub fn build_http_client(cfg: &Config) -> Client {
         .pool_idle_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(60));
 
-    builder.build().expect("http client build")
+    // The builder is configured entirely from constants and validated config, so a
+    // failure here means the TLS backend is unavailable — there is no useful
+    // fallback, but the default client is closer to working than a panic.
+    builder.build().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "falling back to a default HTTP client");
+        Client::new()
+    })
 }
 
 /// Extract the rel="next" link from an RFC5988 Link header, if present.
