@@ -27,7 +27,10 @@ The tool supports resumable downloads, rate limiting, and incremental syncs to e
   - [auth](#auth)
   - [scan](#scan)
   - [sync](#sync)
+  - [announcements](#announcements)
+  - [recordings](#recordings)
   - [zoom](#zoom)
+  - [status](#status)
 - [Configuration](#configuration)
 - [Zoom Recording Workflow](#zoom-recording-workflow)
 - [Troubleshooting](#troubleshooting)
@@ -43,7 +46,7 @@ The tool supports resumable downloads, rate limiting, and incremental syncs to e
 - **Resumable downloads**: Interrupted downloads resume from where they stopped
 - **Rate limiting**: Configurable request throttling to avoid API limits
 - **Dry-run mode**: Preview changes before writing files
-- **Course filtering**: Include or exclude specific courses from sync operations
+- **Course filtering**: Exclude specific courses via `canvas.ignored_courses`
 
 ## Prerequisites
 
@@ -52,8 +55,9 @@ Before installing u_crawler, ensure you have:
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
 | Rust toolchain | 1.70+ | Building from source |
+| Git | Any recent | One dependency is fetched from a Git repository at build time |
 | ffmpeg | Any recent | Downloading Zoom recordings |
-| Chromium or Edge | Any recent | Zoom authentication via Chrome DevTools Protocol |
+| Chromium or Chrome | Any recent | Launched automatically for Zoom authentication |
 
 ## Installation
 
@@ -70,7 +74,7 @@ Before installing u_crawler, ensure you have:
 3. **Build u_crawler**
 
    ```powershell
-   git clone https://github.com/yourusername/u_crawler.git
+   git clone https://github.com/belcaik/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
@@ -99,7 +103,7 @@ Before installing u_crawler, ensure you have:
 3. **Build u_crawler**
 
    ```bash
-   git clone https://github.com/yourusername/u_crawler.git
+   git clone https://github.com/belcaik/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
@@ -136,7 +140,7 @@ Before installing u_crawler, ensure you have:
 3. **Build u_crawler**
 
    ```bash
-   git clone https://github.com/yourusername/u_crawler.git
+   git clone https://github.com/belcaik/u_crawler.git
    cd u_crawler
    cargo build --release
    ```
@@ -212,17 +216,14 @@ cargo run -- sync --course-id 123456
 
 ### 5. Back up Zoom recordings
 
-First, launch a browser with remote debugging enabled:
-
-```bash
-chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
-```
-
-Then run the Zoom backup:
+Set `canvas.sso_email` and `canvas.sso_password` in your config, then:
 
 ```bash
 cargo run -- zoom flow --course-id 123456
 ```
+
+u_crawler launches its own browser and completes the institutional SSO. You do
+not need to start Chromium yourself.
 
 ## Commands
 
@@ -276,28 +277,69 @@ cargo run -- sync
 cargo run -- sync --course-id 123456 --verbose
 ```
 
+### announcements
+
+Downloads course announcements as Markdown, extracts the links and media in each
+body, and writes an `index.json` describing them.
+
+| Flag | Description |
+|------|-------------|
+| `--course-id ID` | Only this course |
+| `--dry-run` | Report what would be written, without writing |
+
+```bash
+cargo run -- announcements --course-id 123456
+```
+
+Announcements are also synced as part of `sync`, unless `[announcements].enabled`
+is set to `false`.
+
+### recordings
+
+Reports the Zoom links found across a course's pages, module items and
+assignments. This is a discovery report — it downloads nothing.
+
+| Flag | Description |
+|------|-------------|
+| `--course-id ID` | Only this course |
+| `--dry-run` | Marks output lines as a preview |
+
+```bash
+cargo run -- recordings --course-id 123456
+```
+
 ### zoom
 
-Manages Zoom recording downloads. The primary command is `zoom flow`, which handles the entire process automatically.
+Downloads Zoom cloud recordings. `zoom flow` performs the whole process: it
+reuses a stored session if one is still valid, otherwise it drives the
+institutional SSO in a headless browser to capture a new one, then lists and
+downloads the recordings.
 
 | Flag | Description |
 |------|-------------|
 | `--course-id ID` | Target course (required) |
-| `--debug-port PORT` | CDP port (default: 9222) |
-| `--keep-tab` | Keep the browser tab open after capture |
-| `--concurrency N` | Number of parallel downloads (default: 1) |
-| `--since DATE` | Only download recordings after this date (YYYY-MM-DD) |
+| `--since DATE` | Only recordings after this date (`YYYY-MM-DD`) |
 
 ```bash
 cargo run -- zoom flow --course-id 123456 --since 2024-01-01
 ```
 
-For advanced use cases, individual subcommands are available:
+The browser is launched and managed by u_crawler. You do not need to start
+Chromium yourself, and there is no debugging port to configure.
 
-- `zoom sniff-cdp` - Capture authentication credentials
-- `zoom list` - List available recordings
-- `zoom fetch-urls` - Retrieve download URLs
-- `zoom dl` - Download recordings
+### status
+
+Summarises what has been backed up: per course, the number of tracked files,
+storage used, the most recent sync timestamp, and any items whose last attempt
+failed.
+
+| Flag | Description |
+|------|-------------|
+| `--verbose` | List each failed item and its error |
+
+```bash
+cargo run -- status --verbose
+```
 
 ## Configuration
 
@@ -318,6 +360,16 @@ base_url = "https://your-school.instructure.com"
 token = ""               # Leave empty if using token_cmd
 token_cmd = "pass show canvas/pat"
 ignored_courses = ["153095", "153607"]
+# Institutional SSO, used by the Zoom flow to log in headlessly.
+# SECURITY: sso_password is stored here in cleartext. Restrict the file's
+# permissions (chmod 600) and prefer a machine you control.
+sso_email = "you@your-school.edu"
+sso_password = ""
+
+# Announcement sync (also runs as part of `sync`)
+[announcements]
+enabled = true           # set false to skip announcements
+download_media = true    # also download attachments and inline media
 
 # Logging settings
 [logging]
@@ -326,9 +378,8 @@ file = "~/.config/u_crawler/u_crawler.log"
 
 # Zoom settings
 [zoom]
-enabled = true
+enabled = true           # set false to skip Zoom entirely
 ffmpeg_path = "ffmpeg"
-cookie_file = "~/.config/u_crawler/zoom_cookies.txt"
 user_agent = "Mozilla/5.0"
 external_tool_id = 187
 ```
@@ -344,10 +395,17 @@ external_tool_id = 187
 | `canvas.token` | Personal Access Token | - |
 | `canvas.token_cmd` | Command to retrieve token | - |
 | `canvas.ignored_courses` | Course IDs to skip | [] |
+| `canvas.sso_email` | Institutional SSO account, used by the Zoom flow | - |
+| `canvas.sso_password` | SSO password, stored in cleartext | - |
+| `user_agent` | Custom user agent | built-in default |
 | `logging.level` | Log verbosity | info |
+| `logging.file` | Log file path | `~/.config/u_crawler/u_crawler.log` |
+| `announcements.enabled` | Sync announcements | true |
+| `announcements.download_media` | Download announcement attachments | true |
 | `zoom.enabled` | Enable Zoom features | true |
 | `zoom.ffmpeg_path` | Path to ffmpeg binary | ffmpeg |
-| `zoom.external_tool_id` | Zoom LTI tool ID in Canvas | - |
+| `zoom.user_agent` | User agent for Zoom requests | built-in default |
+| `zoom.external_tool_id` | Zoom LTI tool ID in Canvas | 187 |
 
 ## Zoom Recording Workflow
 
@@ -355,15 +413,10 @@ The `zoom flow` command automates the complete process of downloading Zoom cloud
 
 ### Prerequisites
 
-1. Launch a Chromium-based browser with remote debugging enabled:
-
-   ```bash
-   chromium --remote-debugging-port=9222 --user-data-dir=/tmp/u_crawler-profile
-   ```
-
-2. Log into Canvas in that browser instance and complete any SSO authentication.
-
-3. Ensure ffmpeg is available (check with `ffmpeg -version`).
+1. Set `canvas.sso_email` and `canvas.sso_password` in your config. The flow logs
+   in on your behalf, so it needs them.
+2. Ensure ffmpeg is available (check with `ffmpeg -version`).
+3. Ensure Chromium or Chrome is installed. u_crawler launches it itself.
 
 ### How It Works
 
@@ -408,13 +461,13 @@ Downloads use `.part` files and HTTP Range requests, allowing safe resumption if
 
 ### Zoom Authentication Fails
 
-**Symptoms**: CDP flow times out or fails to capture credentials.
+**Symptoms**: the flow times out or fails to capture credentials.
 
 **Solutions**:
-- Ensure browser is launched with `--remote-debugging-port=9222`
-- Log into Canvas in that browser before running `zoom flow`
-- Complete SSO prompts when they appear
-- Use `--debug-port` if your browser uses a different port
+- Confirm `canvas.sso_email` and `canvas.sso_password` are set and correct
+- Confirm `zoom.external_tool_id` matches the Zoom LTI tool id in your Canvas
+- Confirm Chromium or Chrome is installed and on `$PATH`
+- Set `logging.level = "debug"` and check the log file for the step that stalled
 
 ### Rate Limit Errors
 
@@ -427,7 +480,7 @@ Downloads use `.part` files and HTTP Range requests, allowing safe resumption if
 
 ### Partial Download Failures
 
-**Symptoms**: Some files fail to download (exit code 15).
+**Symptoms**: some files fail to download.
 
 **Solutions**:
 - Re-run the command; downloads are resumable
@@ -443,8 +496,8 @@ Downloads use `.part` files and HTTP Range requests, allowing safe resumption if
 **Solutions**:
 - Verify you have download permissions in Zoom
 - Confirm ffmpeg works: `ffmpeg -version`
-- Exit code 14 indicates insufficient permissions
-- Try the manual flow: `zoom sniff-cdp`, `zoom list`, `zoom dl`
+- u_crawler falls back to a plain HTTP download when ffmpeg fails; if both fail,
+  the recording's short-lived URL likely expired — re-run the command
 - Check logs for specific error messages
 
 ### Configuration File Not Found
@@ -474,10 +527,10 @@ Then check `~/.config/u_crawler/u_crawler.log` after running commands.
 | 0 | Success |
 | 10 | Configuration error |
 | 11 | Authentication error |
-| 12 | Network or rate limit error |
-| 13 | ffmpeg missing or failed |
-| 14 | Permission denied (no download rights) |
-| 15 | Partial failure (some items failed) |
+| 12 | Network, rate limit, or runtime failure |
+
+Note that on a first run, u_crawler creates the config file and exits with code
+10 so that you notice you need to edit it.
 
 ## Additional Notes
 
@@ -489,4 +542,5 @@ Then check `~/.config/u_crawler/u_crawler.log` after running commands.
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+No license has been declared for this project yet. Until one is added, all
+rights are reserved by default and the code carries no permission to reuse it.

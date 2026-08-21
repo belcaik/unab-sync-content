@@ -1,18 +1,31 @@
-# agents.md
+# AGENTS.md
 
 ## Project: `u_crawler` — Canvas/Zoom course backup CLI
 
-### Mission
+A Rust CLI that authenticates to Canvas with a Personal Access Token, enumerates
+courses/modules/files, and mirrors them to a structured folder tree. It also
+captures a Zoom LTI session through a headless browser and downloads the class
+recordings that session can reach.
 
-Build a fast, robust CLI that authenticates to Canvas with a Personal Access Token (PAT), enumerates courses/modules/files, and downloads content to a structured folder tree. Detect Zoom class recording links in Canvas content and download media via `ffmpeg` when the user has permission (authenticated via browser-exported cookies). Respect rate limits and terms of service.
+> This document describes what the code **does**. If you change behaviour, change
+> this file in the same commit. Statements here that the code contradicts are
+> bugs in this file.
 
 ---
 
 ## Non-negotiables
-* **Idempotent & resumable:** Safe retries, `Range` requests, `.part` files, checksum/ETag validation.
-* **Deterministic structure:** Stable, sanitized paths; week folding rules.
-* **Observability:** Structured logs, progress bars, clear exit codes.
-* **Security:** Never log secrets. Support keychain or external secret command.
+
+* **Idempotent & resumable:** `Range` requests, `.part` files, ETag validation,
+  atomic rename on finalize.
+* **Deterministic structure:** stable, sanitized, ASCII-transliterated paths.
+* **`--dry-run` writes nothing and launches nothing.** It must not start a
+  browser, perform SSO, or download.
+* **Never log a credential value.** Log presence (`has_token = true`), never the
+  token, scid, cookie or password. The log file is append-only for the life of
+  the install.
+* **Nothing outside `main.rs` writes to stdout.** Library modules emit `tracing`
+  events; user-facing output goes through the `status!` macro in `ui`, which
+  prints through the shared progress-bar group.
 
 ---
 
@@ -20,28 +33,31 @@ Build a fast, robust CLI that authenticates to Canvas with a Personal Access Tok
 
 * **Language:** Rust (Edition 2021)
 * **Async runtime:** `tokio`
-* **HTTP:** `reqwest` (+ gzip/brotli/deflate, streaming)
+* **HTTP:** `reqwest` (gzip/brotli/deflate, streaming, rustls)
 * **CLI:** `clap` (derive)
 * **Config:** TOML (`directories`, `toml`)
-* **Parsing:** `serde`, `serde_json`, `regex`, `url`
-* **Filesystem:** `tokio::fs`, `sanitize-filename`
-* **UX:** `indicatif` progress
-* **Process:** `which`, `tokio::process` (for `ffmpeg`)
-* **Optional:** `keyring` for secrets
+* **Parsing:** `serde`, `serde_json`, `regex`, `url`, `html2md`
+* **Storage:** `rusqlite` (Zoom session store), JSON (`state.json` per course)
+* **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml)
+* **Errors:** `thiserror` for typed module errors, `anyhow` for orchestration
+* **UX:** `indicatif`
+* **Process:** `tokio::process` (for `ffmpeg`)
 
 ---
 
 ## Repository Conventions
 
 * **Branching:** `main` (default). Feature branches: `feat/<scope>-<short-desc>`.
-* **Conventional Commits:**  
-  Use prefixes: `feat:`, `fix:`, `docs:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:`, `revert:`  
-  Optionally, prepend [Gitmojis](https://gitmoji.dev/) for clarity and fun (e.g., `✨ feat(canvas): list courses and paginate via Link rel=next`).
-* **Formatting & Lint:** `rustfmt`, `clippy` (CI must pass).
-* **Tests:** `cargo test` (unit + integration); network calls behind thin interfaces for mocking.
-* **Releases:** Git tags `vMAJOR.MINOR.PATCH`; changelog via conventional commits.
-* **PR Rules:** Small, reviewed, CI green, include tests/docs if applicable.
-
+* **Conventional Commits:** `feat:`, `fix:`, `docs:`, `refactor:`, `perf:`,
+  `test:`, `build:`, `ci:`, `chore:`, `revert:`.
+* **Formatting & Lint:** `cargo fmt --all` and
+  `cargo clippy --all-targets --all-features --locked -- -D warnings`.
+  `Cargo.toml` carries a `[lints.clippy]` table so local runs match CI.
+* **No `#[allow(clippy::...)]`** without a comment justifying it. There are
+  currently none in the crate; adding one is a design signal, not a fix.
+* **Tests:** `cargo test`. Prefer pure functions that can be tested without a
+  network or a browser — that is why `links`, `download`, `zoom::app_conf` and
+  `zoom::sso` are separate from the flows that call them.
 
 ---
 
@@ -53,65 +69,70 @@ Build a fast, robust CLI that authenticates to Canvas with a Personal Access Tok
 
 ### Commands
 
-* `init`
+| Command | Flags | Behaviour |
+|---|---|---|
+| `init` | — | Create the default config and paths. |
+| `auth canvas` | `--base-url`, and one of `--token` / `--token-cmd` | Store the Canvas PAT, or a command that prints it. |
+| `scan` | `--course-id` | Enumerate courses/modules/files. No writes. |
+| `sync` | `--course-id`, `--dry-run`, `--verbose` | Mirror Canvas content, announcements and Zoom recordings. |
+| `announcements` | `--course-id`, `--dry-run` | Announcements only: markdown bodies, extracted links and media, `index.json`. |
+| `recordings` | `--course-id`, `--dry-run` | Report Zoom links found across a course. Does not download. |
+| `zoom flow` | `--course-id`, `--since` | Capture a Zoom session and download its recordings. |
+| `status` | `--verbose` | Per-course file counts, storage, last sync, failed items. |
 
-  * Create default config and paths.
-* `auth canvas --token <PAT> | --token-cmd <cmd>`
-
-  * Store Canvas PAT or command to retrieve it.
-* `scan`
-
-  * Enumerate courses/modules/files; dry-run, no writes.
-* `sync`
-
-  * Incremental download of Canvas files and Zoom recordings.
-* `recordings`
-
-  * Only process and download Zoom recordings.
-* `status`
-
-  * Show last run, pending items, failed jobs.
-* `clean`
-
-  * Verify checksums, remove `.part` leftovers.
+`sync` honours `[announcements].enabled` and `[zoom].enabled`; either can be
+turned off without touching the command line.
 
 ### Exit Codes
 
-* `0` success
-* `10` config error
-* `11` auth error
-* `12` network/rate-limit error (exhausted)
-* `13` ffmpeg missing/failure
-* `14` permissions (no download right)
-* `15` partial (some items failed)
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `10` | Config error, including "config was just created, go edit it" |
+| `11` | Auth error |
+| `12` | Network / rate-limit / runtime failure |
+
+Codes 13–15 are not currently emitted. Do not document them until they are.
 
 ---
 
 ## Config
 
-**Path:** `~/.config/u_crawler/config.toml`
+**Path:** `~/.config/u_crawler/config.toml`. See `assets/config.toml` for a
+commented template — keep the two in step.
 
 ```toml
-download_root = "~/Documents/UNAB/data/Canvas"
-concurrency = 4
-max_rps = 2
-user_agent = ""
-course_include = ["*"]
-course_exclude = []
-week_pattern = ""
-naming.safe_fs = true
+download_root = "~/Documents/Canvas-Backup"
+concurrency = 4              # simultaneous in-flight requests
+max_rps = 2                  # request pacing ceiling
+user_agent = ""              # blank uses the built-in default
+
+[logging]
+level = "info"
+file = "~/.config/u_crawler/u_crawler.log"
 
 [canvas]
 base_url = "https://<tenant>.instructure.com"
-token = ""        # optional if token_cmd used
-token_cmd = ""    # e.g. "pass show canvas/pat"
+token = ""                   # optional if token_cmd is set
+token_cmd = ""               # e.g. "pass show canvas/pat"
+ignored_courses = []         # course ids to skip
+sso_email = ""               # institutional SSO, used by the Zoom flow
+sso_password = ""            # SECURITY: stored in cleartext
+
+[announcements]
+enabled = true
+download_media = true
 
 [zoom]
 enabled = true
 ffmpeg_path = "ffmpeg"
-cookie_file = "~/.config/u_crawler/zoom_cookies.txt"  # Netscape format
-user_agent = "Mozilla/5.0"
+user_agent = "Mozilla/5.0 ..."
+external_tool_id = 187       # the Canvas external tool id for Zoom
 ```
+
+**Every key in this file is read by the code.** If you add one, wire it up in
+the same commit; if you stop reading one, delete it. Inert configuration that is
+documented as working is worse than no configuration.
 
 ---
 
@@ -119,233 +140,133 @@ user_agent = "Mozilla/5.0"
 
 ```
 <download_root>/
-  <Course Name - Code>/
-    <Semana XX>/
-      Archivos/
-        <original-filename>
-      Clases/
-        <YYYY-MM-DD - Title>.mp4
+  <Course Name>_<Course Code>/
+    state.json                       # per-course sync state
+    Modules/
+      <module_id>_<Module Name>/
+        NN-<Page Title>.md           # page body as markdown
+        NN-ASSIGN-<Title>.md         # assignment description
+        Attachments/
+          <original-filename>
+    announcements/
+      <YYYY-MM-DD>_<slug>_<id>.md
+      index.json                     # links, media and zoom links per announcement
+      media/
+        <attachment files>
+
+<download_root>/Zoom/<course_id>/
+  <recording>.mp4
 ```
 
-* **Week inference:** Prefer module `unlock_at`/`published_at`; fallback item `created_at`; else ISO week (`%V`) of best-known date.
+There is no week-folding. Names are sanitized and transliterated to ASCII by
+`fsutil::sanitize_component`.
+
+---
+
+## Architecture
+
+```
+src/
+  main.rs           # CLI parsing, command dispatch, all user-facing printing
+  lib.rs            # module docs and the layer map
+  config.rs         # load/validate/expand config
+  http.rs           # the one client: rate limiting, 429/5xx retry, Link parsing
+  canvas.rs         # Canvas REST client (get_json / list_paginated)
+  download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
+  state.rs          # per-course State, ItemState, record_error
+  links.rs          # HTML -> links, media refs, zoom URLs
+  syncer.rs         # CourseSync / ModuleCtx: the main sync flow
+  announcements.rs  # AnnouncementSync
+  recordings.rs     # zoom-link discovery report
+  fsutil.rs         # sanitization, atomic write/rename
+  ffmpeg.rs         # ffmpeg invocation
+  progress.rs       # progress bars, registered with ui::bars()
+  ui.rs             # user-facing output channel (status! macro)
+  logger.rs         # log file setup, falls back to stderr
+  zoom/
+    mod.rs          # zoom_flow orchestration
+    api.rs          # Zoom recordings REST client
+    db.rs           # SQLite session store, ZoomSession, ZoomDbError
+    models.rs       # wire types
+    headless.rs     # browser driving and CDP interception
+    sso.rs          # Canvas -> Microsoft -> Zoom login, free functions over a Page
+    app_conf.rs     # pure parser for Zoom's window.appConf blob
+    download.rs     # HTTP fallback when ffmpeg cannot fetch a recording
+```
+
+Rules that hold today and should keep holding:
+
+* **All HTTP goes through `HttpCtx`.** It is the only place rate limiting and
+  retries live. A raw `reqwest::Client::send()` outside `http.rs` is a bug.
+* **All Canvas file downloads go through `download::download_if_needed`,** under
+  one state-key namespace (`file:{id}`), so a file reachable from both a module
+  and an announcement is fetched once.
+* **All Canvas list endpoints go through `CanvasClient::list_paginated`.**
+* **`zoom::sso` must not touch the database or the course id.** It takes a page
+  and credentials. That is what makes it testable.
+* Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
 ---
 
 ## Canvas API Contract (v1)
 
 * Courses: `GET /api/v1/courses?enrollment_state=active&per_page=100`
-* Modules (+items): `GET /api/v1/courses/{course_id}/modules?include=items&per_page=100`
-* Files index: `GET /api/v1/courses/{course_id}/files?sort=updated_at&per_page=100`
-* File download: use `url` or `download_url` (HEAD for size/ETag)
-* Paginación: parse `Link` header (`rel="next"`)
-* Backoff:
-
-  * Honor `Retry-After`
-  * Exponential backoff for 5xx
-  * Cap RPS to `max_rps`
-* HTTP caching:
-
-  * Prefer `ETag`/`If-None-Match`, `If-Modified-Since`
-* Downloads:
-
-  * `.part` + `Range` resume
-  * `fsync` on finalize
-  * Atomic `rename` to final
+* Modules (+items): `GET /api/v1/courses/{id}/modules?include=items&per_page=100`
+* Assignments: `GET /api/v1/courses/{id}/assignments?per_page=100`
+* Announcements: `GET /api/v1/courses/{id}/discussion_topics?only_announcements=true&per_page=100`
+* Pages: `GET /api/v1/courses/{id}/pages/{slug}`
+* Files: `GET /api/v1/files/{id}`; download via `download_url` or `url`
+* Pagination: the `Link` header, `rel="next"`, capped at `MAX_PAGES`
+* Backoff: honour `Retry-After` (capped), exponential for 5xx, bounded by
+  `max_retries`
 
 ---
 
 ## Zoom Recording Flow
 
-**Scope:** Only if user has valid access and download is permitted.
+1. `ZoomDb::load_session` looks for a complete stored session (scid, cookies,
+   and the `x-xsrf-token` / `x-zm-*` headers). Partial is treated as absent.
+2. If absent or rejected, `headless.rs` launches a browser, navigates to the
+   Canvas external tool, and lets `sso.rs` drive the Canvas → Microsoft login.
+   CDP Fetch interception scrapes `window.appConf` (`app_conf.rs`) for the
+   identifiers, and the cookies are harvested and stored.
+3. `api.rs` lists meetings and their recording files.
+4. `headless.rs` visits each play URL, captures the short-lived asset request
+   headers, and downloads via `ffmpeg` (stream copy), falling back to a plain
+   HTTP download when ffmpeg fails.
 
-1. Discover Zoom URLs inside Canvas content (pages, announcements, module external URLs):
-   Match `https://*.zoom.us/rec/(share|play)/...`
-2. User provides **browser-exported cookies** (Netscape format) at `zoom.cookie_file`.
-3. Resolve recording page, extract HLS/MP4 URL available to the session.
-4. Download via `ffmpeg` (stream copy):
-
-```bash
-ffmpeg \
-  -headers "User-Agent: <UA>\r\nCookie: <COOKIE_LINE>" \
-  -i "<HLS_or_MP4_URL>" \
-  -c copy -map 0 -movflags +faststart "<dest>.mp4"
-```
-
-**FFmpeg presence is mandatory** (detect with `which`).
+`ffmpeg` must be present; `zoom.ffmpeg_path` points at it.
 
 ---
 
-## High-Level Architecture
+## Testing
 
-```
-src/
-  main.rs           # CLI entry
-  config.rs         # load/save config
-  http.rs           # client factory, backoff, throttle
-  canvas.rs         # API calls, pagination, mapping to tasks
-  zoom.rs           # URL discovery, resolve, handoff to ffmpeg
-  ffmpeg.rs         # spawning, args, error mapping
-  fsutil.rs         # path building, sanitization, atomic moves, status/clean
-```
+Present today (`cargo test`): Link-header parsing, retry/backoff classification,
+URL construction and percent-encoding, `window.appConf` parsing, link/media
+extraction, filename sanitization, `State::record_error`, page-slug extraction,
+byte-size formatting, char-safe truncation, and Zoom cookie expiry.
 
-* All network IO async.
-* Streaming downloads; bounded concurrency (`concurrency`).
-* Structured log fields: `course_id`, `module_id`, `file_id`, `url`, `dest`, `attempt`.
-
----
-
-## Acceptance Criteria
-
-### `init`
-
-* Creates config if missing; preserves if exists.
-* Populates sensible defaults; expands `~`.
-
-### `auth`
-
-* Saves `token` or `token_cmd`. Masks secrets in logs.
-
-### `scan`
-
-* Lists visible courses (name + id).
-* For one course (flag `--course-id`), lists modules and files with pagination.
-
-### `sync`
-
-* Downloads new/changed files (ETag-aware).
-* Creates stable folder structure.
-* Resumes partials.
-* Emits summary: totals, new, updated, skipped, failed.
-
-### `recordings`
-
-* Scans Canvas HTML for Zoom links.
-* For accessible recordings, produces playable `.mp4`.
-* Skips gracefully when download is disabled; report.
-
-### Fault tolerance
-
-* Network 5xx → retries with backoff.
-* 429 → wait `Retry-After`, continue.
-* Disk full → fail item with clear error, continue others.
-* On crash → rerun is safe (idempotent).
-
----
-
-## Testing Plan
-
-* **Unit:**
-
-  * Link header parser.
-  * Week inference.
-  * Path sanitization.
-  * Retry/backoff decision.
-* **Integration (mock server):**
-
-  * Pagination over 3+ pages.
-  * ETag/304 handling.
-  * Range resume.
-* **E2E (manual harness):**
-
-  * Real Canvas sandbox course with dummy files.
-  * `ffmpeg` download against a public HLS test (non-Zoom) to validate pipeline.
-
----
-
-## Logging & Telemetry
-
-* Default human logs with progress bars.
-* `--json` flag for machine-readable logs:
-
-  * `level`, `ts`, `event`, `course_id`, `item_id`, `bytes`, `duration_ms`, `result`.
+Worth adding: a mock-server integration test covering pagination across three
+pages, ETag skip, and `Range` resume — `tests/` currently only covers the Zoom
+database.
 
 ---
 
 ## Security
 
-* Never print tokens/cookies.
-* Support retrieving PAT via `token_cmd` (e.g., `pass`, `gopass`, `keyring`).
-* Cookies file read with `0600` permissions; warn if broader.
-* Do not embed cookies in config.
+* Never print or log tokens, cookies, the `lti_scid`, or the SSO password.
+* `sso_password` currently sits in cleartext in `config.toml`. An
+  `sso_password_cmd` mirroring `token_cmd` would be the right fix.
+* Retrieve the Canvas PAT via `token_cmd` (`pass`, `gopass`) where possible.
+* Do not commit captured API responses; they contain real names and addresses.
 
 ---
 
-## Tasks & Milestones (for the Agent)
+## Agent Operating Instructions
 
-### M0 — Skeleton
-
-* Scaffold crate, `clap` CLI, `init`, config load/save, `--version`, `--help`.
-* CI: build + fmt + clippy + tests.
-
-### M1 — Canvas Listing
-
-* HTTP client, pagination, `scan` courses/modules/files.
-* Unit tests: Link parsing, pagination loop.
-
-### M2 — File Sync
-
-* ETag/If-None-Match, Range resume (`.part`), atomic `rename`.
-* Concurrency + `max_rps` throttle.
-* Progress bars per file; summary.
-
-### M3 — Zoom Discovery
-
-* Parse Canvas HTML content items; extract Zoom URLs (regex).
-* Pluggable resolver trait (future providers).
-
-### M4 — FFmpeg Download
-
-* Detect `ffmpeg`; spawn with headers/cookies.
-* Stream copy to MP4, `+faststart`.
-* Error mapping, retries on transient 4xx/5xx.
-
-### M5 — Status & Clean
-
-* `status` summary JSON/human.
-* `clean` removes stale `.part`, verifies sizes.
-
-### M6 — Hardening
-
-* More tests, docs, examples, error messages, man page.
-
----
-
-## Agent Operating Instructions (Codex)
-
-* Follow this spec exactly; ask for missing constants only if required.
-* Generate small, reviewable PRs per milestone.
-* Write tests alongside code.
-* Keep public APIs documented (`///` rustdoc).
-* Use feature flags sparingly; default build must remain minimal.
+* Prefer deleting complexity to rearranging it.
+* Write tests alongside code, especially for anything pure.
+* Keep public APIs documented (`///`) and modules documented (`//!`).
+* No `unwrap`/`expect` outside tests, except where failure is genuinely
+  impossible (a `Regex::new` on a literal in a `LazyLock`) — and say so.
 * No unsafe code without justification.
-
----
-
-## Example Conventional Commits
-
-* `feat(cli): add init command to create default config`
-* `feat(canvas): paginate courses and modules via Link headers`
-* `perf(download): enable ranged resume with .part files`
-* `fix(zoom): handle cookie file path expansion (~)`
-* `docs: add usage examples for sync and recordings`
-* `test(canvas): link header parser and pagination loop`
-* `refactor(fs): extract path sanitization helper`
-
----
-
-## Make Targets (optional)
-
-* `make build` → `cargo build --release`
-* `make test` → `cargo test`
-* `make lint` → `cargo fmt -- --check && cargo clippy -- -D warnings`
-* `make run` → `cargo run -- sync`
-
----
-
-## Definition of Done
-
-* Commands `init|auth|scan|sync|recordings|status|clean` implemented.
-* CI green: fmt, clippy, tests.
-* README with install + quickstart.
-* Works on Linux/macOS; Windows not required.
-* No plaintext secrets in repo or logs.
