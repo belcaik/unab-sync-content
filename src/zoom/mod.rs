@@ -1,8 +1,10 @@
 pub mod api;
+pub mod app_conf;
 pub mod db;
 pub mod download;
 pub mod headless;
 pub mod models;
+pub mod sso;
 
 use crate::config::ConfigPaths;
 use crate::progress::progress_bar;
@@ -20,69 +22,29 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<
 
     println!("Starting Zoom flow for course {}", course_id);
 
-    // 1. Check if we have valid credentials (scid + cookies + headers)
-    let scid = db.get_scid(course_id)?;
-    let cookies = db.load_cookies()?;
-    let headers = db.get_all_request_headers(course_id)?;
-
+    // 1. Reuse the stored session if it is complete and still accepted.
     let headless = ZoomHeadless::new(&cfg, &db, course_id);
+    let stored = db.load_session(course_id)?;
 
-    let xsrf_token = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
-        .map(|(_, v)| v);
-    let zm_aid = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-aid")
-        .map(|(_, v)| v);
-    let zm_cluster_id = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-cluster-id")
-        .map(|(_, v)| v);
-    let zm_haid = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-haid")
-        .map(|(_, v)| v);
-
-    // Log only whether each credential is present. These are live session tokens and
-    // the logger appends to a file for the lifetime of the install.
     info!(
         course_id,
-        has_scid = scid.is_some(),
-        has_xsrf_token = xsrf_token.is_some(),
-        has_zm_aid = zm_aid.is_some(),
-        has_zm_cluster_id = zm_cluster_id.is_some(),
-        has_zm_haid = zm_haid.is_some(),
-        cookies_count = cookies.len(),
-        "loaded zoom session from db"
+        has_session = stored.is_some(),
+        "checked stored zoom session"
     );
 
-    let has_min_creds = scid.is_some()
-        && !cookies.is_empty()
-        && xsrf_token.is_some()
-        && zm_aid.is_some()
-        && zm_cluster_id.is_some()
-        && zm_haid.is_some();
-
     let mut valid_session = false;
-
-    if has_min_creds {
+    if stored.is_some() {
         println!("Found existing credentials in DB. Validating...");
         match ZoomClient::new(&cfg, &db, course_id).await {
-            Ok(client) => {
-                if client.validate_cookies().await {
-                    println!("Cookies are valid. Skipping headless capture.");
-                    valid_session = true;
-                } else {
-                    println!("Cookies are invalid or expired.");
-                }
+            Ok(client) if client.validate_cookies().await => {
+                println!("Cookies are valid. Skipping headless capture.");
+                valid_session = true;
             }
-            Err(e) => {
-                println!("Failed to initialize Zoom client for validation: {}", e);
-            }
+            Ok(_) => println!("Cookies are invalid or expired."),
+            Err(e) => println!("Failed to initialize Zoom client for validation: {}", e),
         }
     } else {
-        println!("Missing some credentials in DB.");
+        println!("No complete session stored for this course.");
     }
 
     if !valid_session {
@@ -90,20 +52,9 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> Result<(), Box<
         headless.authenticate_and_capture().await?;
         println!("Headless capture finished.");
 
-        // Log what we captured
-        let scid = db.get_scid(course_id)?;
-        let cookies = db.load_cookies()?;
-        let headers = db.get_all_request_headers(course_id)?;
-        let xsrf_token = headers
-            .iter()
-            .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
-            .map(|(_, v)| v);
-
         info!(
             course_id,
-            has_scid = scid.is_some(),
-            has_xsrf_token = xsrf_token.is_some(),
-            cookies_count = cookies.len(),
+            captured = db.load_session(course_id)?.is_some(),
             "headless capture result"
         );
     }

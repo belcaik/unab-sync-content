@@ -1,12 +1,13 @@
 use crate::config::Config;
+use crate::zoom::app_conf;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ZoomCookie, ZoomRecordingFile};
+use crate::zoom::sso::{self, SsoCreds};
 use base64::prelude::*;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent;
 use chromiumoxide::Page;
 use futures::StreamExt;
-use regex::Regex;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +18,32 @@ pub struct ZoomHeadless<'a> {
     config: &'a Config,
     db: &'a ZoomDb,
     course_id: u64,
+}
+
+/// Collects the page's cookies for the given domains, in the shape the
+/// recordings database and the downloader expect.
+///
+/// The domain set differs by caller: capturing a session needs `zoom.us`, while
+/// downloading also needs the CDN the media is served from.
+async fn harvest_cookies(
+    page: &Page,
+    domains: &[&str],
+) -> Result<Vec<ZoomCookie>, Box<dyn std::error::Error>> {
+    Ok(page
+        .get_cookies()
+        .await?
+        .into_iter()
+        .filter(|c| domains.iter().any(|d| c.domain.contains(d)))
+        .map(|c| ZoomCookie {
+            domain: c.domain,
+            name: c.name,
+            value: c.value,
+            path: c.path,
+            expires: Some(c.expires as i64),
+            secure: c.secure,
+            http_only: c.http_only,
+        })
+        .collect())
 }
 
 impl<'a> ZoomHeadless<'a> {
@@ -92,15 +119,6 @@ impl<'a> ZoomHeadless<'a> {
             .await
             .unwrap();
 
-        // Pre-compile regexes
-        let re_scid = Regex::new(r#"scid\s*:\s*['"]([^'"]+)['"]"#).unwrap();
-        let re_ajax = Regex::new(r#"(?s)ajaxHeaders\s*:\s*\[(.*?)\]"#).unwrap();
-        let re_kv = Regex::new(
-            r#"\{\s*key\s*:\s*['"]([^'"]+)['"]\s*,\s*value\s*:\s*['"]([^'"]+)['"]\s*\}"#,
-        )
-        .unwrap();
-        let re_xsrf = Regex::new(r#"(?i)['"]?x-xsrf-token['"]?\s*:\s*['"]([^'"]+)['"]"#).unwrap();
-
         // Spawn Fetch interception task
         tokio::spawn(async move {
             while let Some(event) = request_paused_events.next().await {
@@ -147,106 +165,21 @@ impl<'a> ZoomHeadless<'a> {
                                 body.body.clone()
                             };
 
-                            // Extract window.appConf
-                            if let Some(idx) = content.find("window.appConf") {
-                                // println!("Found window.appConf in intercepted body!");
-                                // Extract a chunk to parse
-                                // Extract a chunk to parse
-                                let start = idx;
-                                // Capture a larger chunk to ensure we get ajaxHeaders even if they are far down
-                                let end = (idx + 20000).min(content.len());
-                                let chunk = &content[start..end];
-
-                                // Debug log to verify we are seeing the right content
-                                println!(
-                                    "DEBUG appConf chunk (first 500 chars):\n{}",
-                                    &chunk[..chunk.len().min(500)]
-                                );
-
-                                // Regex for scid
-                                // scid: "..."
-                                // scid: "..."
-                                if let Some(caps) = re_scid.captures(chunk) {
-                                    if let Some(val) = caps.get(1) {
-                                        let s = val.as_str().to_string();
-                                        println!("Captured lti_scid from Fetch: {}", s);
-                                        let mut data = captured_data_clone.lock().unwrap();
-                                        data.0 = Some(s);
-                                    }
+                            let found = app_conf::parse(&content);
+                            if !found.is_empty() {
+                                let mut data = captured_data_clone.lock().unwrap();
+                                if let Some(scid) = found.scid {
+                                    println!("Captured lti_scid from Fetch");
+                                    data.0 = Some(scid);
                                 }
-
-                                // Regex for ajaxHeaders
-                                // User says it looks like: ajaxHeaders: [{key: "...", value: "..."}, ...]
-                                // We will capture the content inside ajaxHeaders: [...]
-                                // Regex for ajaxHeaders
-                                // User says it looks like: ajaxHeaders: [{key: "...", value: "..."}, ...]
-                                // We will capture the content inside ajaxHeaders: [...]
-                                // Use (?s) to allow . to match newlines
-                                if let Some(caps) = re_ajax.captures(chunk) {
-                                    if let Some(ajax_body) = caps.get(1) {
-                                        let ajax_body_str = ajax_body.as_str();
-                                        // Now extract key-value pairs
-                                        // Regex for {key: "...", value: "..."}
-                                        // We need to be careful about quotes and spacing
-                                        // We need to be careful about quotes and spacing
-
-                                        let mut headers = HashMap::new();
-                                        for cap in re_kv.captures_iter(ajax_body_str) {
-                                            if let (Some(k), Some(v)) = (cap.get(1), cap.get(2)) {
-                                                let key = k.as_str().to_string();
-                                                let val = v.as_str().to_string();
-                                                // Filter for interesting headers
-                                                let key_lower = key.to_lowercase();
-                                                if key_lower.starts_with("x-zm-")
-                                                    || key_lower == "x-xsrf-token"
-                                                {
-                                                    headers.insert(key, val);
-                                                }
-                                            }
-                                        }
-
-                                        if !headers.is_empty() {
-                                            println!(
-                                                "Captured {} ajaxHeaders from Fetch (array format)",
-                                                headers.len()
-                                            );
-                                            let mut data = captured_data_clone.lock().unwrap();
-                                            if data.1.is_none() {
-                                                data.1 = Some(headers);
-                                            } else {
-                                                data.1.as_mut().unwrap().extend(headers);
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Fallback to previous object format logic if array format fails
-                                    // ... (previous logic or just log warning)
-                                    // Actually, let's just try the previous logic as a backup or assume array format is correct.
-                                    // The user was quite specific.
-                                    // But I'll keep the explicit XSRF capture just in case.
-                                }
-
-                                // Explicitly capture x-xsrf-token if missed (sometimes it's in a different format or location)
-                                if let Some(caps) = re_xsrf.captures(chunk) {
-                                    if let Some(val) = caps.get(1) {
-                                        let mut data = captured_data_clone.lock().unwrap();
-                                        if data.1.is_none() {
-                                            data.1 = Some(HashMap::new());
-                                        }
-                                        let headers = data.1.as_mut().unwrap();
-                                        if !headers.contains_key("x-xsrf-token")
-                                            && !headers.contains_key("X-XSRF-TOKEN")
-                                        {
-                                            headers.insert(
-                                                "x-xsrf-token".to_string(),
-                                                val.as_str().to_string(),
-                                            );
-                                            println!(
-                                                "Explicitly captured x-xsrf-token: {}",
-                                                val.as_str()
-                                            );
-                                        }
-                                    }
+                                if !found.headers.is_empty() {
+                                    println!(
+                                        "Captured {} session headers from Fetch",
+                                        found.headers.len()
+                                    );
+                                    data.1
+                                        .get_or_insert_with(HashMap::new)
+                                        .extend(found.headers);
                                 }
                             }
                         }
@@ -310,7 +243,7 @@ impl<'a> ZoomHeadless<'a> {
         page.goto(&target_url).await?;
 
         // Handle SSO
-        self.handle_sso(&page).await?;
+        sso::handle_sso(&page, &SsoCreds::from_config(self.config)).await?;
 
         // Wait for Zoom LTI to load and capture data
         println!("Waiting for Zoom LTI to load...");
@@ -340,21 +273,7 @@ impl<'a> ZoomHeadless<'a> {
         }
 
         // Get cookies
-        let current_cookies = page.get_cookies().await?;
-        let mut cookies = Vec::new();
-        for c in current_cookies {
-            if c.domain.contains("zoom.us") {
-                cookies.push(ZoomCookie {
-                    domain: c.domain,
-                    name: c.name,
-                    value: c.value,
-                    path: c.path,
-                    expires: Some(c.expires as i64),
-                    secure: c.secure,
-                    http_only: c.http_only,
-                });
-            }
-        }
+        let cookies = harvest_cookies(&page, &["zoom.us"]).await?;
 
         if let Some(s) = scid {
             self.db.save_scid(self.course_id, &s)?;
@@ -406,369 +325,6 @@ impl<'a> ZoomHeadless<'a> {
 
         browser.close().await?;
         handle.await?;
-
-        Ok(())
-    }
-
-    async fn handle_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        // Simple heuristic for Microsoft SSO
-        // 1. Check for email input
-        // 2. Check for password input
-        // 3. Check for "Stay signed in"
-
-        println!("Checking for SSO login...");
-
-        // Wait a bit for redirects
-        sleep(Duration::from_secs(5)).await;
-
-        let mut url = page.url().await?.unwrap_or_default();
-
-        // Handle Canvas Login Page (Pre-SSO)
-        if url.contains("/login/canvas") {
-            println!("Detected Canvas login page. Attempting to initiate SSO...");
-            // Find the "ESTUDIANTES Y DOCENTES" button
-            let buttons = page.find_elements(".ic-Login__body button").await?;
-            let mut clicked = false;
-            for button in buttons {
-                if let Ok(Some(text)) = button.inner_text().await {
-                    if text.to_uppercase().contains("ESTUDIANTES Y DOCENTES") {
-                        println!("Found SSO initiation button. Clicking...");
-                        button.click().await?;
-                        clicked = true;
-                        sleep(Duration::from_secs(5)).await; // Wait for redirect
-                        url = page.url().await?.unwrap_or_default(); // Update URL
-                        break;
-                    }
-                }
-            }
-            if !clicked {
-                println!(
-                    "Warning: Could not find 'ESTUDIANTES Y DOCENTES' button on Canvas login page."
-                );
-            }
-        }
-
-        if !url.contains("login.microsoftonline.com") {
-            println!(
-                "Not on Microsoft SSO page (URL: {}), assuming already logged in or not required.",
-                url
-            );
-            return Ok(());
-        }
-
-        self.handle_microsoft_sso(page).await?;
-        Ok(())
-    }
-
-    async fn handle_microsoft_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Handling Microsoft SSO...");
-        self.handle_ms_account(page).await
-    }
-
-    async fn handle_ms_account(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        // First, check for remembered account tiles (account picker)
-        sleep(Duration::from_secs(2)).await;
-
-        let email_input_present = page.find_element("input[type='email']").await.is_ok()
-            || page.find_element("input[name='loginfmt']").await.is_ok();
-
-        // Look for account tiles - the clickable element is .table[role="button"] inside .tile-container.
-        // Only attempt this flow if we do not already see the email input.
-        if !email_input_present {
-            if let Ok(tiles) = page.find_elements(".table[role='button']").await {
-                if !tiles.is_empty() {
-                    let mut matching_tile_idx = None;
-                    let mut first_email_tile_idx = None;
-                    let mut use_other_tile_idx = None;
-
-                    let normalized_email = self
-                        .config
-                        .canvas
-                        .sso_email
-                        .as_ref()
-                        .map(|email| email.to_lowercase());
-
-                    for (idx, tile) in tiles.iter().enumerate() {
-                        let text = tile.inner_text().await?.unwrap_or_default();
-                        let lowered = text.to_lowercase();
-
-                        if lowered.contains("sign-in options")
-                            || lowered.contains("other ways to sign in")
-                            || lowered.contains("otros metodos")
-                            || lowered.contains("otras formas")
-                        {
-                            continue;
-                        }
-
-                        if lowered.contains("use another account")
-                            || lowered.contains("usar otra cuenta")
-                            || lowered.contains("otra cuenta")
-                        {
-                            if use_other_tile_idx.is_none() {
-                                use_other_tile_idx = Some(idx);
-                            }
-                            continue;
-                        }
-
-                        if lowered.contains('@') {
-                            if first_email_tile_idx.is_none() {
-                                first_email_tile_idx = Some(idx);
-                            }
-                            if let Some(email) = &normalized_email {
-                                if lowered.contains(email) {
-                                    matching_tile_idx = Some(idx);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    let selected_idx = match (matching_tile_idx, normalized_email.as_ref()) {
-                        (Some(idx), _) => Some(idx),
-                        (None, Some(_)) => use_other_tile_idx.or(first_email_tile_idx),
-                        (None, None) => first_email_tile_idx,
-                    };
-
-                    if let Some(idx) = selected_idx {
-                        println!("Found remembered account tile, clicking...");
-                        if let Err(e) = tiles[idx].click().await {
-                            println!("Warning: Failed to click account tile: {:?}", e);
-                        } else {
-                            sleep(Duration::from_secs(3)).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: manual credential entry
-        if let Some(email) = &self.config.canvas.sso_email {
-            println!("Attempting to enter email...");
-            // Selector for email input. Usually 'input[type="email"]' or 'input[name="loginfmt"]'
-            if let Ok(input) = page.find_element("input[type='email']").await {
-                input.click().await?.type_str(email).await?;
-                if let Ok(button) = page.find_element("input[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("button[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("#idSIButton9").await {
-                    button.click().await?;
-                }
-                sleep(Duration::from_secs(2)).await;
-            } else if let Ok(input) = page.find_element("input[name='loginfmt']").await {
-                input.click().await?.type_str(email).await?;
-                if let Ok(button) = page.find_element("input[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("button[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("#idSIButton9").await {
-                    button.click().await?;
-                }
-                sleep(Duration::from_secs(2)).await;
-            }
-        } else {
-            println!("Warning: sso_email not set; skipping email entry.");
-        }
-
-        if let Some(password) = &self.config.canvas.sso_password {
-            println!("Attempting to enter password...");
-            // Selector for password input. 'input[type="password"]' or 'input[name="passwd"]'
-            if let Ok(input) = page.find_element("input[type='password']").await {
-                input.click().await?.type_str(password).await?;
-                if let Ok(button) = page.find_element("input[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("button[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("#idSIButton9").await {
-                    button.click().await?;
-                }
-                sleep(Duration::from_secs(2)).await;
-            } else if let Ok(input) = page.find_element("input[name='passwd']").await {
-                input.click().await?.type_str(password).await?;
-                if let Ok(button) = page.find_element("input[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("button[type='submit']").await {
-                    button.click().await?;
-                } else if let Ok(button) = page.find_element("#idSIButton9").await {
-                    button.click().await?;
-                }
-                sleep(Duration::from_secs(2)).await;
-            }
-        } else {
-            println!("Warning: sso_password not set; skipping password entry.");
-        }
-
-        // "Stay signed in?" prompt - poll for it since the page may still be loading after password submission.
-        // Microsoft shows this as "Stay signed in?" (English) or "¿Mantener la sesión iniciada?" (Spanish).
-        let kmsi_start = Instant::now();
-        while kmsi_start.elapsed() < Duration::from_secs(15) {
-            let url = page.url().await?.unwrap_or_default();
-
-            // If we already left the Microsoft login domain, SSO is done
-            if !url.contains("login.microsoftonline.com") {
-                println!("SSO complete, redirected to: {}", url);
-                break;
-            }
-
-            if let Ok(html) = page.content().await {
-                let html_lower = html.to_lowercase();
-                if html_lower.contains("stay signed in")
-                    || html_lower.contains("mantener la sesión iniciada")
-                    || html_lower.contains("mantener la sesion iniciada")
-                    || html_lower.contains("keep me signed in")
-                    || html_lower.contains("no volver a mostrar")
-                    || html_lower.contains("don't show this again")
-                {
-                    println!("Handling 'Stay signed in' prompt...");
-                    if let Ok(button) = page.find_element("#idSIButton9").await {
-                        button.click().await?;
-                    } else if let Ok(button) = page.find_element("input[type='submit']").await {
-                        button.click().await?;
-                    }
-                    sleep(Duration::from_secs(3)).await;
-                    break;
-                }
-            }
-
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        // Wait for final redirects back to Canvas/Zoom
-        sleep(Duration::from_secs(5)).await;
-
-        let final_url = page.url().await?.unwrap_or_default();
-        println!("Post-SSO URL: {}", final_url);
-        Ok(())
-    }
-
-    async fn is_zoom_login_page(&self, page: &Page) -> Result<bool, Box<dyn std::error::Error>> {
-        let url = page.url().await?.unwrap_or_default();
-        let html = page.content().await?;
-
-        Ok(url.contains("zoom.us/signin")
-            || html.contains("zm-login-methods__item")
-            || html.contains("Sign in with Microsoft"))
-    }
-
-    async fn handle_zoom_play_sso(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        // Step 1: Wait for page to settle after navigation
-        sleep(Duration::from_secs(3)).await;
-
-        let url = page.url().await?.unwrap_or_default();
-
-        // Step 2: Check if already authenticated (player loaded)
-        if url.contains("zoom.us/rec/play") {
-            // Additional check: look for player elements, not login elements
-            if let Ok(html) = page.content().await {
-                if !html.contains("zm-login-methods__item")
-                    && !html.contains("Sign in with Microsoft")
-                {
-                    println!("Zoom player already loaded, no authentication needed");
-                    return Ok(());
-                }
-            }
-        }
-
-        // Step 3: Detect Zoom login screen
-        if !self.is_zoom_login_page(page).await.unwrap_or(false) {
-            println!("No Zoom login detected, assuming already authenticated");
-            return Ok(());
-        }
-
-        println!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
-
-        // Step 4: Click "Sign in with Microsoft" on Zoom
-        let start = Instant::now();
-        let mut clicked = false;
-
-        while start.elapsed() < Duration::from_secs(10) {
-            // Try multiple selectors
-            if let Ok(el) = page
-                .find_element("a[aria-label='Sign in with Microsoft']")
-                .await
-            {
-                println!("Clicked 'Sign in with Microsoft' button (aria-label match)");
-                el.click().await?;
-                clicked = true;
-                break;
-            }
-
-            if let Ok(el) = page.find_element("a[aria-label*='Microsoft']").await {
-                println!("Clicked 'Sign in with Microsoft' button (aria-label partial match)");
-                el.click().await?;
-                clicked = true;
-                break;
-            }
-
-            // Fallback: search by text in login methods
-            if let Ok(methods) = page.find_elements(".zm-login-methods__item").await {
-                for method in methods {
-                    if let Ok(Some(text)) = method.inner_text().await {
-                        if text.to_lowercase().contains("microsoft") {
-                            println!("Clicked 'Microsoft' login method (text match)");
-                            method.click().await?;
-                            clicked = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if clicked {
-                break;
-            }
-
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        if !clicked {
-            return Err("Could not find 'Sign in with Microsoft' button on Zoom login page".into());
-        }
-
-        // Step 5: Wait for redirect to Microsoft
-        println!("Clicked Microsoft sign-in button, waiting for redirect...");
-        sleep(Duration::from_secs(3)).await;
-
-        let start = Instant::now();
-        let mut on_microsoft = false;
-        while start.elapsed() < Duration::from_secs(30) {
-            let current_url = page.url().await?.unwrap_or_default();
-            if current_url.contains("login.microsoftonline.com") {
-                println!("Redirected to Microsoft login: {}", current_url);
-                on_microsoft = true;
-                break;
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-
-        if !on_microsoft {
-            return Err("Timeout waiting for redirect to Microsoft login".into());
-        }
-
-        // Step 6: Handle Microsoft authentication (account picker or credentials)
-        self.handle_ms_account(page).await?;
-        println!("Microsoft authentication complete, waiting for Zoom player...");
-
-        // Step 7: Wait for return to Zoom
-        let start = Instant::now();
-        let mut back_on_zoom = false;
-        while start.elapsed() < Duration::from_secs(30) {
-            let current_url = page.url().await?.unwrap_or_default();
-            if current_url.contains("zoom.us") && !current_url.contains("signin") {
-                println!("Back on Zoom page: {}", current_url);
-                back_on_zoom = true;
-                break;
-            }
-            sleep(Duration::from_millis(1000)).await;
-        }
-
-        if !back_on_zoom {
-            return Err("Timeout waiting to return to Zoom after Microsoft authentication".into());
-        }
-
-        // Give the player time to initialize
-        sleep(Duration::from_secs(2)).await;
-        println!("Zoom player should now be loaded");
 
         Ok(())
     }
@@ -865,7 +421,9 @@ impl<'a> ZoomHeadless<'a> {
             page.goto(&file.play_url).await?;
 
             // STEP 2: Authenticate if needed
-            if let Err(e) = self.handle_zoom_play_sso(&page).await {
+            if let Err(e) =
+                sso::handle_zoom_play_sso(&page, &SsoCreds::from_config(self.config)).await
+            {
                 println!("Warning: SSO failed for {}: {:?}", file.play_url, e);
                 println!("Skipping this file...");
                 continue;
@@ -874,21 +432,7 @@ impl<'a> ZoomHeadless<'a> {
             // STEP 3: Capture fresh cookies (first file only) and load for downloads
             let zoom_cookies = if !cookies_captured {
                 println!("Capturing fresh cookies after SSO...");
-                let current_cookies = page.get_cookies().await?;
-                let mut fresh_cookies = Vec::new();
-                for c in current_cookies {
-                    if c.domain.contains("zoom.us") || c.domain.contains("cloudfront.net") {
-                        fresh_cookies.push(crate::zoom::models::ZoomCookie {
-                            domain: c.domain,
-                            name: c.name,
-                            value: c.value,
-                            path: c.path,
-                            expires: Some(c.expires as i64),
-                            secure: c.secure,
-                            http_only: c.http_only,
-                        });
-                    }
-                }
+                let fresh_cookies = harvest_cookies(&page, &["zoom.us", "cloudfront.net"]).await?;
                 if !fresh_cookies.is_empty() {
                     self.db.replace_cookies(&fresh_cookies)?;
                     println!("Saved {} fresh cookies for downloads", fresh_cookies.len());

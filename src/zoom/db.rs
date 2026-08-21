@@ -306,3 +306,60 @@ impl ZoomDb {
         Ok(())
     }
 }
+
+/// The credentials one course's recordings API calls need.
+///
+/// Zoom's LTI launch supplies these as a scid plus a handful of request headers;
+/// the recordings endpoints reject a request missing any of them.
+#[derive(Debug, Clone)]
+pub struct ZoomSession {
+    pub scid: String,
+    pub xsrf_token: String,
+    pub zm_aid: String,
+    pub zm_cluster_id: String,
+    pub zm_haid: String,
+    pub cookies: Vec<crate::zoom::models::ZoomCookie>,
+}
+
+impl ZoomDb {
+    /// Loads a complete session for `course_id`, or `None` if any part is missing.
+    ///
+    /// Partial credentials are indistinguishable from absent ones for the caller's
+    /// purposes — either way the headless capture has to run again — so this
+    /// returns an all-or-nothing value rather than six independent Options.
+    pub fn load_session(
+        &self,
+        course_id: u64,
+    ) -> Result<Option<ZoomSession>, Box<dyn std::error::Error>> {
+        let scid = self.get_scid(course_id)?;
+        let cookies = self.load_cookies()?;
+        let headers = self.get_all_request_headers(course_id)?;
+
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+
+        let (Some(scid), Some(xsrf_token), Some(zm_aid), Some(zm_cluster_id), Some(zm_haid), false) = (
+            scid,
+            header("x-xsrf-token"),
+            header("x-zm-aid"),
+            header("x-zm-cluster-id"),
+            header("x-zm-haid"),
+            cookies.is_empty(),
+        ) else {
+            return Ok(None);
+        };
+
+        Ok(Some(ZoomSession {
+            scid,
+            xsrf_token,
+            zm_aid,
+            zm_cluster_id,
+            zm_haid,
+            cookies,
+        }))
+    }
+}
