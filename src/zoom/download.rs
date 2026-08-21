@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tracing::{info, warn};
 
 pub async fn http_download(
     headers: &[(String, String)],
@@ -46,7 +47,7 @@ pub async fn http_download(
     }
 
     // DEBUG: Log all headers being sent
-    println!("HTTP download {} with {} headers:", url, header_map.len());
+    info!("HTTP download {} with {} headers:", url, header_map.len());
     for (k, v) in header_map.iter() {
         let val_str = v.to_str().unwrap_or("<binary>");
         let display_val = if val_str.len() > 100 {
@@ -54,7 +55,7 @@ pub async fn http_download(
         } else {
             val_str.to_string()
         };
-        println!("  {}: {}", k, display_val);
+        info!("  {}: {}", k, display_val);
     }
 
     let mut request = client.get(url);
@@ -134,7 +135,7 @@ pub fn build_ffmpeg_headers(
 
         headers.push(("Cookie".to_string(), cookie_header));
     } else {
-        println!("⚠ Warning: No cookies found for domain {}", domain);
+        warn!(domain, "no cookies found for domain");
     }
 
     headers

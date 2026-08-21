@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use tracing::info;
 
 /// Failures from the Zoom recordings store.
 ///
@@ -99,7 +100,7 @@ impl ZoomDb {
             "REPLACE INTO zoom_course_scid(course_id, scid, updated_at) VALUES (?1, ?2, ?3)",
             params![course_id.to_string(), scid, Utc::now().timestamp()],
         )?;
-        println!("DB: Saved scid for course {}", course_id);
+        info!("DB: Saved scid for course {}", course_id);
         Ok(())
     }
 
@@ -112,7 +113,7 @@ impl ZoomDb {
 
             Ok(Some(scid))
         } else {
-            println!("DB: No scid found for course {}", course_id);
+            info!("DB: No scid found for course {}", course_id);
             Ok(None)
         }
     }

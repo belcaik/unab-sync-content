@@ -2,6 +2,7 @@ use crate::canvas::{CanvasClient, Module};
 use crate::http::build_http_client;
 use crate::links::extract_zoom_urls;
 use crate::progress::{progress_bar, spinner};
+use crate::status;
 use tracing::info;
 
 pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
@@ -14,7 +15,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     if let Some(cid) = filter_course_id {
         courses.retain(|c| c.id == cid);
         if courses.is_empty() {
-            println!("No active course with id {} found.", cid);
+            status!("No active course with id {} found.", cid);
             return Ok(());
         }
     }
@@ -42,7 +43,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
                         let html = page.body.unwrap_or_default();
                         for url in extract_zoom_urls(&html) {
                             total += 1;
-                            println!(
+                            status!(
                                 "{}[course:{}] {:<40} | module:{} | page:{} | {}",
                                 if dry_run { "DRY-RUN " } else { "" },
                                 course.id,
@@ -58,7 +59,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
                 if let Some(u) = item.external_url.as_deref().or(item.html_url.as_deref()) {
                     for url in extract_zoom_urls(u) {
                         total += 1;
-                        println!(
+                        status!(
                             "{}[course:{}] {:<40} | module:{} | item:{} | {}",
                             if dry_run { "DRY-RUN " } else { "" },
                             course.id,
@@ -80,7 +81,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
             if let Some(desc) = assignment.description.as_deref() {
                 for url in extract_zoom_urls(desc) {
                     total += 1;
-                    println!(
+                    status!(
                         "{}[course:{}] {:<40} | assignment:{} | {}",
                         if dry_run { "DRY-RUN " } else { "" },
                         course.id,
@@ -94,7 +95,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     }
     course_progress.finish_and_clear();
 
-    println!(
+    status!(
         "{}Discovered {} Zoom link(s).",
         if dry_run { "DRY-RUN: " } else { "" },
         total

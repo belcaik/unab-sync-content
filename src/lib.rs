@@ -11,4 +11,5 @@ pub mod progress;
 pub mod recordings;
 pub mod state;
 pub mod syncer;
+pub mod ui;
 pub mod zoom;

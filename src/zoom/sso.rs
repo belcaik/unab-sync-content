@@ -12,6 +12,7 @@ use crate::config::Config;
 use chromiumoxide::Page;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
+use tracing::{info, warn};
 
 /// Selectors Microsoft has used for the email field, most specific first.
 const EMAIL_SELECTORS: &[&str] = &["input[type='email']", "input[name='loginfmt']"];
@@ -73,7 +74,7 @@ pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     // 2. Check for password input
     // 3. Check for "Stay signed in"
 
-    println!("Checking for SSO login...");
+    info!("Checking for SSO login...");
 
     // Wait a bit for redirects
     sleep(Duration::from_secs(5)).await;
@@ -82,14 +83,14 @@ pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
 
     // Handle Canvas Login Page (Pre-SSO)
     if url.contains("/login/canvas") {
-        println!("Detected Canvas login page. Attempting to initiate SSO...");
+        info!("Detected Canvas login page. Attempting to initiate SSO...");
         // Find the "ESTUDIANTES Y DOCENTES" button
         let buttons = page.find_elements(".ic-Login__body button").await?;
         let mut clicked = false;
         for button in buttons {
             if let Ok(Some(text)) = button.inner_text().await {
                 if text.to_uppercase().contains("ESTUDIANTES Y DOCENTES") {
-                    println!("Found SSO initiation button. Clicking...");
+                    info!("Found SSO initiation button. Clicking...");
                     button.click().await?;
                     clicked = true;
                     sleep(Duration::from_secs(5)).await; // Wait for redirect
@@ -99,14 +100,12 @@ pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
             }
         }
         if !clicked {
-            println!(
-                "Warning: Could not find 'ESTUDIANTES Y DOCENTES' button on Canvas login page."
-            );
+            warn!("Warning: Could not find 'ESTUDIANTES Y DOCENTES' button on Canvas login page.");
         }
     }
 
     if !url.contains("login.microsoftonline.com") {
-        println!(
+        info!(
             "Not on Microsoft SSO page (URL: {}), assuming already logged in or not required.",
             url
         );
@@ -177,9 +176,9 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
                 };
 
                 if let Some(idx) = selected_idx {
-                    println!("Found remembered account tile, clicking...");
+                    info!("Found remembered account tile, clicking...");
                     if let Err(e) = tiles[idx].click().await {
-                        println!("Warning: Failed to click account tile: {:?}", e);
+                        warn!("Warning: Failed to click account tile: {:?}", e);
                     } else {
                         sleep(Duration::from_secs(3)).await;
                     }
@@ -191,18 +190,18 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
     // Fallback: manual credential entry
     match &creds.email {
         Some(email) => {
-            println!("Attempting to enter email...");
+            info!("Attempting to enter email...");
             fill_and_submit(page, EMAIL_SELECTORS, email).await?;
         }
-        None => println!("Warning: sso_email not set; skipping email entry."),
+        None => warn!("sso_email not set; skipping email entry"),
     }
 
     match &creds.password {
         Some(password) => {
-            println!("Attempting to enter password...");
+            info!("attempting to enter password");
             fill_and_submit(page, PASSWORD_SELECTORS, password).await?;
         }
-        None => println!("Warning: sso_password not set; skipping password entry."),
+        None => warn!("sso_password not set; skipping password entry"),
     }
 
     // "Stay signed in?" prompt - poll for it since the page may still be loading after password submission.
@@ -213,7 +212,7 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
 
         // If we already left the Microsoft login domain, SSO is done
         if !url.contains("login.microsoftonline.com") {
-            println!("SSO complete, redirected to: {}", url);
+            info!("SSO complete, redirected to: {}", url);
             break;
         }
 
@@ -226,7 +225,7 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
                 || html_lower.contains("no volver a mostrar")
                 || html_lower.contains("don't show this again")
             {
-                println!("Handling 'Stay signed in' prompt...");
+                info!("Handling 'Stay signed in' prompt...");
                 if let Ok(button) = page.find_element("#idSIButton9").await {
                     button.click().await?;
                 } else if let Ok(button) = page.find_element("input[type='submit']").await {
@@ -244,7 +243,7 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
     sleep(Duration::from_secs(5)).await;
 
     let final_url = page.url().await?.unwrap_or_default();
-    println!("Post-SSO URL: {}", final_url);
+    info!("Post-SSO URL: {}", final_url);
     Ok(())
 }
 
@@ -269,7 +268,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
         if let Ok(html) = page.content().await {
             if !html.contains("zm-login-methods__item") && !html.contains("Sign in with Microsoft")
             {
-                println!("Zoom player already loaded, no authentication needed");
+                info!("Zoom player already loaded, no authentication needed");
                 return Ok(());
             }
         }
@@ -277,11 +276,11 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
 
     // Step 3: Detect Zoom login screen
     if !is_zoom_login_page(page).await.unwrap_or(false) {
-        println!("No Zoom login detected, assuming already authenticated");
+        info!("No Zoom login detected, assuming already authenticated");
         return Ok(());
     }
 
-    println!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
+    info!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
 
     // Step 4: Click "Sign in with Microsoft" on Zoom
     let start = Instant::now();
@@ -293,14 +292,14 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
             .find_element("a[aria-label='Sign in with Microsoft']")
             .await
         {
-            println!("Clicked 'Sign in with Microsoft' button (aria-label match)");
+            info!("Clicked 'Sign in with Microsoft' button (aria-label match)");
             el.click().await?;
             clicked = true;
             break;
         }
 
         if let Ok(el) = page.find_element("a[aria-label*='Microsoft']").await {
-            println!("Clicked 'Sign in with Microsoft' button (aria-label partial match)");
+            info!("Clicked 'Sign in with Microsoft' button (aria-label partial match)");
             el.click().await?;
             clicked = true;
             break;
@@ -311,7 +310,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
             for method in methods {
                 if let Ok(Some(text)) = method.inner_text().await {
                     if text.to_lowercase().contains("microsoft") {
-                        println!("Clicked 'Microsoft' login method (text match)");
+                        info!("Clicked 'Microsoft' login method (text match)");
                         method.click().await?;
                         clicked = true;
                         break;
@@ -334,7 +333,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
     }
 
     // Step 5: Wait for redirect to Microsoft
-    println!("Clicked Microsoft sign-in button, waiting for redirect...");
+    info!("Clicked Microsoft sign-in button, waiting for redirect...");
     sleep(Duration::from_secs(3)).await;
 
     let start = Instant::now();
@@ -342,7 +341,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("login.microsoftonline.com") {
-            println!("Redirected to Microsoft login: {}", current_url);
+            info!("Redirected to Microsoft login: {}", current_url);
             on_microsoft = true;
             break;
         }
@@ -357,7 +356,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
 
     // Step 6: Handle Microsoft authentication (account picker or credentials)
     handle_ms_account(page, creds).await?;
-    println!("Microsoft authentication complete, waiting for Zoom player...");
+    info!("Microsoft authentication complete, waiting for Zoom player...");
 
     // Step 7: Wait for return to Zoom
     let start = Instant::now();
@@ -365,7 +364,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("zoom.us") && !current_url.contains("signin") {
-            println!("Back on Zoom page: {}", current_url);
+            info!("Back on Zoom page: {}", current_url);
             back_on_zoom = true;
             break;
         }
@@ -380,7 +379,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
 
     // Give the player time to initialize
     sleep(Duration::from_secs(2)).await;
-    println!("Zoom player should now be loaded");
+    info!("Zoom player should now be loaded");
 
     Ok(())
 }

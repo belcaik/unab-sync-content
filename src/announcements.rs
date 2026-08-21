@@ -6,6 +6,7 @@ use crate::http::{build_http_client, HttpCtx};
 use crate::links::{classify_by_filename, extract_links, MediaRef};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
+use crate::status;
 use html2md::parse_html;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -43,7 +44,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     };
 
     if selected.is_empty() {
-        println!("No matching courses.");
+        status!("No matching courses.");
         return Ok(());
     }
 
@@ -82,7 +83,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     }
     course_pb.finish_and_clear();
 
-    println!(
+    status!(
         "{}Announcements: {} | links: {} | media refs: {}",
         if dry_run { "DRY-RUN: " } else { "" },
         totals.announcements,

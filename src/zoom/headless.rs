@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
+use tracing::{info, warn};
 use url::Url;
 
 pub struct ZoomHeadless<'a> {
@@ -85,11 +86,11 @@ impl<'a> ZoomHeadless<'a> {
         let handle = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
                 if let Err(e) = h {
-                    eprintln!("Browser handler error: {:?}", e);
+                    warn!("Browser handler error: {:?}", e);
                     break;
                 }
             }
-            println!("Browser handler loop exited.");
+            info!("Browser handler loop exited.");
         });
 
         let page = browser.new_page("about:blank").await?;
@@ -98,7 +99,9 @@ impl<'a> ZoomHeadless<'a> {
         // Enable network events
         // Check if we already have scid in DB
         if let Ok(Some(stored_scid)) = self.db.get_scid(self.course_id) {
-            println!("Found existing lti_scid in DB: {}", stored_scid);
+            // The scid is a live session credential; log its presence, not its value.
+            let _ = stored_scid;
+            info!("found existing lti_scid in DB");
             // We still proceed to refresh cookies and verify scid
         }
 
@@ -179,11 +182,11 @@ impl<'a> ZoomHeadless<'a> {
                             if !found.is_empty() {
                                 let mut data = lock_captured(&captured_data_clone);
                                 if let Some(scid) = found.scid {
-                                    println!("Captured lti_scid from Fetch");
+                                    info!("Captured lti_scid from Fetch");
                                     data.scid = Some(scid);
                                 }
                                 if !found.headers.is_empty() {
-                                    println!(
+                                    info!(
                                         "Captured {} session headers from Fetch",
                                         found.headers.len()
                                     );
@@ -194,7 +197,7 @@ impl<'a> ZoomHeadless<'a> {
                             }
                         }
                         Err(e) => {
-                            println!("Failed to get body in Fetch interception: {:?}", e);
+                            warn!("Failed to get body in Fetch interception: {:?}", e);
                         }
                     }
                 }
@@ -219,7 +222,7 @@ impl<'a> ZoomHeadless<'a> {
                     if let Ok(parsed) = Url::parse(&url) {
                         for (k, v) in parsed.query_pairs() {
                             if k == "lti_scid" {
-                                println!("Captured lti_scid from URL: {}", v);
+                                info!("captured lti_scid from URL");
                                 data.scid = Some(v.to_string());
                             }
                         }
@@ -238,7 +241,7 @@ impl<'a> ZoomHeadless<'a> {
                             }
                         }
                     }
-                    println!("Captured Zoom API headers");
+                    info!("Captured Zoom API headers");
                     data.headers = Some(headers);
                 }
             }
@@ -249,14 +252,14 @@ impl<'a> ZoomHeadless<'a> {
             self.config.canvas.base_url, self.course_id, self.config.zoom.external_tool_id
         );
 
-        println!("Navigating to: {}", target_url);
+        info!("Navigating to: {}", target_url);
         page.goto(&target_url).await?;
 
         // Handle SSO
         sso::handle_sso(&page, &SsoCreds::from_config(self.config)).await?;
 
         // Wait for Zoom LTI to load and capture data
-        println!("Waiting for Zoom LTI to load...");
+        info!("Waiting for Zoom LTI to load...");
 
         let mut scid = None;
         let mut captured_headers: HashMap<String, String> = HashMap::new();
@@ -287,7 +290,7 @@ impl<'a> ZoomHeadless<'a> {
 
         if let Some(s) = scid {
             self.db.save_scid(self.course_id, &s)?;
-            println!("Saved lti_scid to DB: {}", s);
+            info!("saved lti_scid to DB");
         } else {
             return Err(anyhow::anyhow!("Failed to capture lti_scid"));
         }
@@ -303,16 +306,16 @@ impl<'a> ZoomHeadless<'a> {
 
             // Log keys to verify we have x-xsrf-token
             let keys: Vec<String> = header_list.iter().map(|(k, _)| k.clone()).collect();
-            println!("Saving headers: {:?}", keys);
+            info!("Saving headers: {:?}", keys);
 
             self.db.save_request_headers(
                 self.course_id,
                 "/api/v1/lti/rich/recording",
                 &header_list,
             )?;
-            println!("Saved {} request headers to DB", captured_headers.len());
+            info!("Saved {} request headers to DB", captured_headers.len());
         } else {
-            println!("Warning: No request headers captured");
+            warn!("Warning: No request headers captured");
         }
 
         if !cookies.is_empty() {
@@ -326,7 +329,7 @@ impl<'a> ZoomHeadless<'a> {
         let cookies_after = self.db.load_cookies()?;
         let headers_after = self.db.get_all_request_headers(self.course_id)?;
 
-        println!(
+        info!(
             "AFTER HEADLESS SAVE -> scid={:?}, cookies={}, headers={}",
             scid_after,
             cookies_after.len(),
@@ -367,7 +370,7 @@ impl<'a> ZoomHeadless<'a> {
             .filter(|file| {
                 let filename = sanitize_filename_preserve_ext(&(file.filename_hint() + ".mp4"));
                 if existing_files.contains(&filename) {
-                    println!("⏩ Skipping (already exists): {}", filename);
+                    info!("⏩ Skipping (already exists): {}", filename);
                     false
                 } else {
                     true
@@ -376,11 +379,11 @@ impl<'a> ZoomHeadless<'a> {
             .collect();
 
         if files_to_download.is_empty() {
-            println!("All recordings already downloaded!");
+            info!("All recordings already downloaded!");
             return Ok(());
         }
 
-        println!(
+        info!(
             "Found {} recordings, {} new to download",
             files_to_download.len() + existing_files.len(),
             files_to_download.len()
@@ -408,8 +411,8 @@ impl<'a> ZoomHeadless<'a> {
         page.set_user_agent(&self.config.zoom.user_agent).await?;
 
         let mut name_counts: HashMap<String, usize> = HashMap::new();
-        println!("Starting capture and download (tokens expire quickly, processing one by one)...");
-        println!(
+        info!("Starting capture and download (tokens expire quickly, processing one by one)...");
+        info!(
             "Processing {} recordings (capture → download → next)...\n",
             files_to_download.len()
         );
@@ -417,7 +420,7 @@ impl<'a> ZoomHeadless<'a> {
         let mut cookies_captured = false;
 
         for (idx, file) in files_to_download.iter().enumerate() {
-            println!(
+            info!(
                 "\n[{}/{}] Processing: {}",
                 idx + 1,
                 files_to_download.len(),
@@ -425,28 +428,25 @@ impl<'a> ZoomHeadless<'a> {
             );
 
             // STEP 1: Navigate to play URL
-            let mut events = page
-                .event_listener::<EventRequestWillBeSent>()
-                .await
-                .unwrap();
+            let mut events = page.event_listener::<EventRequestWillBeSent>().await?;
             page.goto(&file.play_url).await?;
 
             // STEP 2: Authenticate if needed
             if let Err(e) =
                 sso::handle_zoom_play_sso(&page, &SsoCreds::from_config(self.config)).await
             {
-                println!("Warning: SSO failed for {}: {:?}", file.play_url, e);
-                println!("Skipping this file...");
+                warn!("Warning: SSO failed for {}: {:?}", file.play_url, e);
+                info!("Skipping this file...");
                 continue;
             }
 
             // STEP 3: Capture fresh cookies (first file only) and load for downloads
             let zoom_cookies = if !cookies_captured {
-                println!("Capturing fresh cookies after SSO...");
+                info!("Capturing fresh cookies after SSO...");
                 let fresh_cookies = harvest_cookies(&page, &["zoom.us", "cloudfront.net"]).await?;
                 if !fresh_cookies.is_empty() {
                     self.db.replace_cookies(&fresh_cookies)?;
-                    println!("Saved {} fresh cookies for downloads", fresh_cookies.len());
+                    info!("Saved {} fresh cookies for downloads", fresh_cookies.len());
                 }
                 cookies_captured = true;
                 fresh_cookies
@@ -477,8 +477,8 @@ impl<'a> ZoomHeadless<'a> {
                                     }
                                 }
 
-                                println!("✓ Captured download URL: {}", url);
-                                println!("  Captured {} headers from MP4 request:", headers.len());
+                                info!("✓ Captured download URL: {}", url);
+                                info!("  Captured {} headers from MP4 request:", headers.len());
                                 for (k, v) in &headers {
                                     // Log all headers (truncate long values like cookies)
                                     let display_val = if v.len() > 100 {
@@ -486,7 +486,7 @@ impl<'a> ZoomHeadless<'a> {
                                     } else {
                                         v.clone()
                                     };
-                                    println!("    {}: {}", k, display_val);
+                                    info!("    {}: {}", k, display_val);
                                 }
 
                                 asset = Some(ReplayHeader {
@@ -504,7 +504,7 @@ impl<'a> ZoomHeadless<'a> {
             let asset = match asset {
                 Some(a) => a,
                 None => {
-                    println!("✗ Could not capture download URL, skipping...");
+                    warn!("✗ Could not capture download URL, skipping...");
                     continue;
                 }
             };
@@ -531,24 +531,24 @@ impl<'a> ZoomHeadless<'a> {
                 &asset.download_url,
             );
 
-            println!("⬇ Downloading to: {}", dest.display());
+            info!("⬇ Downloading to: {}", dest.display());
             match download_via_ffmpeg(&cfg.zoom.ffmpeg_path, &headers, &asset.download_url, &dest)
                 .await
             {
-                Ok(()) => println!("✓ Downloaded successfully!"),
+                Ok(()) => warn!("✓ Downloaded successfully!"),
                 Err(FfmpegError::Process { .. }) => {
-                    println!("✗ ffmpeg failed, trying HTTP fallback...");
+                    warn!("ffmpeg failed, trying HTTP fallback");
                     if let Err(e) =
                         crate::zoom::download::http_download(&headers, &asset.download_url, &dest)
                             .await
                     {
-                        println!("✗ HTTP download also failed: {:?}", e);
+                        warn!("✗ HTTP download also failed: {:?}", e);
                     } else {
-                        println!("✓ Downloaded via HTTP!");
+                        info!("✓ Downloaded via HTTP!");
                     }
                 }
                 Err(e) => {
-                    println!("✗ Download error: {:?}", e);
+                    warn!("✗ Download error: {:?}", e);
                 }
             }
         }
@@ -556,7 +556,7 @@ impl<'a> ZoomHeadless<'a> {
         browser.close().await?;
         handle.await?;
 
-        println!(
+        info!(
             "\nAll files processed! Downloads saved to: {}",
             base.display()
         );

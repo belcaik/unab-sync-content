@@ -8,6 +8,7 @@ pub mod sso;
 
 use crate::config::ConfigPaths;
 use crate::progress::progress_bar;
+use crate::status;
 use api::ZoomClient;
 use db::ZoomDb;
 use headless::ZoomHeadless;
@@ -19,7 +20,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
-    println!("Starting Zoom flow for course {}", course_id);
+    status!("Starting Zoom flow for course {}", course_id);
 
     // 1. Reuse the stored session if it is complete and still accepted.
     let headless = ZoomHeadless::new(&cfg, &db, course_id);
@@ -33,23 +34,23 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
 
     let mut valid_session = false;
     if stored.is_some() {
-        println!("Found existing credentials in DB. Validating...");
+        status!("Found existing credentials in DB. Validating...");
         match ZoomClient::new(&cfg, &db, course_id).await {
             Ok(client) if client.validate_cookies().await => {
-                println!("Cookies are valid. Skipping headless capture.");
+                status!("Cookies are valid. Skipping headless capture.");
                 valid_session = true;
             }
-            Ok(_) => println!("Cookies are invalid or expired."),
-            Err(e) => println!("Failed to initialize Zoom client for validation: {}", e),
+            Ok(_) => status!("Cookies are invalid or expired."),
+            Err(e) => status!("Failed to initialize Zoom client for validation: {}", e),
         }
     } else {
-        println!("No complete session stored for this course.");
+        status!("No complete session stored for this course.");
     }
 
     if !valid_session {
-        println!("Starting headless capture (SSO + LTI scid + cookies)...");
+        status!("Starting headless capture (SSO + LTI scid + cookies)...");
         headless.authenticate_and_capture().await?;
-        println!("Headless capture finished.");
+        status!("Headless capture finished.");
 
         info!(
             course_id,
@@ -58,7 +59,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
         );
     }
 
-    println!("Starting listing and download for course {}", course_id);
+    status!("Starting listing and download for course {}", course_id);
 
     // 2. List recordings using captured credentials
     let client = ZoomClient::new(&cfg, &db, course_id).await?;
@@ -74,14 +75,14 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
         .unwrap_or_default();
 
     if meetings.is_empty() {
-        println!("No Zoom meetings were found for course {course_id}.");
+        status!("No Zoom meetings were found for course {course_id}.");
     } else {
-        println!(
+        status!(
             "Captured {} Zoom meetings; fetching individual recording files...",
             meetings.len()
         );
         for meeting in &meetings {
-            println!(
+            status!(
                 "Found Meeting: ID={}, Topic='{}', Start={}",
                 meeting.meeting_id,
                 meeting.topic.as_deref().unwrap_or("N/A"),
@@ -118,16 +119,14 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     meeting_progress.finish_and_clear();
 
     if all_files.is_empty() {
-        println!(
-            "No recordings with playUrl entries were available after the full flow; try again or verify permissions."
-        );
+        status!("No recordings with playUrl entries were available after the full flow; try again or verify permissions.");
         return Ok(());
     }
 
     // 4. Capture play URLs and download immediately (one by one to avoid token expiration)
-    println!("Starting capture and download (tokens expire quickly, processing one by one)...");
+    status!("Starting capture and download (tokens expire quickly, processing one by one)...");
     headless.capture_and_download_immediately(all_files).await?;
 
-    println!("All recordings processed!");
+    status!("All recordings processed!");
     Ok(())
 }

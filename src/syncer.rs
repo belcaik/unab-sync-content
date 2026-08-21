@@ -5,6 +5,7 @@ use crate::fsutil::{atomic_write, ensure_dir, sanitize_component, sanitize_filen
 use crate::http::{build_http_client, HttpCtx};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
+use crate::status;
 use html2md::parse_html;
 use regex::Regex;
 use sha1::{Digest, Sha1};
@@ -127,9 +128,12 @@ pub async fn run_sync(
             {
                 Ok(s) => {
                     if dry_run && s.announcements > 0 {
-                        println!(
+                        status!(
                             "DRY-RUN announcements for course {}: {} (links: {}, media: {})",
-                            c.id, s.announcements, s.links, s.media
+                            c.id,
+                            s.announcements,
+                            s.links,
+                            s.media
                         );
                     }
                 }
@@ -146,12 +150,12 @@ pub async fn run_sync(
         if !cfg.zoom.enabled {
             info!(course_id = c.id, "zoom disabled in config; skipping");
         } else if dry_run {
-            println!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
+            status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
         } else {
-            println!("Starting Zoom sync for course {}...", c.id);
+            status!("Starting Zoom sync for course {}...", c.id);
             match crate::zoom::zoom_flow(c.id, None).await {
                 Ok(()) => {
-                    println!("✓ Zoom sync completed for course {}", c.id);
+                    status!("✓ Zoom sync completed for course {}", c.id);
                 }
                 Err(e) => {
                     warn!(course_id = c.id, error = %e, "zoom flow failed for course");
@@ -166,9 +170,10 @@ pub async fn run_sync(
     }
     course_progress.finish_and_clear();
     if dry_run {
-        println!(
+        status!(
             "DRY-RUN summary: pages to write: {}, files to download: {}",
-            totals.pages, totals.files
+            totals.pages,
+            totals.files
         );
     }
     Ok(())
