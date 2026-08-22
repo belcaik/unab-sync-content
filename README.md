@@ -1,544 +1,529 @@
 # u_crawler
 
-A command-line tool for backing up Canvas LMS courses and Zoom cloud recordings.
+A command-line tool that mirrors your Canvas LMS courses — pages, assignments,
+attachments, announcements — and the Zoom cloud recordings linked from them, to
+a folder on your machine.
 
-## Overview
+Syncs are incremental and resumable. Re-running is always safe: unchanged files
+are skipped via their ETag, and interrupted downloads pick up where they left
+off.
 
-u_crawler automates the backup of your educational content from Canvas Learning Management System, including:
+---
 
-- **Course content**: Module pages, assignment instructions, and announcements exported as Markdown
-- **Attachments**: PDFs, documents, images, and other files linked in your courses
-- **Zoom recordings**: Cloud recordings from Zoom meetings integrated with Canvas
+## Contents
 
-The tool supports resumable downloads, rate limiting, and incremental syncs to efficiently maintain up-to-date backups.
-
-## Table of Contents
-
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-  - [Windows](#windows)
-  - [macOS](#macos)
-  - [Linux](#linux)
-  - [Verifying Installation](#verifying-installation)
-- [Quick Start](#quick-start)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Getting started](#getting-started)
 - [Commands](#commands)
-  - [init](#init)
-  - [auth](#auth)
-  - [scan](#scan)
-  - [sync](#sync)
-  - [announcements](#announcements)
-  - [recordings](#recordings)
-  - [zoom](#zoom)
-  - [status](#status)
 - [Configuration](#configuration)
-- [Zoom Recording Workflow](#zoom-recording-workflow)
+- [What ends up on disk](#what-ends-up-on-disk)
+- [Zoom recordings](#zoom-recordings)
+- [Exit codes](#exit-codes)
 - [Troubleshooting](#troubleshooting)
-- [Exit Codes](#exit-codes)
+- [Development](#development)
 - [License](#license)
 
-## Features
+---
 
-- **Canvas course backup**: Export module pages and assignments as Markdown files
-- **Attachment downloads**: Automatically download linked files (PDF, DOCX, PNG, etc.)
-- **Zoom integration**: Download cloud recordings from Zoom-enabled courses
-- **Incremental sync**: Only download new or modified content
-- **Resumable downloads**: Interrupted downloads resume from where they stopped
-- **Rate limiting**: Configurable request throttling to avoid API limits
-- **Dry-run mode**: Preview changes before writing files
-- **Course filtering**: Exclude specific courses via `canvas.ignored_courses`
+## How it works
 
-## Prerequisites
+Canvas content is fetched with a Personal Access Token over the REST API. Pages
+and assignment descriptions are converted from HTML to Markdown; files linked
+from either are downloaded alongside them.
 
-Before installing u_crawler, ensure you have:
+Zoom is different. Recordings are not exposed through a token-based API — they
+sit behind an LTI launch from inside Canvas. So `u_crawler` launches a headless
+Chrome, completes your institution's single sign-on, and captures the session
+identifiers the recordings API needs. Those are cached in a local SQLite
+database and reused until they stop being accepted.
 
-| Requirement | Version | Purpose |
-|-------------|---------|---------|
-| Rust toolchain | 1.70+ | Building from source |
-| Git | Any recent | One dependency is fetched from a Git repository at build time |
-| ffmpeg | Any recent | Downloading Zoom recordings |
-| Chromium or Chrome | Any recent | Launched automatically for Zoom authentication |
+Every request in the tool goes through one rate-limited, retrying HTTP client,
+so `max_rps` and `concurrency` apply to everything.
 
-## Installation
+---
 
-### Windows
+## Requirements
 
-1. **Install Rust**
+| Requirement | Notes |
+|---|---|
+| Rust 1.70+ | Only to build from source. |
+| Git | One dependency (`chromiumoxide`) is fetched from a Git repository at build time, so the build needs network and `git`. |
+| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`. |
+| Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. |
 
-   Download and run the installer from [rustup.rs](https://rustup.rs/), then restart your terminal.
+Linux and macOS are the primary targets; the release workflow also builds for
+Windows.
 
-2. **Install ffmpeg**
+---
 
-   Download from [ffmpeg.org](https://ffmpeg.org/download.html#build-windows), extract to a folder (e.g., `C:\ffmpeg`), and add `C:\ffmpeg\bin` to your system PATH.
-
-3. **Build u_crawler**
-
-   ```powershell
-   git clone https://github.com/belcaik/u_crawler.git
-   cd u_crawler
-   cargo build --release
-   ```
-
-4. **Add to PATH (optional)**
-
-   ```powershell
-   copy target\release\u_crawler.exe C:\Windows\System32\
-   ```
-
-### macOS
-
-1. **Install Rust**
-
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source "$HOME/.cargo/env"
-   ```
-
-2. **Install ffmpeg**
-
-   ```bash
-   brew install ffmpeg
-   ```
-
-3. **Build u_crawler**
-
-   ```bash
-   git clone https://github.com/belcaik/u_crawler.git
-   cd u_crawler
-   cargo build --release
-   ```
-
-4. **Add to PATH (optional)**
-
-   ```bash
-   # Add to your shell profile (.zshrc or .bash_profile)
-   export PATH="$HOME/path/to/u_crawler/target/release:$PATH"
-   ```
-
-### Linux
-
-1. **Install Rust**
-
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   source "$HOME/.cargo/env"
-   ```
-
-2. **Install ffmpeg**
-
-   ```bash
-   # Ubuntu/Debian
-   sudo apt update && sudo apt install ffmpeg
-
-   # Fedora
-   sudo dnf install ffmpeg
-
-   # Arch Linux
-   sudo pacman -S ffmpeg
-   ```
-
-3. **Build u_crawler**
-
-   ```bash
-   git clone https://github.com/belcaik/u_crawler.git
-   cd u_crawler
-   cargo build --release
-   ```
-
-4. **Install system-wide (optional)**
-
-   ```bash
-   sudo cp target/release/u_crawler /usr/local/bin/
-   ```
-
-### Verifying Installation
-
-Confirm all components are installed correctly:
+## Install
 
 ```bash
-rustc --version          # Should show 1.70.0 or later
-ffmpeg -version          # Should display ffmpeg version info
-cargo run -- --help      # Should show u_crawler help
+git clone https://github.com/belcaik/u_crawler.git
+cd u_crawler
+cargo build --release
 ```
 
-## Quick Start
+The binary lands at `target/release/u_crawler`. Put it on your `$PATH`, or run
+it in place with `cargo run --release -- <command>`.
 
-### 1. Initialize configuration
-
-Create the default configuration file:
+Verify:
 
 ```bash
-cargo run -- init
+u_crawler --version
+u_crawler --help
 ```
 
-This creates `~/.config/u_crawler/config.toml` (or `%APPDATA%\u_crawler\config.toml` on Windows).
+---
 
-### 2. Authenticate with Canvas
+## Getting started
 
-Using a Personal Access Token (PAT):
+**1. Create the config.**
 
 ```bash
-cargo run -- auth canvas --base-url https://your-school.instructure.com --token YOUR_TOKEN
+u_crawler init
 ```
 
-Or retrieve the token from a password manager:
+The first run of *any* command creates a default config and exits with code 10
+so you notice you need to edit it. `init` makes that explicit.
+
+**2. Get a Canvas token.** In Canvas: *Account → Settings → Approved
+Integrations → + New Access Token*.
+
+**3. Store it.**
 
 ```bash
-cargo run -- auth canvas --base-url https://your-school.instructure.com \
-    --token-cmd "pass show canvas/pat"
+u_crawler auth canvas \
+  --base-url https://canvas.your-school.edu \
+  --token 1234~abcdef...
 ```
 
-### 3. List your courses
+Or keep it out of the config file entirely by storing a command that prints it:
 
 ```bash
-cargo run -- scan
+u_crawler auth canvas \
+  --base-url https://canvas.your-school.edu \
+  --token-cmd "pass show canvas/pat"
 ```
 
-### 4. Sync course content
+`--token` and `--token-cmd` are mutually exclusive and one is required; setting
+either clears the other. The config file is written with `0600` permissions on
+Unix.
 
-Preview what would be downloaded:
+**4. Check the connection.**
 
 ```bash
-cargo run -- sync --dry-run
+u_crawler scan
 ```
 
-Download all courses:
+This lists your active courses with their ids. Nothing is written.
+
+**5. Preview, then sync.**
 
 ```bash
-cargo run -- sync
+u_crawler sync --dry-run          # reports what would happen, writes nothing
+u_crawler sync
 ```
 
-Download a specific course:
+Set `download_root` in the config before this — the default points at a path
+that probably is not yours.
 
-```bash
-cargo run -- sync --course-id 123456
-```
-
-### 5. Back up Zoom recordings
-
-Set `canvas.sso_email` and `canvas.sso_password` in your config, then:
-
-```bash
-cargo run -- zoom flow --course-id 123456
-```
-
-u_crawler launches its own browser and completes the institutional SSO. You do
-not need to start Chromium yourself.
+---
 
 ## Commands
 
-### init
+### `init`
 
-Creates a default configuration file.
+Creates the default config if it is missing, and reports the path. Leaves an
+existing config untouched.
 
-```bash
-cargo run -- init
-```
+### `auth canvas`
 
-### auth
+Stores Canvas credentials in the config.
 
-Configures authentication credentials for Canvas.
+| Flag | Required | Description |
+|---|---|---|
+| `--base-url URL` | no | Your Canvas instance, e.g. `https://canvas.your-school.edu` |
+| `--token TOKEN` | one of | The Personal Access Token itself |
+| `--token-cmd CMD` | one of | A shell command that prints the token; run via `sh -lc`, output trimmed |
 
-```bash
-# Using a token directly
-cargo run -- auth canvas --base-url URL --token TOKEN
+### `scan`
 
-# Using a command to retrieve the token
-cargo run -- auth canvas --base-url URL --token-cmd "command"
-```
-
-### scan
-
-Lists courses and inspects their content.
-
-```bash
-# List all active courses
-cargo run -- scan
-
-# Inspect a specific course
-cargo run -- scan --course-id 123456
-```
-
-### sync
-
-Downloads course content to the local filesystem.
+Read-only inspection. With no arguments, lists active courses as
+`- [id] Name - CODE`. With `--course-id`, lists that course's modules and a
+count of the file items in them.
 
 | Flag | Description |
-|------|-------------|
-| `--course-id ID` | Sync only the specified course |
-| `--dry-run` | Preview changes without downloading |
-| `--verbose` | Show skipped items and additional details |
+|---|---|
+| `--course-id ID` | Inspect one course's modules instead of listing courses |
 
-```bash
-# Sync all courses
-cargo run -- sync
+Files are enumerated through module items rather than the course files
+endpoint, which many Canvas instances return 403 for.
 
-# Sync one course with verbose output
-cargo run -- sync --course-id 123456 --verbose
-```
+### `sync`
 
-### announcements
-
-Downloads course announcements as Markdown, extracts the links and media in each
-body, and writes an `index.json` describing them.
+The main command. For each course: module pages and assignment descriptions as
+Markdown, every file they link to, then announcements, then Zoom recordings.
 
 | Flag | Description |
-|------|-------------|
+|---|---|
+| `--course-id ID` | Sync only this course |
+| `--dry-run` | Report planned actions; write nothing, download nothing, launch no browser |
+| `--verbose` | Also log items that were skipped as unchanged |
+
+Courses listed in `canvas.ignored_courses` are skipped. The announcements and
+Zoom stages honour `announcements.enabled` and `zoom.enabled`.
+
+### `announcements`
+
+Announcements only, without the rest of a sync. Each announcement body is saved
+as Markdown, its links and media references are extracted, Canvas-hosted
+attachments are downloaded, and an `index.json` records all of it.
+
+| Flag | Description |
+|---|---|
 | `--course-id ID` | Only this course |
-| `--dry-run` | Report what would be written, without writing |
+| `--dry-run` | Report counts; write nothing |
 
-```bash
-cargo run -- announcements --course-id 123456
-```
+### `recordings`
 
-Announcements are also synced as part of `sync`, unless `[announcements].enabled`
-is set to `false`.
-
-### recordings
-
-Reports the Zoom links found across a course's pages, module items and
-assignments. This is a discovery report — it downloads nothing.
+A discovery report: scans course pages, module items and assignment
+descriptions for Zoom URLs and prints where each one was found. **This command
+downloads nothing** — use `zoom flow` for that.
 
 | Flag | Description |
-|------|-------------|
+|---|---|
 | `--course-id ID` | Only this course |
-| `--dry-run` | Marks output lines as a preview |
+| `--dry-run` | Prefixes output lines with `DRY-RUN` |
 
-```bash
-cargo run -- recordings --course-id 123456
-```
+### `zoom flow`
 
-### zoom
+Captures a Zoom session and downloads that course's recordings. See
+[Zoom recordings](#zoom-recordings).
 
-Downloads Zoom cloud recordings. `zoom flow` performs the whole process: it
-reuses a stored session if one is still valid, otherwise it drives the
-institutional SSO in a headless browser to capture a new one, then lists and
-downloads the recordings.
+| Flag | Required | Description |
+|---|---|---|
+| `--course-id ID` | yes | Target course |
+| `--since DATE` | no | Only recordings after this date |
 
-| Flag | Description |
-|------|-------------|
-| `--course-id ID` | Target course (required) |
-| `--since DATE` | Only recordings after this date (`YYYY-MM-DD`) |
+### `status`
 
-```bash
-cargo run -- zoom flow --course-id 123456 --since 2024-01-01
-```
-
-The browser is launched and managed by u_crawler. You do not need to start
-Chromium yourself, and there is no debugging port to configure.
-
-### status
-
-Summarises what has been backed up: per course, the number of tracked files,
-storage used, the most recent sync timestamp, and any items whose last attempt
-failed.
+Reads each course's `state.json` and reports tracked file count, storage used,
+the most recent `updated_at` seen, and how many items failed on their last
+attempt.
 
 | Flag | Description |
-|------|-------------|
-| `--verbose` | List each failed item and its error |
+|---|---|
+| `--verbose` | List each failed item with its error and attempt count |
 
-```bash
-cargo run -- status --verbose
 ```
+Backup Status:
+
+Course: Calculo_II_MAT2200
+  Files: 143
+  Storage: 1.24 GB
+  Last sync: 2026-03-01T12:00:00Z
+  Failed downloads: 2 items need retry
+      Run with --verbose to see details
+
+─────────────────────────────
+Total: 4 courses, 512 files, 6.80 GB
+```
+
+This reads `state.json` files only — it does not contact Canvas, so it is
+instant and works offline.
+
+---
 
 ## Configuration
 
-Configuration is stored in `~/.config/u_crawler/config.toml` (Linux/macOS) or `%APPDATA%\u_crawler\config.toml` (Windows).
+The config file lives at:
 
-### Example Configuration
+| Platform | Path |
+|---|---|
+| Linux | `~/.config/u_crawler/config.toml` |
+| macOS | `~/Library/Application Support/u_crawler/config.toml` |
+| Windows | `%APPDATA%\u_crawler\config.toml` |
+
+Every key below is read by the code. There are no inert settings.
 
 ```toml
-# General settings
+# Where the backup tree is written. Required. `~` is expanded.
 download_root = "~/Documents/Canvas-Backup"
-concurrency = 4          # Parallel downloads
-max_rps = 2              # API requests per second
-user_agent = ""          # Custom user agent (optional)
 
-# Canvas LMS settings
+# Simultaneous in-flight HTTP requests.
+concurrency = 4
+
+# Request pacing ceiling, in requests per second. 0 disables pacing.
+max_rps = 2
+
+# Leave empty to use the built-in default.
+user_agent = ""
+
+[logging]
+# trace | debug | info | warn | error
+level = "info"
+# Appended to, never rotated. Falls back to stderr if it cannot be opened.
+file = "~/.config/u_crawler/u_crawler.log"
+
 [canvas]
-base_url = "https://your-school.instructure.com"
-token = ""               # Leave empty if using token_cmd
+base_url = "https://canvas.your-school.edu"
+
+# Provide exactly one of these.
+token = ""
 token_cmd = "pass show canvas/pat"
+
+# Course ids to skip, as strings.
 ignored_courses = ["153095", "153607"]
-# Institutional SSO, used by the Zoom flow to log in headlessly.
-# SECURITY: sso_password is stored here in cleartext. Restrict the file's
-# permissions (chmod 600) and prefer a machine you control.
+
+# Institutional SSO, used only by the Zoom flow.
+# SECURITY: sso_password is stored in cleartext. The file is written 0600 on
+# Unix, but anything that can read your home directory can read it.
 sso_email = "you@your-school.edu"
 sso_password = ""
 
-# Announcement sync (also runs as part of `sync`)
 [announcements]
-enabled = true           # set false to skip announcements
-download_media = true    # also download attachments and inline media
+enabled = true          # include announcements in `sync`
+download_media = true   # also download attachments and inline media
 
-# Logging settings
-[logging]
-level = "info"           # trace | debug | info | warn | error
-file = "~/.config/u_crawler/u_crawler.log"
-
-# Zoom settings
 [zoom]
-enabled = true           # set false to skip Zoom entirely
-ffmpeg_path = "ffmpeg"
-user_agent = "Mozilla/5.0"
-external_tool_id = 187
+enabled = true          # false skips Zoom entirely during `sync`
+ffmpeg_path = "ffmpeg"  # or an absolute path
+user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ..."
+external_tool_id = 187  # the Zoom LTI tool id in your Canvas
 ```
 
-### Configuration Options
+### Validation
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `download_root` | Directory for downloaded files | Required |
-| `concurrency` | Number of parallel downloads | 4 |
-| `max_rps` | Maximum API requests per second | 2 |
-| `canvas.base_url` | Your Canvas instance URL | Required |
-| `canvas.token` | Personal Access Token | - |
-| `canvas.token_cmd` | Command to retrieve token | - |
-| `canvas.ignored_courses` | Course IDs to skip | [] |
-| `canvas.sso_email` | Institutional SSO account, used by the Zoom flow | - |
-| `canvas.sso_password` | SSO password, stored in cleartext | - |
-| `user_agent` | Custom user agent | built-in default |
-| `logging.level` | Log verbosity | info |
-| `logging.file` | Log file path | `~/.config/u_crawler/u_crawler.log` |
-| `announcements.enabled` | Sync announcements | true |
-| `announcements.download_media` | Download announcement attachments | true |
-| `zoom.enabled` | Enable Zoom features | true |
-| `zoom.ffmpeg_path` | Path to ffmpeg binary | ffmpeg |
-| `zoom.user_agent` | User agent for Zoom requests | built-in default |
-| `zoom.external_tool_id` | Zoom LTI tool ID in Canvas | 187 |
+Loading fails, listing the offending keys, if:
 
-## Zoom Recording Workflow
+- `download_root` is empty
+- `canvas.base_url` is empty or still contains the `<tenant>` placeholder
+- both `canvas.token` and `canvas.token_cmd` are empty
+- `zoom.enabled` is true and `zoom.ffmpeg_path` is empty
 
-The `zoom flow` command automates the complete process of downloading Zoom cloud recordings:
+### Finding `external_tool_id`
 
-### Prerequisites
+Open the Zoom tab inside a Canvas course in your browser. The URL contains
+`/external_tools/<id>` — that number is the value. The default of `187` is
+specific to one institution and is unlikely to be right for yours.
 
-1. Set `canvas.sso_email` and `canvas.sso_password` in your config. The flow logs
-   in on your behalf, so it needs them.
-2. Ensure ffmpeg is available (check with `ffmpeg -version`).
-3. Ensure Chromium or Chrome is installed. u_crawler launches it itself.
+---
 
-### How It Works
-
-1. **Credential Capture**: Opens the Zoom external tool in Canvas via Chrome DevTools Protocol (CDP), capturing authentication cookies and API headers.
-
-2. **Recording Discovery**: Queries the Zoom API to enumerate available meetings and their download URLs.
-
-3. **URL Resolution**: Opens each recording page in an ephemeral browser tab to capture the signed download headers.
-
-4. **Download**: Attempts to download using `ffmpeg -c copy`. If that fails, falls back to direct HTTP download with resume support.
-
-### Output Structure
-
-Recordings are saved to:
+## What ends up on disk
 
 ```
-<download_root>/Zoom/<course_id>/<meeting_title>_<date>.mp4
+<download_root>/
+├── <Course Name>_<COURSE_CODE>/
+│   ├── state.json                            sync state for this course
+│   ├── Modules/
+│   │   └── <module_id>_<Module Name>/
+│   │       ├── 01-<Page Title>.md            page body as Markdown
+│   │       ├── 02-ASSIGN-<Title>.md          assignment description
+│   │       └── Attachments/
+│   │           └── <original-filename.pdf>
+│   └── announcements/
+│       ├── <YYYY-MM-DD>_<title-slug>_<id>.md   date omitted if unknown
+│       ├── index.json
+│       └── media/
+│           └── <attachments and inline media>
+└── Zoom/
+    └── <course_id>/
+        └── <YYYY-MM-DD - Meeting Topic>.mp4
 ```
 
-Downloads use `.part` files and HTTP Range requests, allowing safe resumption if interrupted.
+Directory and file names are sanitized and transliterated to ASCII, so
+`Introducción` becomes `Introduccion`. Numeric prefixes (`01-`, `02-`) follow
+the module's own item ordering. Announcement slugs are capped at 60 characters,
+and the date prefix is dropped if Canvas reports no `posted_at`. Recording
+names that would collide get a `_1`, `_2` suffix rather than overwriting.
+
+### `state.json`
+
+Maps an item key to what is known about it. Keys are namespaced:
+`file:<id>`, `page:<slug>`, `assignment:<id>`, `announcement:<id>`.
+
+```json
+{
+  "items": {
+    "file:20411861": {
+      "etag": "a1b2c3",
+      "updated_at": "2026-03-01T12:00:00Z",
+      "size": 184320,
+      "content_hash": null,
+      "last_error": null,
+      "error_count": null
+    }
+  }
+}
+```
+
+`etag` drives the skip-if-unchanged decision for files; `content_hash` does the
+same for generated Markdown. `last_error` and `error_count` are what `status`
+reports. A file linked from both a module and an announcement is one entry, and
+is downloaded once.
+
+### `announcements/index.json`
+
+An array of records, one per announcement:
+
+```json
+[
+  {
+    "id": 123,
+    "title": "Semana 3 - Taller",
+    "posted_at": "2026-03-01T12:00:00Z",
+    "html_url": "https://canvas.your-school.edu/courses/1/discussion_topics/123",
+    "author": "Nombre Apellido",
+    "body_md_path": "announcements/2026-03-01_Semana_3_Taller_123.md",
+    "links": ["https://..."],
+    "media": [
+      {
+        "url": "https://canvas.your-school.edu/courses/1/files/456",
+        "kind": "canvas_file",
+        "file_id": 456,
+        "local_path": "announcements/media/taller.ipynb"
+      }
+    ],
+    "zoom_links": ["https://x.zoom.us/rec/play/..."]
+  }
+]
+```
+
+`kind` is one of `image`, `video`, `audio`, `canvas_file`, `link`. Paths are
+relative to the course directory. `local_path` is null when the media was not
+downloaded — either because `download_media` is false, or because it is not
+hosted on Canvas.
+
+---
+
+## Zoom recordings
+
+```bash
+u_crawler zoom flow --course-id 123456
+u_crawler zoom flow --course-id 123456 --since 2026-01-01
+```
+
+Set `canvas.sso_email` and `canvas.sso_password` first — the flow logs in on
+your behalf.
+
+**What happens:**
+
+1. A complete cached session is looked for in
+   `<config_dir>/zoom_state.sqlite`. Partial credentials count as none.
+2. If there is none, or Zoom rejects it, a headless Chrome opens the Zoom
+   external tool in Canvas and completes the Canvas → Microsoft → Zoom login.
+   The session identifiers are scraped from the page and stored.
+3. Meetings and their recording files are listed through Zoom's API.
+4. Each recording's play page is visited to capture its short-lived asset URL
+   and headers, then downloaded immediately — those URLs expire quickly, which
+   is why recordings are processed one at a time rather than in parallel.
+
+Downloads use `ffmpeg` in stream-copy mode:
+
+```
+ffmpeg -y -loglevel error -hide_banner \
+  -headers "<captured headers>" \
+  -i "<asset url>" \
+  -c copy -map 0 -movflags +faststart "<dest>.mp4"
+```
+
+If `ffmpeg` fails, a plain HTTP download is attempted as a fallback. Recordings
+already present on disk are skipped without re-visiting them.
+
+`sync` runs this same flow per course, unless `--dry-run` is set or
+`zoom.enabled` is false.
+
+---
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `10` | Config error — including the first run, which creates the config and stops |
+| `11` | Authentication error (`auth canvas`) |
+| `12` | Any other runtime failure: network, API, browser, or filesystem |
+
+Failure handling during `sync` is uneven, and worth knowing:
+
+- A **file** that cannot be fetched or downloaded is logged, recorded in
+  `state.json` with an incremented `error_count`, and skipped. The run
+  continues and still exits `0`. Use `status --verbose` to find these.
+- The **announcements** and **Zoom** stages are each wrapped per course: if one
+  fails, it is logged and the next course proceeds.
+- A **page or assignment** that cannot be fetched aborts the entire run,
+  including courses not yet reached, and exits `12`.
+
+That last case is a rough edge rather than a deliberate design: a single
+unreadable page stops everything. Re-running is safe and skips what already
+succeeded, but if one course consistently fails this way, exclude it with
+`canvas.ignored_courses` or sync the others with `--course-id`.
+
+---
 
 ## Troubleshooting
 
-### ffmpeg Not Found
+**`created example config at ... Please edit it.`**
+Expected on first run. Edit the file, then re-run.
 
-**Symptoms**: Error "ffmpeg missing" or exit code 13.
+**`missing or invalid fields in config: [...]`**
+The listed keys failed validation. See [Validation](#validation).
 
-**Solutions**:
-- Verify installation: `ffmpeg -version`
-- On Windows: Add ffmpeg to PATH or set `zoom.ffmpeg_path` to the full path
-- On Linux/macOS: Install via package manager or set absolute path in config
+**Canvas returns 401 or 403.**
+Check that `base_url` has no trailing path and matches your instance exactly.
+If using `token_cmd`, run it yourself — it must print the token and nothing
+else. Note that tokens are per-instance.
 
-### Canvas Authentication Fails
+**Rate limiting, or slow syncs.**
+Lower `max_rps` to `1` and `concurrency` to `2`. The client already honours
+`Retry-After` on 429 (capped at 60s) and backs off exponentially on 5xx, up to
+5 attempts per request.
 
-**Symptoms**: "auth error" or exit code 11.
+**The Zoom login stalls or captures nothing.**
+Confirm `sso_email` and `sso_password` are correct, that `external_tool_id`
+matches your Canvas, and that Chrome or Chromium is installed. Then set
+`logging.level = "debug"` and read the log file to see which step stopped.
 
-**Solutions**:
-- Verify your Personal Access Token is valid and not expired
-- Confirm `base_url` matches your Canvas instance exactly
-- Test your `token_cmd` manually to ensure it returns the token
-- Re-run: `cargo run -- auth canvas --base-url URL --token TOKEN`
+**Recordings are listed but fail to download.**
+Confirm `ffmpeg -version` works. Asset URLs are short-lived; if a batch times
+out, re-run — already-downloaded recordings are skipped.
 
-### Zoom Authentication Fails
+**Some files fail every run.**
+`u_crawler status --verbose` lists them with their errors. Re-running retries
+them; partial downloads resume rather than restart.
 
-**Symptoms**: the flow times out or fails to capture credentials.
+**Nothing appears in `status`.**
+It reads `state.json` under `download_root`. If you changed `download_root`
+after a sync, it is looking in the new location.
 
-**Solutions**:
-- Confirm `canvas.sso_email` and `canvas.sso_password` are set and correct
-- Confirm `zoom.external_tool_id` matches the Zoom LTI tool id in your Canvas
-- Confirm Chromium or Chrome is installed and on `$PATH`
-- Set `logging.level = "debug"` and check the log file for the step that stalled
+---
 
-### Rate Limit Errors
+## Development
 
-**Symptoms**: Network errors or exit code 12.
-
-**Solutions**:
-- Reduce `max_rps` in config (e.g., from 2 to 1)
-- Reduce `concurrency` (e.g., from 4 to 2)
-- Wait a few minutes before retrying
-
-### Partial Download Failures
-
-**Symptoms**: some files fail to download.
-
-**Solutions**:
-- Re-run the command; downloads are resumable
-- Check available disk space
-- Verify write permissions for `download_root`
-- Use `--verbose` to identify specific failures
-- Check logs with `level = "debug"`
-
-### Zoom Recordings Won't Download
-
-**Symptoms**: Recordings are listed but fail to download.
-
-**Solutions**:
-- Verify you have download permissions in Zoom
-- Confirm ffmpeg works: `ffmpeg -version`
-- u_crawler falls back to a plain HTTP download when ffmpeg fails; if both fail,
-  the recording's short-lived URL likely expired — re-run the command
-- Check logs for specific error messages
-
-### Configuration File Not Found
-
-**Symptoms**: Tool can't find config.toml.
-
-**Solutions**:
-- Run `cargo run -- init` to create the default config
-- Verify the config directory exists
-- Check file permissions
-
-### Debug Mode
-
-For detailed diagnostics, enable debug logging:
-
-```toml
-[logging]
-level = "debug"
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test
 ```
 
-Then check `~/.config/u_crawler/u_crawler.log` after running commands.
+CI runs all three, plus release builds for Linux and Windows. `Cargo.toml`
+carries a `[lints.clippy]` table so local runs deny the same lints CI does.
 
-## Exit Codes
+`AGENTS.md` documents the internal architecture and the invariants the code
+holds to. Some worth knowing before changing anything:
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 10 | Configuration error |
-| 11 | Authentication error |
-| 12 | Network, rate limit, or runtime failure |
+- All HTTP goes through `HttpCtx`. A raw `reqwest::Client::send()` outside
+  `src/http.rs` bypasses rate limiting and retries.
+- All Canvas file downloads go through `download::download_if_needed`, under
+  one state-key namespace, so a file is never fetched twice.
+- Nothing outside `main.rs` writes to stdout. Library code emits `tracing`
+  events; user-facing output goes through the `status!` macro.
+- Credential values are never logged — only their presence.
 
-Note that on a first run, u_crawler creates the config file and exits with code
-10 so that you notice you need to edit it.
-
-## Additional Notes
-
-- **Incremental sync**: The sync command only downloads new or modified content.
-- **File naming**: Names are sanitized to ASCII with underscores; repeated separators are collapsed.
-- **Idempotent operations**: Commands can be safely re-run; they resume from where they stopped.
-- **Ignored courses**: Use `ignored_courses` to exclude specific courses from bulk operations.
-- **Dry-run mode**: Always preview with `--dry-run` before large sync operations.
+---
 
 ## License
 

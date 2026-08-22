@@ -16,7 +16,9 @@ recordings that session can reach.
 ## Non-negotiables
 
 * **Idempotent & resumable:** `Range` requests, `.part` files, ETag validation,
-  atomic rename on finalize.
+  atomic rename on finalize. A `200` in reply to a `Range` request means the
+  server ignored it, and the partial file must be truncated rather than
+  appended to — `download.rs` handles this; anything reimplementing it must.
 * **Deterministic structure:** stable, sanitized, ASCII-transliterated paths.
 * **`--dry-run` writes nothing and launches nothing.** It must not start a
   browser, perform SSO, or download.
@@ -239,6 +241,23 @@ Rules that hold today and should keep holding:
 
 ---
 
+## Known rough edges
+
+Documented so they are not rediscovered as surprises:
+
+* **`sync` aborts on a page fetch failure.** `CourseSync::sync_module` uses `?`
+  on `canvas.get_page`, and `run_sync` uses `?` on `sync_module`. A single
+  unreadable page therefore kills the whole run, including courses not yet
+  reached — while an unreadable *file* is merely recorded via
+  `State::record_error` and skipped. The file behaviour is the intended one;
+  aligning pages and assignments with it is the obvious fix.
+* **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
+  `announcements` both do.
+* **`scan --course-id` counts file items but does not list them,** unlike the
+  course listing which prints each entry.
+
+---
+
 ## Testing
 
 Present today (`cargo test`): Link-header parsing, retry/backoff classification,
@@ -255,8 +274,10 @@ database.
 ## Security
 
 * Never print or log tokens, cookies, the `lti_scid`, or the SSO password.
-* `sso_password` currently sits in cleartext in `config.toml`. An
-  `sso_password_cmd` mirroring `token_cmd` would be the right fix.
+* `sso_password` sits in cleartext in `config.toml`. The file is written
+  atomically and chmod'd `0600` on Unix (`config::save_config_to_path`), but
+  cleartext is still cleartext — an `sso_password_cmd` mirroring `token_cmd`
+  would be the right fix.
 * Retrieve the Canvas PAT via `token_cmd` (`pass`, `gopass`) where possible.
 * Do not commit captured API responses; they contain real names and addresses.
 
