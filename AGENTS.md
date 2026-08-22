@@ -261,6 +261,34 @@ the checked-in `.secrets` file is not guaranteed to hold a current one. The
 `build-check` matrix includes a Windows target that `act` cannot run locally;
 Linux jobs are the ones worth reproducing.
 
+**Two things `act` does not catch**, both of which have bitten this branch:
+
+1. **It bind-mounts the working tree instead of checking out a commit**, so it
+   tests your branch — not the `refs/pull/N/merge` commit that CI actually
+   builds. When `main` moves, git auto-merges `Cargo.lock` into an incoherent
+   hybrid that `--locked` rightly rejects, and `act` sees none of it. Merge
+   `origin/main` and re-verify before trusting a green local run.
+2. **It reuses your `CARGO_HOME`**, where every crate is already cached, so a
+   lockfile that needs re-resolution can pass locally and fail on a clean
+   runner.
+
+To reproduce CI properly, use a clean checkout and a clean cargo home:
+
+```bash
+git clone --depth 1 -b <branch> <url> /tmp/cichk
+docker run --rm -v /tmp/cichk:/src -w /src rust:latest \
+  bash -c 'export CARGO_HOME=/tmp/ch; cargo check --locked'
+```
+
+`release.yml` and `changelog.yml` must **not** be run with `act`: they push
+commits and create GitHub releases. Review them statically. `cliff.toml` can be
+validated on its own, which has no side effects:
+
+```bash
+docker run --rm -v "$PWD":/app -w /app \
+  ghcr.io/orhun/git-cliff/git-cliff:latest --config cliff.toml --latest
+```
+
 ---
 
 ## Known rough edges
