@@ -84,11 +84,11 @@ pub struct HttpCtx {
 
 impl HttpCtx {
     pub fn new(cfg: &Config, client: Client) -> Self {
-        let min_interval = if cfg.max_rps == 0 {
-            Duration::from_millis(0)
-        } else {
-            Duration::from_millis((1000 / cfg.max_rps) as u64)
-        };
+        // max_rps == 0 means "no pacing", which checked_div reports as None.
+        let min_interval = 1000u32
+            .checked_div(cfg.max_rps)
+            .map(|ms| Duration::from_millis(u64::from(ms)))
+            .unwrap_or_default();
         Self {
             client,
             limiter: Arc::new(Semaphore::new(cfg.concurrency as usize)),
@@ -182,6 +182,25 @@ mod tests {
             b = b.header(header::RETRY_AFTER, v);
         }
         Response::from(b.body("").unwrap())
+    }
+
+    fn cfg_with_rps(max_rps: u32) -> Config {
+        Config {
+            max_rps,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn max_rps_zero_disables_pacing() {
+        let ctx = HttpCtx::new(&cfg_with_rps(0), Client::new());
+        assert_eq!(ctx.min_interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn max_rps_sets_the_interval_between_requests() {
+        let ctx = HttpCtx::new(&cfg_with_rps(4), Client::new());
+        assert_eq!(ctx.min_interval, Duration::from_millis(250));
     }
 
     #[test]

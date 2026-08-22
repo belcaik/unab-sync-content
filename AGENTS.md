@@ -55,6 +55,11 @@ recordings that session can reach.
 * **Formatting & Lint:** `cargo fmt --all` and
   `cargo clippy --all-targets --all-features --locked -- -D warnings`.
   `Cargo.toml` carries a `[lints.clippy]` table so local runs match CI.
+* **Run `rustup update` before trusting a local clippy run.** CI installs the
+  *latest* stable via `dtolnay/rust-toolchain@stable`, so a local toolchain a
+  few releases behind will pass lints that CI then fails on — new clippy lints
+  land every release. To reproduce CI exactly, run it:
+  `act pull_request -j clippy -s GITHUB_TOKEN="$(gh auth token)"`.
 * **No `#[allow(clippy::...)]`** without a comment justifying it. There are
   currently none in the crate; adding one is a design signal, not a fix.
 * **Tests:** `cargo test`. Prefer pure functions that can be tested without a
@@ -238,6 +243,23 @@ Rules that hold today and should keep holding:
    HTTP download when ffmpeg fails.
 
 `ffmpeg` must be present; `zoom.ffmpeg_path` points at it.
+
+---
+
+## Running CI locally
+
+The repo ships an `.actrc`, so [`act`](https://github.com/nektos/act) reproduces
+the GitHub Actions jobs in a container:
+
+```bash
+act pull_request -l                                        # list jobs
+act pull_request -j clippy -s GITHUB_TOKEN="$(gh auth token)"
+```
+
+Pass the token explicitly — `act` needs it to clone the actions themselves, and
+the checked-in `.secrets` file is not guaranteed to hold a current one. The
+`build-check` matrix includes a Windows target that `act` cannot run locally;
+Linux jobs are the ones worth reproducing.
 
 ---
 

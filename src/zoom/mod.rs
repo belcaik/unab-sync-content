@@ -114,7 +114,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
             summary.meeting_id,
             files.len()
         ));
-        all_files.extend(files.into_iter());
+        all_files.extend(files);
     }
     meeting_progress.finish_and_clear();
 
