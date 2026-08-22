@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.0.2] - 2026-08-22
+
+### Bug Fixes
+
+- Correct dry-run, credential leakage, and two panic paths
+- Route the Zoom client through HttpCtx and stop logging header values
+
+### Documentation
+
+- Rewrite the documentation against the code that actually exists
+- Rewrite the README from the code rather than from the old README
+- Correct the repository URL
+
+### Miscellaneous
+
+- Remove an orphaned allow(too_many_arguments)
+- Lint every target, and add a lint table that matches the gate
+- Fix three lint failures and cover the musl release target
+- **deps**: Bump tracing-subscriber from 0.3.19 to 0.3.20
+- **deps**: Bump bytes from 1.10.1 to 1.11.1
+- **deps**: Bump time from 0.3.41 to 0.3.47
+- Merge main and document what act cannot catch
+
+### Refactor
+
+- Delete dead config, dependencies, and stale comments
+- Route all HTTP through HttpCtx and collapse duplicated fetch/download
+- Decompose sync_module from 585 lines to 117
+- Split headless.rs and give the Zoom session a type
+- Decompose announcements sync and drop the last too_many_arguments
+- Type the errors and remove the production panic paths
+- Give the crate an output layer
+
 ## [0.0.1] - 2026-01-22
 
 ### Bug Fixes
@@ -18,7 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-- **announcements**: Add `announcements` subcommand and sync integration that downloads every course's announcements as markdown, extracts links/media from the body, and downloads Canvas-hosted attachments alongside an `index.json` per course
 - Initialize u_crawler project with basic CLI and configuration management
 - **logging**: Add file logger and config\n\n- tracing-based file logger writing to configured path\n- [logging] level+file in config with tilde expansion\n- initialize logger early in main and add error logs\n- README: logging section and examples
 - **canvas**: Add HTTP client, pagination, and scan listing\n\n- HTTP client with UA and compression\n- Link header parser and tests\n- Canvas client: list courses, modules, files, get page\n- Wire scan to list modules and derived file count
@@ -51,4 +83,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Refactor
 
 - Improve code readability by formatting and restructuring error handling in sync_module and handle_status functions
+
 
