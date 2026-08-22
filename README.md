@@ -61,8 +61,8 @@ Windows.
 ## Install
 
 ```bash
-git clone https://github.com/belcaik/u_crawler.git
-cd u_crawler
+git clone https://github.com/belcaik/unab-sync-content.git
+cd unab-sync-content
 cargo build --release
 ```
 
