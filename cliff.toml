@@ -27,7 +27,7 @@ body = """
 footer = ""
 trim = true
 postprocessors = [
-    { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/belcaik/u_crawler/pull/${1}))" },
+    { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/belcaik/unab-sync-content/pull/${1}))" },
 ]
 
 [git]

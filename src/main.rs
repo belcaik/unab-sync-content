@@ -1,3 +1,4 @@
+use u_crawler::announcements;
 use u_crawler::canvas;
 use u_crawler::config;
 use u_crawler::logger;
@@ -50,6 +51,15 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Download and index course announcements (with link/media extraction)
+    Announcements {
+        /// Run only for a specific course id
+        #[arg(long)]
+        course_id: Option<u64>,
+        /// Do not write files or state; show planned actions
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Only process and download Zoom recordings
     Recordings {
         /// Run only for a specific course id
@@ -70,8 +80,6 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Verify checksums, remove .part leftovers
-    Clean,
 }
 
 #[derive(Subcommand, Debug)]
@@ -86,8 +94,6 @@ enum ZoomCommands {
     Flow {
         #[arg(long)]
         course_id: u64,
-        #[arg(long, default_value = "1")]
-        concurrency: usize,
         #[arg(long)]
         since: Option<String>,
     },
@@ -115,10 +121,8 @@ struct CanvasAuthArgs {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // Attempt to init logging from config before executing command.
-    // If config missing, fall back to defaults.
-    // Attempt to init logging from config before executing command.
-    // We use load_or_init but ignore errors (logging fallback)
+    // Initialise logging from config before executing the command; fall back to
+    // defaults when the config is missing or invalid.
     {
         match config::Config::load_or_init() {
             Ok(cfg) => logger::init_logging(Some(&cfg)),
@@ -180,6 +184,16 @@ async fn main() -> ExitCode {
                 ExitCode::from(12)
             }
         },
+        Commands::Announcements { course_id, dry_run } => {
+            match announcements::run_discovery(course_id, dry_run).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "announcements failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            }
+        }
         Commands::Recordings { course_id, dry_run } => {
             match recordings::run_discovery(course_id, dry_run).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -191,18 +205,16 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Zoom { command } => match command {
-            ZoomCommands::Flow {
-                course_id,
-                concurrency,
-                since,
-            } => match zoom::zoom_flow(course_id, concurrency, since).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "zoom flow failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
+            ZoomCommands::Flow { course_id, since } => {
+                match zoom::zoom_flow(course_id, since).await {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        tracing::error!(error = %e, "zoom flow failed");
+                        eprintln!("error: {e}");
+                        ExitCode::from(12)
+                    }
                 }
-            },
+            }
         },
         Commands::Status { verbose } => match handle_status(verbose).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -212,14 +224,10 @@ async fn main() -> ExitCode {
                 ExitCode::from(12)
             }
         },
-        Commands::Clean => {
-            println!("clean: stub (implement in M5)");
-            ExitCode::SUCCESS
-        }
     }
 }
 
-async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_init() -> anyhow::Result<()> {
     match Config::load_or_init() {
         Ok(_paths) => {
             println!("Config file already exists and is valid.");
@@ -232,7 +240,7 @@ async fn handle_init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_auth_canvas(args: CanvasAuthArgs) -> anyhow::Result<()> {
     let paths = ConfigPaths::new()?;
 
     // Load or init, but if it was just created (MissingConfigFile), we proceed with default config
@@ -264,7 +272,7 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
     use canvas::CanvasClient;
     let client = CanvasClient::from_config().await?;
 
@@ -315,7 +323,7 @@ async fn handle_scan(course_id: Option<u64>) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_status(verbose: bool) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use tracing::info;
 
@@ -427,13 +435,7 @@ async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> 
                     let attempts = item.error_count.unwrap_or(1);
                     println!("    - {} (failed {} time(s))", key, attempts);
                     if let Some(err) = &item.last_error {
-                        // Truncate long errors
-                        let err_short: String = if err.len() > 60 {
-                            format!("{}...", &err[..60])
-                        } else {
-                            err.clone()
-                        };
-                        println!("      Error: {}", err_short);
+                        println!("      Error: {}", truncate_chars(err, 60));
                     }
                 }
             } else {
@@ -458,6 +460,18 @@ async fn handle_status(verbose: bool) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// Truncates `s` to at most `max` characters, appending an ellipsis when shortened.
+///
+/// Operates on `char` boundaries: slicing by byte index would panic on the
+/// multi-byte text that Canvas returns for non-English courses.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}...")
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -471,5 +485,34 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} bytes", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_chars_leaves_short_input_untouched() {
+        assert_eq!(truncate_chars("short", 60), "short");
+    }
+
+    #[test]
+    fn truncate_chars_appends_ellipsis_when_shortened() {
+        assert_eq!(truncate_chars("abcdef", 3), "abc...");
+    }
+
+    #[test]
+    fn truncate_chars_does_not_split_multibyte_characters() {
+        // Byte-slicing this at 3 would panic mid-codepoint.
+        let input = "áéíóú";
+        assert_eq!(truncate_chars(input, 3), "áéí...");
+    }
+
+    #[test]
+    fn format_bytes_scales_to_the_largest_fitting_unit() {
+        assert_eq!(format_bytes(512), "512 bytes");
+        assert_eq!(format_bytes(2048), "2.00 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MB");
     }
 }

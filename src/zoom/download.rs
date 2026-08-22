@@ -1,19 +1,28 @@
 use crate::config::Config;
 
+use crate::http::HttpCtx;
 use crate::zoom::models::ReplayHeader;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tracing::{debug, warn};
 
+/// Fetches a recording over plain HTTP, resuming a partial `.part` file.
+///
+/// The fallback for when ffmpeg cannot handle the stream. Goes through
+/// [`HttpCtx`] like every other request in the crate, so it is paced and
+/// retried on transient failures.
 pub async fn http_download(
+    cfg: &Config,
     headers: &[(String, String)],
     url: &str,
     dest: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
+    let httpctx = HttpCtx::new(cfg, client);
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -45,24 +54,19 @@ pub async fn http_download(
         );
     }
 
-    // DEBUG: Log all headers being sent
-    println!("HTTP download {} with {} headers:", url, header_map.len());
-    for (k, v) in header_map.iter() {
-        let val_str = v.to_str().unwrap_or("<binary>");
-        let display_val = if val_str.len() > 100 {
-            format!("{}...", &val_str[..100])
-        } else {
-            val_str.to_string()
-        };
-        println!("  {}: {}", k, display_val);
-    }
+    // Header names only: these carry the session cookie and replay token.
+    let names: Vec<&str> = header_map.keys().map(|k| k.as_str()).collect();
+    debug!(url, ?names, "http download request headers");
 
-    let mut request = client.get(url);
-    request = request.headers(header_map);
-
-    let response = request.send().await?;
+    let response = httpctx
+        .send(httpctx.client.get(url).headers(header_map))
+        .await?;
     if !(response.status().is_success() || response.status().as_u16() == 206) {
-        return Err(format!("HTTP {} while downloading {}", response.status(), url).into());
+        return Err(anyhow::anyhow!(
+            "HTTP {} while downloading {}",
+            response.status(),
+            url
+        ));
     }
 
     let mut file = tokio::fs::OpenOptions::new()
@@ -130,7 +134,7 @@ pub fn build_ffmpeg_headers(
 
         headers.push(("Cookie".to_string(), cookie_header));
     } else {
-        println!("⚠ Warning: No cookies found for domain {}", domain);
+        warn!(domain, "no cookies found for domain");
     }
 
     headers

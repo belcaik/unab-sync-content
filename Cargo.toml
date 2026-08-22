@@ -3,6 +3,13 @@ name = "u_crawler"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+# Matches the CI gate, so a local `cargo clippy` fails on the same things.
+too_many_arguments = "deny"
+needless_collect = "deny"
+redundant_clone = "deny"
+large_enum_variant = "deny"
+
 [dependencies]
 tokio = { version = "1.39", features = ["fs", "macros", "rt-multi-thread", "process"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -10,7 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 directories = "5.0"
 thiserror = "1.0"
-dirs-next = "2.0"
+anyhow = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "deflate", "stream", "rustls-tls", "cookies"] }
 serde_json = "1.0"
 url = "2.5"
@@ -29,9 +36,9 @@ urlencoding = "2.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
-which = "5"
-chromiumoxide = { git = "https://github.com/mattsse/chromiumoxide", features = ["tokio-runtime"] }
+# Pinned: chromiumoxide has no crates.io release with the CDP Fetch APIs this uses.
+# Without a rev, `cargo update` would float browser-automation code to an arbitrary commit.
+chromiumoxide = { git = "https://github.com/mattsse/chromiumoxide", rev = "6f2392f78ae851e2acf33df8e9764cc299d837db", features = ["tokio-runtime"] }
 futures = "0.3"
 reqwest_cookie_store = "0.9.0"
 cookie = "0.18.1"
@@ -39,3 +46,4 @@ cookie_store = "0.22.0"
 
 [dev-dependencies]
 tempfile = "3.23.0"
+http = "1"

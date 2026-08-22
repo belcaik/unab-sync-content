@@ -1,126 +1,70 @@
 pub mod api;
+pub mod app_conf;
 pub mod db;
 pub mod download;
 pub mod headless;
 pub mod models;
+pub mod sso;
 
 use crate::config::ConfigPaths;
 use crate::progress::progress_bar;
-use api::{ZoomApiError, ZoomClient};
+use crate::status;
+use api::ZoomClient;
 use db::ZoomDb;
 use headless::ZoomHeadless;
 use models::{RecordingSummary, ZoomRecordingFile};
-use std::error::Error;
 use tracing::info;
 
-pub async fn zoom_flow(
-    course_id: u64,
-    concurrency: usize,
-    since: Option<String>,
-) -> Result<(), Box<dyn Error>> {
+pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
     let cfg = crate::config::Config::load_or_init()?;
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
-    println!("Starting Zoom flow for course {}", course_id);
+    status!("Starting Zoom flow for course {}", course_id);
 
-    // 1. Check if we have valid credentials (scid + cookies + headers)
-    let scid = db.get_scid(course_id)?;
-    let cookies = db.load_cookies()?;
-    let headers = db.get_all_request_headers(course_id)?;
-
+    // 1. Reuse the stored session if it is complete and still accepted.
     let headless = ZoomHeadless::new(&cfg, &db, course_id);
-
-    let xsrf_token = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
-        .map(|(_, v)| v);
-    let zm_aid = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-aid")
-        .map(|(_, v)| v);
-    let zm_cluster_id = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-cluster-id")
-        .map(|(_, v)| v);
-    let zm_haid = headers
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == "x-zm-haid")
-        .map(|(_, v)| v);
+    let stored = db.load_session(course_id)?;
 
     info!(
-        "SESSION FROM DB -> course_id={}: lti_scid={:?}, xsrf_token={:?}, zm_aid={:?}, zm_cluster_id={:?}, zm_haid={:?}, cookies_count={}",
         course_id,
-        scid,
-        xsrf_token,
-        zm_aid,
-        zm_cluster_id,
-        zm_haid,
-        cookies.len(),
+        has_session = stored.is_some(),
+        "checked stored zoom session"
     );
 
-    let has_min_creds = scid.is_some()
-        && !cookies.is_empty()
-        && xsrf_token.is_some()
-        && zm_aid.is_some()
-        && zm_cluster_id.is_some()
-        && zm_haid.is_some();
-
     let mut valid_session = false;
-
-    if has_min_creds {
-        println!("Found existing credentials in DB. Validating...");
+    if stored.is_some() {
+        status!("Found existing credentials in DB. Validating...");
         match ZoomClient::new(&cfg, &db, course_id).await {
-            Ok(client) => {
-                if client.validate_cookies().await {
-                    println!("Cookies are valid. Skipping headless capture.");
-                    valid_session = true;
-                } else {
-                    println!("Cookies are invalid or expired.");
-                }
+            Ok(client) if client.validate_cookies().await => {
+                status!("Cookies are valid. Skipping headless capture.");
+                valid_session = true;
             }
-            Err(e) => {
-                println!("Failed to initialize Zoom client for validation: {}", e);
-            }
+            Ok(_) => status!("Cookies are invalid or expired."),
+            Err(e) => status!("Failed to initialize Zoom client for validation: {}", e),
         }
     } else {
-        println!("Missing some credentials in DB.");
+        status!("No complete session stored for this course.");
     }
 
     if !valid_session {
-        println!("Starting headless capture (SSO + LTI scid + cookies)...");
+        status!("Starting headless capture (SSO + LTI scid + cookies)...");
         headless.authenticate_and_capture().await?;
-        println!("Headless capture finished.");
-
-        // Log what we captured
-        let scid = db.get_scid(course_id)?;
-        let cookies = db.load_cookies()?;
-        let headers = db.get_all_request_headers(course_id)?;
-        let xsrf_token = headers
-            .iter()
-            .find(|(k, _)| k.to_lowercase() == "x-xsrf-token")
-            .map(|(_, v)| v);
+        status!("Headless capture finished.");
 
         info!(
-            "HEADLESS RESULT -> course_id={}: lti_scid={:?}, xsrf_token={:?}, cookies_count={}",
             course_id,
-            scid,
-            xsrf_token,
-            cookies.len(),
+            captured = db.load_session(course_id)?.is_some(),
+            "headless capture result"
         );
     }
 
-    println!("Starting listing and download for course {}", course_id);
+    status!("Starting listing and download for course {}", course_id);
 
     // 2. List recordings using captured credentials
-    let client = ZoomClient::new(&cfg, &db, course_id)
-        .await
-        .map_err(map_api_err)?;
+    let client = ZoomClient::new(&cfg, &db, course_id).await?;
 
-    let listing = client
-        .list_recordings(since.as_deref())
-        .await
-        .map_err(map_api_err)?;
+    let listing = client.list_recordings(since.as_deref()).await?;
     db.save_meetings(course_id, &listing)?;
 
     let meetings: Vec<RecordingSummary> = listing
@@ -131,14 +75,14 @@ pub async fn zoom_flow(
         .unwrap_or_default();
 
     if meetings.is_empty() {
-        println!("No Zoom meetings were found for course {course_id}.");
+        status!("No Zoom meetings were found for course {course_id}.");
     } else {
-        println!(
+        status!(
             "Captured {} Zoom meetings; fetching individual recording files...",
             meetings.len()
         );
         for meeting in &meetings {
-            println!(
+            status!(
                 "Found Meeting: ID={}, Topic='{}', Start={}",
                 meeting.meeting_id,
                 meeting.topic.as_deref().unwrap_or("N/A"),
@@ -156,10 +100,7 @@ pub async fn zoom_flow(
     for summary in meetings {
         meeting_progress.inc(1);
         meeting_progress.set_message(format!("Meeting {}", summary.meeting_id));
-        let files = client
-            .fetch_recording_files(&summary)
-            .await
-            .map_err(map_api_err)?;
+        let files = client.fetch_recording_files(&summary).await?;
         if files.is_empty() {
             meeting_progress.println(format!(
                 "- {}: Zoom did not report downloadable files",
@@ -173,30 +114,19 @@ pub async fn zoom_flow(
             summary.meeting_id,
             files.len()
         ));
-        all_files.extend(files.into_iter());
+        all_files.extend(files);
     }
     meeting_progress.finish_and_clear();
 
     if all_files.is_empty() {
-        println!(
-            "No recordings with playUrl entries were available after the full flow; try again or verify permissions."
-        );
+        status!("No recordings with playUrl entries were available after the full flow; try again or verify permissions.");
         return Ok(());
     }
 
     // 4. Capture play URLs and download immediately (one by one to avoid token expiration)
-    println!("Starting capture and download (tokens expire quickly, processing one by one)...");
-    headless
-        .capture_and_download_immediately(&cfg, &db, course_id, all_files, concurrency)
-        .await?;
+    status!("Starting capture and download (tokens expire quickly, processing one by one)...");
+    headless.capture_and_download_immediately(all_files).await?;
 
-    println!("All recordings processed!");
+    status!("All recordings processed!");
     Ok(())
-}
-
-fn map_api_err(err: ZoomApiError) -> Box<dyn Error> {
-    match err {
-        ZoomApiError::Db(e) => e,
-        other => Box::new(other),
-    }
 }

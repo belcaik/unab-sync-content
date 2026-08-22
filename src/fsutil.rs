@@ -52,9 +52,7 @@ pub fn sanitize_component<S: AsRef<str>>(s: S) -> String {
 }
 
 fn sanitize_stem(input: &str) -> String {
-    let s1 = sanitize(input);
-    let s2 = ascii_skeleton(&s1);
-    s2.to_string()
+    ascii_skeleton(&sanitize(input))
 }
 
 /// Sanitize a filename but preserve the last extension (lowercased).
@@ -127,4 +125,32 @@ pub async fn atomic_rename(src: &Path, dest: &Path) -> io::Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::rename(src, dest).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_component_strips_path_separators() {
+        assert!(!sanitize_component("a/b\\c").contains('/'));
+        assert!(!sanitize_component("a/b\\c").contains('\\'));
+    }
+
+    #[test]
+    fn sanitize_component_transliterates_accents_to_ascii() {
+        let got = sanitize_component("Semana Nº1 — Introducción");
+        assert!(got.is_ascii(), "expected ascii, got {got:?}");
+        assert!(got.to_lowercase().contains("introduccion"), "got {got:?}");
+    }
+
+    #[test]
+    fn filename_extension_is_preserved_and_lowercased() {
+        assert!(sanitize_filename_preserve_ext("Taller.IPYNB").ends_with(".ipynb"));
+    }
+
+    #[test]
+    fn filename_without_extension_is_left_alone() {
+        assert!(!sanitize_filename_preserve_ext("README").contains('.'));
+    }
 }

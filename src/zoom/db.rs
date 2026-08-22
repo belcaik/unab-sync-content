@@ -3,13 +3,29 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
+use tracing::info;
+
+/// Failures from the Zoom recordings store.
+///
+/// Typed rather than boxed so callers can distinguish a missing database from a
+/// malformed row, and so the error stays `Send + Sync` across the async stack.
+#[derive(Debug, Error)]
+pub enum ZoomDbError {
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("could not encode recording payload: {0}")]
+    Encode(#[from] serde_json::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 pub struct ZoomDb {
     path: PathBuf,
 }
 
 impl ZoomDb {
-    pub fn new(config_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(config_dir: &Path) -> Result<Self, ZoomDbError> {
         let path = config_dir.join("zoom_state.sqlite");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -19,7 +35,7 @@ impl ZoomDb {
         Ok(db)
     }
 
-    fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn init(&self) -> Result<(), ZoomDbError> {
         let conn = self.connection()?;
         conn.execute_batch(
             r#"
@@ -78,17 +94,17 @@ impl ZoomDb {
         Connection::open(&self.path)
     }
 
-    pub fn save_scid(&self, course_id: u64, scid: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_scid(&self, course_id: u64, scid: &str) -> Result<(), ZoomDbError> {
         let conn = self.connection()?;
         conn.execute(
             "REPLACE INTO zoom_course_scid(course_id, scid, updated_at) VALUES (?1, ?2, ?3)",
             params![course_id.to_string(), scid, Utc::now().timestamp()],
         )?;
-        println!("DB: Saved scid for course {}", course_id);
+        info!("DB: Saved scid for course {}", course_id);
         Ok(())
     }
 
-    pub fn get_scid(&self, course_id: u64) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    pub fn get_scid(&self, course_id: u64) -> Result<Option<String>, ZoomDbError> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare("SELECT scid FROM zoom_course_scid WHERE course_id = ?1")?;
         let mut rows = stmt.query(params![course_id.to_string()])?;
@@ -97,15 +113,12 @@ impl ZoomDb {
 
             Ok(Some(scid))
         } else {
-            println!("DB: No scid found for course {}", course_id);
+            info!("DB: No scid found for course {}", course_id);
             Ok(None)
         }
     }
 
-    pub fn replace_cookies(
-        &self,
-        cookies: &[ZoomCookie],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn replace_cookies(&self, cookies: &[ZoomCookie]) -> Result<(), ZoomDbError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM zoom_cookie", [])?;
@@ -129,7 +142,7 @@ impl ZoomDb {
         Ok(())
     }
 
-    pub fn load_cookies(&self) -> Result<Vec<ZoomCookie>, Box<dyn std::error::Error>> {
+    pub fn load_cookies(&self) -> Result<Vec<ZoomCookie>, ZoomDbError> {
         let mut conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT host, name, value, path, expires, secure, http_only FROM zoom_cookie",
@@ -182,10 +195,7 @@ impl ZoomDb {
         Ok(valid)
     }
 
-    pub fn delete_all_request_headers(
-        &self,
-        course_id: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn delete_all_request_headers(&self, course_id: u64) -> Result<(), ZoomDbError> {
         let conn = self.connection()?;
         conn.execute(
             "DELETE FROM zoom_request_headers WHERE course_id = ?1",
@@ -199,7 +209,7 @@ impl ZoomDb {
         course_id: u64,
         request_path: &str,
         headers: &[(String, String)],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ZoomDbError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute(
@@ -226,7 +236,7 @@ impl ZoomDb {
     pub fn get_all_request_headers(
         &self,
         course_id: u64,
-    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(String, String)>, ZoomDbError> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT header_name, header_value FROM zoom_request_headers WHERE course_id = ?1",
@@ -246,7 +256,7 @@ impl ZoomDb {
         &self,
         course_id: u64,
         response: &RecordingListResponse,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ZoomDbError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         if let Some(result) = &response.result {
@@ -279,7 +289,7 @@ impl ZoomDb {
         _course_id: u64,
         meeting_id: &str,
         files: &[ZoomRecordingFile],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), ZoomDbError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction()?;
         tx.execute(
@@ -304,5 +314,59 @@ impl ZoomDb {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+/// The credentials one course's recordings API calls need.
+///
+/// Zoom's LTI launch supplies these as a scid plus a handful of request headers;
+/// the recordings endpoints reject a request missing any of them.
+#[derive(Debug, Clone)]
+pub struct ZoomSession {
+    pub scid: String,
+    pub xsrf_token: String,
+    pub zm_aid: String,
+    pub zm_cluster_id: String,
+    pub zm_haid: String,
+    pub cookies: Vec<crate::zoom::models::ZoomCookie>,
+}
+
+impl ZoomDb {
+    /// Loads a complete session for `course_id`, or `None` if any part is missing.
+    ///
+    /// Partial credentials are indistinguishable from absent ones for the caller's
+    /// purposes — either way the headless capture has to run again — so this
+    /// returns an all-or-nothing value rather than six independent Options.
+    pub fn load_session(&self, course_id: u64) -> Result<Option<ZoomSession>, ZoomDbError> {
+        let scid = self.get_scid(course_id)?;
+        let cookies = self.load_cookies()?;
+        let headers = self.get_all_request_headers(course_id)?;
+
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+
+        let (Some(scid), Some(xsrf_token), Some(zm_aid), Some(zm_cluster_id), Some(zm_haid), false) = (
+            scid,
+            header("x-xsrf-token"),
+            header("x-zm-aid"),
+            header("x-zm-cluster-id"),
+            header("x-zm-haid"),
+            cookies.is_empty(),
+        ) else {
+            return Ok(None);
+        };
+
+        Ok(Some(ZoomSession {
+            scid,
+            xsrf_token,
+            zm_aid,
+            zm_cluster_id,
+            zm_haid,
+            cookies,
+        }))
     }
 }

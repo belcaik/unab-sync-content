@@ -25,21 +25,29 @@ pub struct Config {
     pub concurrency: u32,
     pub max_rps: u32,
     pub user_agent: String,
-    pub course_include: Vec<String>,
-    pub course_exclude: Vec<String>,
-    pub week_pattern: String,
-    #[serde(default)]
-    pub naming: Naming,
     #[serde(default)]
     pub logging: Logging,
     pub canvas: Canvas,
     pub zoom: Zoom,
+    #[serde(default)]
+    pub announcements: Announcements,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct Naming {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Announcements {
     #[serde(default = "default_true")]
-    pub safe_fs: bool,
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub download_media: bool,
+}
+
+impl Default for Announcements {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            download_media: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,8 +60,6 @@ pub struct Canvas {
     #[serde(default)]
     pub ignored_courses: Vec<String>,
     #[serde(default)]
-    pub cookie_file: Option<String>,
-    #[serde(default)]
     pub sso_email: Option<String>,
     #[serde(default)]
     pub sso_password: Option<String>,
@@ -63,7 +69,6 @@ pub struct Canvas {
 pub struct Zoom {
     pub enabled: bool,
     pub ffmpeg_path: String,
-    pub cookie_file: String,
     pub user_agent: String,
     #[serde(default = "default_tool_id")]
     pub external_tool_id: u64,
@@ -80,27 +85,22 @@ impl Default for Config {
             concurrency: 4,
             max_rps: 2,
             user_agent: String::new(),
-            course_include: vec!["*".to_string()],
-            course_exclude: vec![],
-            week_pattern: String::new(),
-            naming: Naming { safe_fs: true },
             logging: Logging::default(),
             canvas: Canvas {
                 base_url: "https://<tenant>.instructure.com".to_string(),
                 token: None,
                 token_cmd: None,
                 ignored_courses: vec![],
-                cookie_file: Some("~/.config/u_crawler/canvas_cookies.txt".to_string()),
                 sso_email: None,
                 sso_password: None,
             },
             zoom: Zoom {
                 enabled: true,
                 ffmpeg_path: "ffmpeg".to_string(),
-                cookie_file: "~/.config/u_crawler/zoom_cookies.txt".to_string(),
                 user_agent: "Mozilla/5.0".to_string(),
                 external_tool_id: 187,
             },
+            announcements: Announcements::default(),
         }
     }
 }
@@ -168,13 +168,9 @@ impl Config {
 
     /// Expand tildes in path-like fields. No-op if expansion fails.
     pub fn expand_paths(&mut self) {
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) {
             self.download_root = expand_tilde(&self.download_root, &home);
-            self.zoom.cookie_file = expand_tilde(&self.zoom.cookie_file, &home);
             self.logging.file = expand_tilde(&self.logging.file, &home);
-            if let Some(cf) = &self.canvas.cookie_file {
-                self.canvas.cookie_file = Some(expand_tilde(cf, &home));
-            }
         }
     }
 }

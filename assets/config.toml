@@ -2,12 +2,6 @@ download_root = "<your download root>"
 concurrency = 4
 max_rps = 2
 user_agent = ""
-course_include = ["*"]
-course_exclude = []
-week_pattern = ""
-
-[naming]
-safe_fs = true
 
 [logging]
 level = "info"
@@ -16,15 +10,21 @@ file = "<your log file>"
 [canvas]
 base_url = "<https://canvas.yourinstitution.domain>"
 token = "<your token>"
-ignored_courses = [""] # courses to ignore
-token_cmd = ""
-cookie_file = "~/.config/u_crawler/canvas_cookies.txt"  # Netscape export from Canvas session
+token_cmd = ""                  # alternative to `token`: a command that prints the token
+ignored_courses = [""]          # course ids to skip
+
+# Institutional SSO credentials, used by the Zoom flow to log in headlessly.
+# SECURITY: these are stored in cleartext. Prefer leaving sso_password empty and
+# supplying it out of band if your threat model does not allow that.
 sso_email = "<your email>"
 sso_password = "<your password>"
 
+[announcements]
+enabled = true                  # sync course announcements as markdown
+download_media = true           # also download Canvas-hosted attachments and inline media
+
 [zoom]
-enabled = true
-ffmpeg_path = "ffmpeg"  # or full path if not on $PATH
-cookie_file = "~/.config/u_crawler/zoom_cookies.txt"    # Netscape export from Zoom session
+enabled = true                  # set false to skip the Zoom subsystem entirely
+ffmpeg_path = "ffmpeg"          # or a full path if not on $PATH
 user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"
 external_tool_id = 187

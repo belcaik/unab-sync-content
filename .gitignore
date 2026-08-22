@@ -10,3 +10,10 @@ secret
 # Local CI testing
 .actrc
 .secrets
+
+# Debug capture artifacts
+response.json
+
+# Agent tooling scratch state
+.auto-claude-*
+.claude_settings.json

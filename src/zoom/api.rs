@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::http::HttpCtx;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{
     RecordingFileResponse, RecordingListResponse, RecordingSummary, RecordingsResult,
@@ -26,17 +27,13 @@ pub enum ZoomApiError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Db(#[from] Box<dyn std::error::Error>),
-    #[error(transparent)]
-    Cookie(#[from] cookie::ParseError),
-    #[error(transparent)]
-    CookieStore(#[from] cookie_store::Error),
+    Db(#[from] crate::zoom::db::ZoomDbError),
     #[error("{0}")]
     Message(String),
 }
 
 pub struct ZoomClient {
-    client: Client,
+    http: HttpCtx,
     scid: String,
     base_url: Url,
 }
@@ -45,13 +42,11 @@ impl ZoomClient {
     pub async fn new(cfg: &Config, db: &ZoomDb, course_id: u64) -> Result<Self, ZoomApiError> {
         let scid = db.get_scid(course_id).map_err(ZoomApiError::Db)?;
 
-        if let Some(ref s) = scid {
-            info!("Loaded scid from DB: {}", s);
-        } else {
-            warn!("No scid found in DB for course {}", course_id);
+        let Some(scid) = scid else {
+            warn!(course_id, "no scid found in DB");
             return Err(ZoomApiError::MissingState);
-        }
-        let scid = scid.unwrap();
+        };
+        info!(course_id, "loaded scid from DB");
 
         let cookies = db.load_cookies().map_err(ZoomApiError::Db)?;
         info!("Loaded {} cookies from DB", cookies.len());
@@ -83,7 +78,9 @@ impl ZoomClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             "User-Agent",
-            HeaderValue::from_str(&effective_user_agent(cfg)).unwrap(),
+            // A user_agent from config may contain characters no header can carry.
+            HeaderValue::from_str(&effective_user_agent(cfg))
+                .map_err(|_| ZoomApiError::Message("invalid user_agent in config".into()))?,
         );
         headers.insert(
             "Referer",
@@ -109,16 +106,14 @@ impl ZoomClient {
             }
         }
 
-        // Log the headers we just configured (filtering sensitive values if needed, but x-zm keys are useful)
-        for (name, value) in headers.iter() {
-            if let Ok(v) = value.to_str() {
-                if name.as_str().starts_with("x-zm")
-                    || name.as_str().eq_ignore_ascii_case("x-xsrf-token")
-                {
-                    info!("ZoomClient header: {} = {}", name, v);
-                }
-            }
-        }
+        // Log which session headers are configured, never their values: these are
+        // live credentials and the log file is append-only for the install's life.
+        let configured: Vec<&str> = headers
+            .keys()
+            .map(|n| n.as_str())
+            .filter(|n| n.starts_with("x-zm") || n.eq_ignore_ascii_case("x-xsrf-token"))
+            .collect();
+        info!(?configured, "zoom client session headers");
 
         let client = Client::builder()
             .cookie_provider(cookie_store)
@@ -126,7 +121,9 @@ impl ZoomClient {
             .build()?;
 
         Ok(Self {
-            client,
+            // Wrapped so Zoom API calls are paced and retried like every other
+            // request in the crate.
+            http: HttpCtx::new(cfg, client),
             scid,
             base_url: Url::parse(ZOOM_BASE)?,
         })
@@ -152,12 +149,10 @@ impl ZoomClient {
 
         debug!(url = %url, "validating Zoom cookies");
 
-        // We use a separate client or the existing one? Existing one has cookies.
         // We need to ensure we don't follow redirects to detect 302 easily,
         // OR we check if the final URL is still the API URL.
-        // But `self.client` is already built.
         // Let's just check status 200.
-        match self.client.get(url).send().await {
+        match self.http.send(self.http.client.get(url)).await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 200 {
@@ -211,7 +206,7 @@ impl ZoomClient {
             }
             info!(page, url = %url, "fetching Zoom recordings page");
 
-            let resp = self.client.get(url.clone()).send().await?;
+            let resp = self.http.send(self.http.client.get(url.clone())).await?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -268,7 +263,6 @@ impl ZoomClient {
             status: Some(true),
             code: Some(200),
             result: Some(RecordingsResult {
-                page_num: None,
                 page_size: Some(all.len() as i32),
                 total: Some(all.len() as i64),
                 list: Some(all),
@@ -287,7 +281,7 @@ impl ZoomClient {
             qp.append_pair("lti_scid", &self.scid);
         }
 
-        let resp = self.client.get(url.clone()).send().await?;
+        let resp = self.http.send(self.http.client.get(url.clone())).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -304,10 +298,15 @@ impl ZoomClient {
         let mut out = Vec::new();
         if let Some(result) = payload.result {
             if let Some(entries) = result.recording_files {
-                for entry in entries.into_iter().filter(|e| e.play_url.is_some()) {
+                // Entries without a play_url cannot be captured, so they are dropped
+                // here rather than filtered and then unwrapped.
+                for entry in entries {
+                    let Some(play_url) = entry.play_url else {
+                        continue;
+                    };
                     out.push(ZoomRecordingFile {
                         meeting_id: meeting.meeting_id.clone(),
-                        play_url: entry.play_url.unwrap(),
+                        play_url,
                         download_url: entry.download_url.clone(),
                         file_type: entry.file_type.clone(),
                         recording_start: entry.recording_start.clone(),
