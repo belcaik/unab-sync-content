@@ -27,11 +27,12 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use sha1::{Digest, Sha1};
 
 use crate::canvas::{Assignment, CanvasClient, Course};
 use crate::config::Config;
 use crate::fsutil;
-use crate::state::State;
+use crate::state::{ItemState, State};
 use crate::status;
 
 /// A submission record for one assignment.
@@ -49,6 +50,11 @@ pub struct Submission {
 pub struct PlannedWrite {
     pub path: PathBuf,
     pub content: String,
+    /// The Canvas assignment this write projects. Carried alongside `path`/
+    /// `content` so the executor can record the write against the same
+    /// `calendar:{assignment_id}` state key `plan` compared it against,
+    /// without having to reverse-engineer an id out of a filename.
+    pub assignment_id: u64,
 }
 
 /// The outcome of planning: which files to write and which to delete.
@@ -87,6 +93,24 @@ fn deadline_uid(assignment_id: u64) -> String {
 /// its source (the assignment id) with [`deadline_uid`], never the due date.
 fn deadline_filename(assignment_id: u64) -> String {
     format!("assignment-{assignment_id}.ics")
+}
+
+/// The `state.json` namespace for a deadline `VTODO`'s projected content
+/// (spec D5): `calendar:{assignment_id}`. Distinct from the content flow's
+/// own `assignment:{id}` key (`syncer.rs`) — same assignment, different
+/// projection, so a separate key stops the two flows from clobbering each
+/// other's bookkeeping.
+fn calendar_state_key(assignment_id: u64) -> String {
+    format!("calendar:{assignment_id}")
+}
+
+/// Hash rendered content the same way `syncer.rs` hashes markdown before
+/// deciding whether to skip a write: SHA-1, hex-encoded. Not cryptographic —
+/// just a cheap, stable fingerprint of "did the projected component change".
+fn content_hash(content: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Format a UTC instant the way iCalendar wants it: `Z`-suffixed, no offset
@@ -147,16 +171,31 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> Strin
 /// Plan the deadline calendar files for one course.
 ///
 /// Pure: no network, no disk access and no system clock — `now` is the
-/// caller's injected instant. `submissions` and `prev` are accepted so later
-/// tickets can widen this function without changing every call site; this
-/// ticket does not build logic on them yet.
+/// caller's injected instant. `submissions` is accepted so later tickets can
+/// widen this function without changing every call site; this ticket does
+/// not build logic on it yet.
+///
+/// `prev` is the previous run's persisted state (spec D5): for each
+/// assignment with a due date, the rendered `VTODO` is hashed and compared
+/// against `prev`'s `calendar:{assignment_id}` entry. A match means Canvas's
+/// projected component is unchanged, so **no write is planned** — this is
+/// what keeps an unchanged run's plan empty (spec user story 14, the ticket's
+/// "test más importante"). A mismatch (including "no entry yet") plans a
+/// write with the freshly rendered content, Canvas winning per D5.
+///
+/// The filename and UID both derive only from the assignment id (see
+/// [`deadline_uid`], [`deadline_filename`]), never from the due date, so a
+/// due-date change rewrites the same path rather than orphaning a
+/// differently-named old file — the sharp case ticket 06 names is designed
+/// out at the source, not cleaned up here. A title change is exactly the
+/// same code path: the hash changes, the path does not.
 pub fn plan(
     caldir_root: &Path,
     course: &Course,
     assignments: &[Assignment],
     _submissions: &[Submission],
     _now: DateTime<Utc>,
-    _prev: &State,
+    prev: &State,
 ) -> Plan {
     let dir = fsutil::course_dir(caldir_root, course).join(DEADLINES_DIR);
     let mut writes = Vec::new();
@@ -167,7 +206,18 @@ pub fn plan(
         let uid = deadline_uid(assignment.id);
         let path = dir.join(deadline_filename(assignment.id));
         let content = render_vtodo(&uid, assignment, due);
-        writes.push(PlannedWrite { path, content });
+        let hash = content_hash(&content);
+        let key = calendar_state_key(assignment.id);
+        let unchanged =
+            prev.get(&key).and_then(|item| item.content_hash.as_deref()) == Some(hash.as_str());
+        if unchanged {
+            continue;
+        }
+        writes.push(PlannedWrite {
+            path,
+            content,
+            assignment_id: assignment.id,
+        });
     }
     Plan {
         writes,
@@ -273,11 +323,16 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// through the shared paginator), calls the pure [`plan`], and applies the
 /// result with [`fsutil::atomic_write`].
 ///
-/// Submission data and the previous [`State`] are not wired in yet: submission
-/// status is ticket 09's scope, and `state.json` diffing for the calendar
-/// namespace is ticket 06's — this ticket always plans against an empty
-/// submission list and a fresh, empty `State`, which is what makes every
-/// matching assignment with a due date always get (re)written.
+/// Submission data is not wired in yet — submission status is ticket 09's
+/// scope, so this always plans with an empty submission list. The previous
+/// [`State`] *is* wired in (ticket 06): it is loaded from the course's
+/// existing `state.json` under `download_root` — the same file `sync` and
+/// `announcements` already read and write, under the `calendar:{id}`
+/// namespace (spec D5) — never from anywhere inside `caldir_root`. After a
+/// successful apply, every written assignment's content hash is recorded
+/// back into that state and saved, so the next run's [`plan`] call has
+/// something to compare against. In `--dry-run` nothing is persisted: state
+/// is loaded (to plan correctly) but never saved.
 ///
 /// `dry_run` reports the plan without writing a byte and without creating any
 /// directory — matching the `--dry-run` contract the rest of the CLI upholds.
@@ -311,6 +366,7 @@ pub async fn run_calendar(
     }
 
     let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
+    let download_root = PathBuf::from(&cfg.download_root);
     let canvas = CanvasClient::from_config().await?;
 
     let courses = canvas.list_courses().await?;
@@ -337,14 +393,11 @@ pub async fn run_calendar(
                 continue;
             }
         };
-        let course_plan = plan(
-            &caldir_root,
-            course,
-            &assignments,
-            &[],
-            now,
-            &State::default(),
-        );
+
+        let state_path = fsutil::course_dir(&download_root, course).join("state.json");
+        let mut state = State::load(&state_path).await;
+
+        let course_plan = plan(&caldir_root, course, &assignments, &[], now, &state);
 
         if dry_run {
             tracing::info!(
@@ -360,9 +413,21 @@ pub async fn run_calendar(
         }
 
         match apply_plan(course.id, &course_plan).await {
-            Ok(()) => results.push(CourseResult::Synced {
-                writes: course_plan.writes.len(),
-            }),
+            Ok(()) => {
+                record_writes(&mut state, &course_plan.writes);
+                if let Err(e) = state.save(&state_path).await {
+                    tracing::error!(
+                        course_id = course.id,
+                        error = %e,
+                        "failed to persist calendar state; skipping the rest of this course"
+                    );
+                    results.push(CourseResult::Failed);
+                    continue;
+                }
+                results.push(CourseResult::Synced {
+                    writes: course_plan.writes.len(),
+                });
+            }
             Err(e) => {
                 tracing::error!(
                     course_id = course.id,
@@ -408,6 +473,28 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Record every successfully-applied write's content hash back into `state`,
+/// under its `calendar:{assignment_id}` key, so the next run's [`plan`] call
+/// sees what was actually written and can produce an empty plan when Canvas
+/// hasn't changed. Does not save to disk — the caller does that, and only
+/// outside `--dry-run`.
+fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
+    for write in writes {
+        let hash = content_hash(&write.content);
+        state.set(
+            calendar_state_key(write.assignment_id),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: Some(write.content.len() as u64),
+                content_hash: Some(hash),
+                last_error: None,
+                error_count: None,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +720,154 @@ mod tests {
         assert_eq!(before.writes[0].content, after.writes[0].content);
     }
 
+    // --- idempotency and date-change handling (ticket 06) ---
+
+    /// Build a `State` recording, under the `calendar:{id}` namespace, a
+    /// content hash computed independently of `plan`'s own `content_hash`
+    /// helper (using the `sha1` crate directly, the same way `syncer.rs`
+    /// does), so this does not just recompute the production code's answer
+    /// and compare it to itself.
+    fn state_with_hash(assignment_id: u64, content: &str) -> State {
+        let mut hasher = Sha1::new();
+        hasher.update(content.as_bytes());
+        let hash = hex::encode(hasher.finalize());
+        let mut state = State::default();
+        state.set(
+            format!("calendar:{assignment_id}"),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some(hash),
+                last_error: None,
+                error_count: None,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn no_changes_since_previous_state_produces_an_empty_plan() {
+        // This is the test the ticket calls out by name: "es la garantía de
+        // todo el comportamiento de este ticket." A first run captures what
+        // would be written; a previous state recording that exact content
+        // must make the second run plan nothing at all.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let first = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(first.writes.len(), 1);
+        let prev = state_with_hash(assignment.id, &first.writes[0].content);
+
+        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &prev);
+
+        assert!(second.writes.is_empty());
+        assert!(second.deletes.is_empty());
+    }
+
+    #[test]
+    fn due_date_change_produces_a_write() {
+        let root = Path::new("/caldir");
+        let original = assignment_with_due_date();
+        let first = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&original),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let prev = state_with_hash(original.id, &first.writes[0].content);
+
+        let mut rescheduled = original;
+        rescheduled.due_at = Some(
+            DateTime::parse_from_rfc3339("2026-10-15T12:00:00Z")
+                .unwrap()
+                .into(),
+        );
+
+        let got = plan(root, &course(), &[rescheduled], &[], fixed_now(), &prev);
+
+        assert_eq!(got.writes.len(), 1);
+        assert!(got.writes[0].content.contains("DUE:20261015T120000Z"));
+        // The vacuous box: the path never depends on the due date (it is
+        // derived only from the assignment id), so a date change can never
+        // orphan a previously-written file under a different name — there
+        // is nothing to delete.
+        assert!(got.deletes.is_empty());
+    }
+
+    #[test]
+    fn title_change_produces_a_write_with_same_uid_and_path() {
+        let root = Path::new("/caldir");
+        let original = assignment_with_due_date();
+        let first = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&original),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let prev = state_with_hash(original.id, &first.writes[0].content);
+
+        let mut renamed = original;
+        renamed.name = Some("Essay Final".into());
+
+        let got = plan(root, &course(), &[renamed], &[], fixed_now(), &prev);
+
+        assert_eq!(got.writes.len(), 1);
+        assert_eq!(got.writes[0].path, first.writes[0].path);
+        assert!(got.writes[0]
+            .content
+            .contains("UID:u_crawler-todo-555@u-crawler.local"));
+        assert!(got.writes[0].content.contains("SUMMARY:Essay Final"));
+        assert!(got.deletes.is_empty());
+    }
+
+    #[test]
+    fn record_writes_stores_the_content_hash_under_the_calendar_namespace() {
+        let mut state = State::default();
+        let writes = vec![PlannedWrite {
+            path: PathBuf::from("/caldir/course/deadlines/assignment-9.ics"),
+            content: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
+            assignment_id: 9,
+        }];
+
+        record_writes(&mut state, &writes);
+
+        let stored = state.get("calendar:9").expect("key recorded");
+        assert_eq!(stored.content_hash, Some(content_hash(&writes[0].content)));
+    }
+
+    #[test]
+    fn a_second_plan_against_the_recorded_state_is_empty() {
+        // End-to-end of the executor contract: plan, record what was
+        // written, plan again against that recorded state -> nothing.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let first = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let mut state = State::default();
+        record_writes(&mut state, &first.writes);
+
+        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &state);
+
+        assert!(second.writes.is_empty());
+    }
+
     fn course_with(id: u64, name: &str) -> Course {
         Course {
             id,
@@ -763,6 +998,7 @@ mod tests {
             writes: vec![PlannedWrite {
                 path,
                 content: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
+                assignment_id: 1,
             }],
             deletes: Vec::new(),
         };
