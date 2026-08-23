@@ -25,7 +25,7 @@ download_media = true           # also download Canvas-hosted attachments and in
 
 [calendar]
 enabled = true                   # set false to skip the calendar-sync flow
-caldir_root = "<your caldir root>"  # root of the caldir tree u_crawler owns exclusively
+caldir_root = "~/Documents/Caldir"  # root of the caldir tree u_crawler owns exclusively
 
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely

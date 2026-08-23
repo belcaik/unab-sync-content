@@ -136,7 +136,7 @@ download_media = true
 
 [calendar]
 enabled = true
-caldir_root = "~/Caldir"     # root of the caldir tree u_crawler owns exclusively
+caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns exclusively
 
 [zoom]
 enabled = true

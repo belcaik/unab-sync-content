@@ -307,7 +307,7 @@ download_media = true   # also download attachments and inline media
 
 [calendar]
 enabled = true                      # false makes `calendar` a no-op
-caldir_root = "~/Caldir"            # root of the caldir tree; `~` is expanded
+caldir_root = "~/Documents/Caldir"  # root of the caldir tree; `~` is expanded
 
 [zoom]
 enabled = true          # false skips Zoom entirely during `sync`
