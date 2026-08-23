@@ -1,0 +1,185 @@
+# Implementation plan — calendar-sync flow
+
+**Inputs:** `.scratch/calendar-sync/issues/01..13`, `docs/specs/calendar-sync-flow.md`, `AGENTS.md`.
+**Method:** `/implement` at the top, `/tdd` inside every lane, Sonnet subagents doing the work.
+**Orchestrator:** this session. It dispatches, gates, and merges. It does not write feature code.
+
+---
+
+## 0. Two decisions to make before Wave 0 ends
+
+Everything else in this plan has a defensible default. These two do not:
+
+1. **Who runs ticket 01.** It needs a live Radicale + caldir + a CalDAV client. A subagent
+   cannot stand that up. Either you run it and paste the findings, or you authorize the
+   orchestrator to spin up Radicale in Docker locally and drive caldir over a throwaway
+   calendar. Until 01 closes, **Wave 1 cannot start** — 04's component format depends on it.
+2. **Branch strategy.** Default assumed below: one long-lived `feat/calendar-sync` branch off
+   `main`, each ticket a squashed conventional commit onto it, subagents working in git
+   worktrees off that branch. The alternative (a PR per ticket into `main`) costs 13 review
+   cycles and buys little, since nothing before ticket 05 is independently useful.
+
+Manual-verification gates are listed in §5 — tickets 05, 07, 08, 09, 11 and 13 each carry a
+"verificado a mano" acceptance box that no agent can tick.
+
+---
+
+## 1. Dependency graph and waves
+
+```
+  01 spike ─┐
+  03 datos ─┴─> 04 planner ─┬─> 05 subcomando ─┬─> 11 resiliencia
+  02 prefactor ─────────────┘                  ├─> 12 build sin headless ──> 13 docker+cron
+                                               └─> 06 idempotencia ──> 07 prioridad
+                                                        └──> 10 borrados       │
+                                                                               ├─> 08 ventana
+                                                                               └─> 09 entregado
+```
+
+The tickets say 07/08/09 are blocked only by 05, and that is true of their *inputs*. But all
+four of 06–09 widen the same pure function, so running them in parallel buys a merge conflict
+in the one file that matters. They are serialized into a single lane instead.
+
+| Wave | Runs | Parallelism | Gate to exit |
+|---|---|---|---|
+| **W0** | 01 spike · 02 prefactor · 03 datos | 3 lanes, disjoint files | Spike answer written into the spec; `cargo test` green; 02 changed no behavior |
+| **W1** | 04 planner | 1 | Planner tests green, zero I/O in the function |
+| **W2** | 05 subcomando | 1 | Manual: run it, `caldir push`, deadlines visible in the client |
+| **W3** | 11 resiliencia ∥ 12 build sin headless | 2 lanes | Both merged; `--no-default-features` build proven |
+| **W4** | Lane A: 06 → 07 → 08 → 09 → 10 (sequential) ∥ Lane B: 13 docker | 2 lanes | Full suite + manual gates |
+
+**File-conflict map** (why the parallel lanes are safe):
+
+- W0: 01 touches `docs/specs/` only · 02 touches `fsutil.rs`/`syncer.rs`/`announcements.rs` ·
+  03 touches `canvas.rs`/`Cargo.toml`. Overlap: none.
+- W3: 11 touches the new calendar orchestration loop · 12 touches `Cargo.toml`, `main.rs`,
+  `src/zoom/*`, `.github/workflows/ci.yml`. Overlap: `Cargo.toml` (03 already landed the
+  `chrono/serde` change, so 12's edit is additive) and `main.rs` (12 adds `#[cfg]` around the
+  Zoom arm; 11 does not touch main). Low, but merge 12 second.
+- W4 Lane B (13) must not hardcode the on-disk layout, because Lane A's ticket 08 adds a
+  second directory per course. 13 mounts the caldir root and nothing below it.
+
+---
+
+## 2. Pre-agreed seams
+
+`/tdd` forbids writing a test at a seam that has not been agreed first. These are the four,
+and they are the *only* places tests go:
+
+| # | Seam | Signature (shape, not final) | Owned by |
+|---|---|---|---|
+| S1 | Course → directory | `fn course_dir(root: &Path, course: &Course) -> PathBuf` | 02 |
+| S2 | Canvas JSON → `Assignment` | serde deserialization from a captured response body | 03 |
+| S3 | **The planner** | `fn plan(course, assignments, submissions, now: DateTime<Utc>, prev: &State) -> Plan` | 04, 06, 07, 08, 09, 10 |
+| S4 | Per-course run outcome | `run_calendar(...) -> Result<CalendarSummary>` with `synced`/`failed` counts | 11 |
+
+S3 is the feature. Tests assert on the returned `Plan` — which files to write, with what
+content, which to delete — and never on how the planner got there.
+
+**Explicitly not tested** (repo has no HTTP mock server and this work does not add one, per
+spec "Fuera del alcance de los tests"): the I/O executor, the Canvas calls, the Docker image.
+Ticket 13's verification is manual and end-to-end.
+
+---
+
+## 3. Technical calls made up front
+
+So five subagents don't each re-litigate them:
+
+- **ICS emission is hand-rolled**, no crate. `VTODO`/`VEVENT` with `UID`/`DUE`/`DTSTART`/
+  `DTEND`/`PRIORITY`/`STATUS`/`SUMMARY`/`URL` is a few dozen lines of string building, and it
+  keeps the musl release target free of a new dependency the spec explicitly warns must be
+  verified against it before any tag. If the spike (01) turns up a serialization subtlety that
+  makes this a bad trade, the orchestrator revisits it — not the agent.
+- **`chrono` gains `serde`** in ticket 03 (`features = ["clock", "serde"]`). Dates become
+  `Option<DateTime<Utc>>`, per spec D2.
+- **State namespace** is `calendar:{assignment_id}`, per spec D5, stored in the existing
+  per-course `state.json` via `state::State`.
+- **UID scheme:** derived from the Canvas assignment id so it survives title and date changes
+  (ticket 04), with the `VEVENT` UID distinguishable from the `VTODO` UID of the same
+  assignment (ticket 08). Suggested: `u_crawler-todo-{assignment_id}@<host-ish>` /
+  `u_crawler-window-{assignment_id}@…`. The agent for 04 fixes the exact form and 08 follows it.
+- **Every HTTP call goes through `HttpCtx`; every list goes through `list_paginated`.**
+  `AGENTS.md` non-negotiable. `student_ids[]=self` must be pre-encoded into the path string
+  because `CanvasClient` has no query builder (spec D1).
+- **Nothing outside `main.rs` prints.** Library code emits `tracing`; user output goes through
+  `status!`.
+
+---
+
+## 4. The dispatch contract
+
+Every ticket goes to one Sonnet subagent, launched with `isolation: "worktree"`, with this
+prompt skeleton. The orchestrator fills the bracketed parts.
+
+```
+You are implementing ONE ticket in the u_crawler Rust CLI. Work only on this ticket.
+
+Read first, in order:
+  1. .scratch/calendar-sync/issues/[NN-name].md   <- your ticket, the acceptance boxes are the contract
+  2. docs/specs/calendar-sync-flow.md              <- the design; decisions D1-D12 are settled, do not redesign
+  3. AGENTS.md                                     <- non-negotiables; violating one fails the ticket
+  4. .scratch/calendar-sync/implementation-plan.md <- sections 2 and 3: your seam and the settled technical calls
+
+Invoke the `tdd` skill and follow it. Your seam is [S#: signature]. It is already agreed —
+do not propose another, and do not write a test anywhere else. One failing test, then the
+minimum code to pass it, then the next. No writing all tests up front.
+
+Constraints:
+  - Do not touch files outside [list]. If the ticket seems to require it, stop and report.
+  - Do not add a dependency without saying so in your report.
+  - Do not "fix" adjacent problems you notice. Note them in your report instead.
+  - No `unwrap`/`expect` outside tests. No `#[allow(clippy::…)]`.
+
+Before you report done, run and paste the output of:
+  cargo fmt --all -- --check
+  cargo clippy --all-targets --all-features --locked -- -D warnings
+  cargo test
+
+Commit to the current branch with a conventional-commit message (`feat:`/`refactor:`/`test:`/
+`build:` as fits). Any doc the ticket names — AGENTS.md API table, README layout,
+assets/config.toml — changes in the SAME commit.
+
+Report back:
+  - each acceptance box, ticked or not, with the evidence that ticks it
+  - the test names you added and what behavior each pins
+  - anything you had to decide that the ticket and spec did not settle
+  - anything you found that is wrong with the ticket
+```
+
+**Rules the orchestrator holds to:**
+
+- One ticket per agent. No agent gets two, even small ones — the acceptance boxes are the unit.
+- An agent that reports a box unticked has *not* finished. Send it back with the specific box,
+  or re-scope the ticket. Do not merge partial work and move on.
+- The orchestrator re-runs `cargo clippy` and `cargo test` on the merged branch after every
+  merge, not just on the agent's word. `AGENTS.md` warns that a stale local toolchain passes
+  lints CI then fails — `rustup update` before trusting a clippy run.
+- Ticket 12 has an explicit escape hatch: if separating `chromiumoxide` behind a feature flag
+  turns out to be more invasive than the module structure suggests, the agent **reports rather
+  than forces it**, and 13 proceeds with a larger image.
+
+---
+
+## 5. Human gates
+
+These cannot be delegated. The plan stops at each until you clear it.
+
+| After | You verify |
+|---|---|
+| 01 | The spike environment exists and the round-trip answers are real, not assumed. If VTODO does not survive, D3 gets revised **before** Wave 1. |
+| 05 | Run the command, `caldir push`, confirm deadlines appear in your calendar client. |
+| 07 | High-priority tasks render differently in the client. |
+| 08 | The window calendar can be hidden without hiding deadlines. |
+| 09 | A group assignment submitted by a teammate shows as completed. |
+| 11 | Point it at a nonexistent course id alongside real ones; the real ones still sync. |
+| 13 | Container runs, writes to the volume, `caldir push` from its container publishes to Radicale. |
+
+---
+
+## 6. Close-out
+
+After Wave 4: `/code-review` over the whole branch (Standards + Spec axes), then
+`superpowers:finishing-a-development-branch` to decide integration. Before any release tag,
+build the musl target — `release.yml` has no independent guard, and both the ICS work and
+ticket 12's feature flag touch what that target compiles.
