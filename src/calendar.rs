@@ -4,9 +4,10 @@
 //! [`plan`] decides which calendar files should exist for a course's
 //! assignment deadlines. It performs no I/O and reads no clock — the current
 //! instant is injected by the caller. See `docs/specs/calendar-sync-flow.md`
-//! (D3, D4, D9, D10) for the design this implements. This module only
-//! understands deadlines (`VTODO`); priority, availability windows and
-//! submission status are later work that widens the same seam.
+//! (D3, D4, D6, D9, D10) for the design this implements. This module
+//! understands deadlines (`VTODO`), each carrying a `PRIORITY` derived from
+//! Canvas grading state ([`priority_for`], spec D6, ticket 07); availability
+//! windows and submission status are later work that widens the same seam.
 //!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
@@ -127,6 +128,43 @@ fn escape_text(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
+/// Whether an assignment accepts a submission at all (spec D6/ticket 07).
+///
+/// Canvas signals "no submission" through `submission_types`: `"none"` (pure
+/// reading/informational) and `"not_graded"` (explicitly marked not
+/// gradable) are the values that mean nothing can be turned in. Anything else
+/// present in the list — `online_upload`, `on_paper`, `discussion_topic`,
+/// etc. — means a submission is accepted. A missing `submission_types`
+/// (`None`, e.g. an older Canvas payload) is treated the same as "no
+/// submission": we have no positive signal that one is accepted, so it does
+/// not get the benefit of the doubt.
+fn accepts_submission(submission_types: Option<&[String]>) -> bool {
+    match submission_types {
+        None => false,
+        Some(types) => types.iter().any(|t| t != "none" && t != "not_graded"),
+    }
+}
+
+/// Map an assignment to its `PRIORITY` value per the decided table (spec D6,
+/// ticket 07). `1` is RFC 5545's highest priority; `0` ("undefined") is never
+/// returned. Depends only on `points_possible`, `omit_from_final_grade` and
+/// `submission_types` — all Canvas state — and deliberately takes no `now`,
+/// so it cannot change on its own between runs (spec D6, D5, user story 14).
+fn priority_for(assignment: &Assignment) -> u8 {
+    if !accepts_submission(assignment.submission_types.as_deref()) {
+        // Accepts no submission: reading, informational, or not gradable.
+        return 9;
+    }
+    let counts_toward_final_grade = assignment.points_possible.unwrap_or(0.0) > 0.0
+        && assignment.omit_from_final_grade != Some(true);
+    if counts_toward_final_grade {
+        1
+    } else {
+        // Accepts a submission but does not weigh on the final grade.
+        5
+    }
+}
+
 /// Derive the `DTSTAMP` for a deadline `VTODO` (RFC 5545 §3.6.2 requires
 /// exactly one). This must NOT be `now`: doing so would make every run emit
 /// different content for unchanged data, defeating the "no changes, empty
@@ -155,6 +193,7 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> Strin
         format!("UID:{uid}"),
         format!("DTSTAMP:{}", ics_datetime(dtstamp)),
         format!("DUE:{}", ics_datetime(due)),
+        format!("PRIORITY:{}", priority_for(assignment)),
         format!(
             "SUMMARY:{}",
             escape_text(assignment.name.as_deref().unwrap_or(""))
@@ -708,6 +747,125 @@ mod tests {
             &State::default(),
         );
         assert!(got.writes[0].content.contains("DTSTAMP:20260901T235900Z"));
+    }
+
+    // --- priority heuristic (ticket 07, spec D6) ---
+    //
+    // One test per row of the decided table, plus the case the ticket calls
+    // out by name: points_possible > 0 but omitted from the final grade must
+    // NOT get the highest priority. Asserted through the Plan's rendered
+    // content (seam S3), never by calling `priority_for` directly.
+
+    #[test]
+    fn graded_and_not_omitted_gets_priority_1() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(30.0);
+        assignment.omit_from_final_grade = Some(false);
+        assignment.submission_types = Some(vec!["online_upload".into()]);
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(got.writes[0].content.contains("PRIORITY:1"));
+    }
+
+    #[test]
+    fn accepts_submission_but_zero_points_gets_priority_5() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(0.0);
+        assignment.omit_from_final_grade = None;
+        assignment.submission_types = Some(vec!["online_upload".into()]);
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(got.writes[0].content.contains("PRIORITY:5"));
+    }
+
+    #[test]
+    fn no_submission_type_gets_priority_9() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(30.0);
+        assignment.omit_from_final_grade = Some(false);
+        assignment.submission_types = Some(vec!["none".into()]);
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(got.writes[0].content.contains("PRIORITY:9"));
+    }
+
+    #[test]
+    fn not_gradable_submission_type_also_gets_priority_9() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(30.0);
+        assignment.omit_from_final_grade = Some(false);
+        assignment.submission_types = Some(vec!["not_graded".into()]);
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(got.writes[0].content.contains("PRIORITY:9"));
+    }
+
+    #[test]
+    fn missing_submission_types_gets_priority_9() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(30.0);
+        assignment.omit_from_final_grade = Some(false);
+        assignment.submission_types = None;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(got.writes[0].content.contains("PRIORITY:9"));
+    }
+
+    #[test]
+    fn points_possible_but_omitted_from_final_grade_is_not_priority_1() {
+        // The case a naive implementation gets wrong (ticket 07's explicit
+        // callout): a positive point value does not win if the assignment is
+        // marked as excluded from the final grade.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.points_possible = Some(30.0);
+        assignment.omit_from_final_grade = Some(true);
+        assignment.submission_types = Some(vec!["online_upload".into()]);
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert!(!got.writes[0].content.contains("PRIORITY:1"));
+        assert!(got.writes[0].content.contains("PRIORITY:5"));
     }
 
     #[test]
