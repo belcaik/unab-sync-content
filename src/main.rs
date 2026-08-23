@@ -206,7 +206,11 @@ async fn main() -> ExitCode {
         }
         Commands::Calendar { course_id, dry_run } => {
             match calendar::run_calendar(course_id, dry_run).await {
-                Ok(()) => ExitCode::SUCCESS,
+                Ok(calendar::RunOutcome::Success) => ExitCode::SUCCESS,
+                Ok(calendar::RunOutcome::PartialFailure) => {
+                    eprintln!("warning: some courses failed to sync; see the log for details");
+                    ExitCode::from(13) // partial failure: some courses failed
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "calendar sync failed");
                     eprintln!("error: {e}");

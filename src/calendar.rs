@@ -16,6 +16,13 @@
 //! is pulled out of the executor specifically so the one piece of decision
 //! logic in it (course/`ignored_courses` selection) stays testable without a
 //! network.
+//!
+//! Per-course resilience (spec ticket 11) has its own pure seam: a course
+//! whose assignment fetch fails is recorded as [`CourseResult::Failed`]
+//! instead of aborting the run, [`RunSummary::from_results`] folds every
+//! course's result into totals, and [`conclude`] turns that fold into a
+//! [`RunOutcome`] (or a [`TotalFailure`] when every course failed). All three
+//! are plain data in, data out — testable without touching the network.
 
 use std::path::{Path, PathBuf};
 
@@ -192,11 +199,70 @@ pub fn select_active_courses(
         .collect()
 }
 
-/// What one run of the calendar-sync flow produced.
-#[derive(Debug, Default, Clone, Copy)]
-struct RunSummary {
-    courses: usize,
-    writes: usize,
+/// The outcome of syncing one course's assignments (spec ticket 11): either
+/// it produced a plan, or fetching its assignments failed and it is skipped
+/// so the other courses can still sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CourseResult {
+    Synced { writes: usize },
+    Failed,
+}
+
+/// What one run of the calendar-sync flow produced, folded from each
+/// course's [`CourseResult`]. Pure — no network, no disk — so the fold and
+/// the verdict it feeds ([`conclude`]) are directly testable.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RunSummary {
+    pub synced: usize,
+    pub failed: usize,
+    pub writes: usize,
+}
+
+impl RunSummary {
+    /// Fold per-course results into totals.
+    pub fn from_results(results: &[CourseResult]) -> Self {
+        let mut summary = RunSummary::default();
+        for result in results {
+            match result {
+                CourseResult::Synced { writes } => {
+                    summary.synced += 1;
+                    summary.writes += writes;
+                }
+                CourseResult::Failed => summary.failed += 1,
+            }
+        }
+        summary
+    }
+}
+
+/// The overall verdict of a calendar-sync run, once every selected course has
+/// been attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// Every selected course synced.
+    Success,
+    /// At least one course synced and at least one failed. The run produced
+    /// something real but cron should still be told (exit code 13 — see
+    /// `AGENTS.md`).
+    PartialFailure,
+}
+
+/// Every selected course failed to sync: the run accomplished nothing, so it
+/// must be reported as a hard failure rather than a partial one.
+#[derive(Debug, thiserror::Error)]
+#[error("all {failed} course(s) failed to sync; see logs for per-course errors")]
+pub struct TotalFailure {
+    pub failed: usize,
+}
+
+/// Decide the run's verdict from a folded [`RunSummary`]. Pure: no network,
+/// no disk, callable with hand-built summaries in tests (spec ticket 11).
+pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
+    match (summary.synced, summary.failed) {
+        (_, 0) => Ok(RunOutcome::Success),
+        (0, failed) => Err(TotalFailure { failed }),
+        _ => Ok(RunOutcome::PartialFailure),
+    }
 }
 
 /// Runs the calendar-sync flow end to end (spec D10, the executor half).
@@ -216,14 +282,25 @@ struct RunSummary {
 /// `dry_run` reports the plan without writing a byte and without creating any
 /// directory — matching the `--dry-run` contract the rest of the CLI upholds.
 ///
-/// A course whose assignment fetch fails aborts the whole run for now; ticket
-/// 11 (per-course error isolation) is deliberately not implemented here.
-pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
+/// Per spec ticket 11 (resiliencia por ramo), a course whose assignment fetch
+/// fails does **not** abort the run: it is logged with its course id and
+/// counted as failed via [`CourseResult::Failed`], and the remaining courses
+/// still sync. The fold of every course's [`CourseResult`] into a
+/// [`RunSummary`] and the verdict derived from it ([`conclude`]) are pure and
+/// covered by unit tests; only the network/disk plumbing around them is
+/// exercised here. The return type widens from `anyhow::Result<()>` to
+/// `anyhow::Result<RunOutcome>` so `main.rs` can tell a full success apart
+/// from a partial one (exit code 13) — a hard error (config, auth, or every
+/// course failing) still comes back as `Err`, unchanged from before.
+pub async fn run_calendar(
+    filter_course_id: Option<u64>,
+    dry_run: bool,
+) -> anyhow::Result<RunOutcome> {
     let cfg = Config::load_or_init()?;
 
     if !cfg.calendar.enabled {
         status!("Calendar sync is disabled (calendar.enabled = false).");
-        return Ok(());
+        return Ok(RunOutcome::Success);
     }
 
     let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
@@ -234,14 +311,25 @@ pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyho
 
     if selected.is_empty() {
         status!("No matching courses.");
-        return Ok(());
+        return Ok(RunOutcome::Success);
     }
 
     let now = Utc::now();
-    let mut summary = RunSummary::default();
+    let mut results = Vec::with_capacity(selected.len());
 
     for course in &selected {
-        let assignments = canvas.list_assignments(course.id).await?;
+        let assignments = match canvas.list_assignments(course.id).await {
+            Ok(assignments) => assignments,
+            Err(e) => {
+                tracing::error!(
+                    course_id = course.id,
+                    error = %e,
+                    "failed to fetch assignments; skipping this course"
+                );
+                results.push(CourseResult::Failed);
+                continue;
+            }
+        };
         let course_plan = plan(
             &caldir_root,
             course,
@@ -251,9 +339,6 @@ pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyho
             &State::default(),
         );
 
-        summary.courses += 1;
-        summary.writes += course_plan.writes.len();
-
         if dry_run {
             tracing::info!(
                 course_id = course.id,
@@ -261,6 +346,9 @@ pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyho
                 deletes = course_plan.deletes.len(),
                 "dry-run calendar plan"
             );
+            results.push(CourseResult::Synced {
+                writes: course_plan.writes.len(),
+            });
             continue;
         }
 
@@ -277,15 +365,23 @@ pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyho
                 Err(e) => return Err(e.into()),
             }
         }
+
+        results.push(CourseResult::Synced {
+            writes: course_plan.writes.len(),
+        });
     }
 
+    let summary = RunSummary::from_results(&results);
+
     status!(
-        "{}Calendar: {} deadline file(s) across {} course(s)",
+        "{}Calendar: {} deadline file(s) across {} course(s) synced, {} failed",
         if dry_run { "DRY-RUN: " } else { "" },
         summary.writes,
-        summary.courses,
+        summary.synced,
+        summary.failed,
     );
-    Ok(())
+
+    conclude(summary).map_err(anyhow::Error::from)
 }
 
 #[cfg(test)]
@@ -557,5 +653,64 @@ mod tests {
         let got = select_active_courses(courses, Some(2), &[]);
         let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
         assert_eq!(ids, vec![2]);
+    }
+
+    // --- per-course resilience (ticket 11): pure fold of per-course results
+    // into a summary, and the verdict derived from it. No network involved. ---
+
+    #[test]
+    fn summary_counts_synced_courses_and_their_writes() {
+        let results = vec![
+            CourseResult::Synced { writes: 3 },
+            CourseResult::Synced { writes: 2 },
+        ];
+        let summary = RunSummary::from_results(&results);
+        assert_eq!(summary.synced, 2);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.writes, 5);
+    }
+
+    #[test]
+    fn summary_counts_failed_courses_separately_from_synced() {
+        let results = vec![
+            CourseResult::Synced { writes: 1 },
+            CourseResult::Failed,
+            CourseResult::Synced { writes: 4 },
+        ];
+        let summary = RunSummary::from_results(&results);
+        assert_eq!(summary.synced, 2);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.writes, 5);
+    }
+
+    #[test]
+    fn all_courses_synced_concludes_success() {
+        let summary = RunSummary {
+            synced: 3,
+            failed: 0,
+            writes: 7,
+        };
+        assert_eq!(conclude(summary).unwrap(), RunOutcome::Success);
+    }
+
+    #[test]
+    fn some_courses_failed_concludes_partial_failure() {
+        let summary = RunSummary {
+            synced: 2,
+            failed: 1,
+            writes: 4,
+        };
+        assert_eq!(conclude(summary).unwrap(), RunOutcome::PartialFailure);
+    }
+
+    #[test]
+    fn all_courses_failed_concludes_total_failure() {
+        let summary = RunSummary {
+            synced: 0,
+            failed: 3,
+            writes: 0,
+        };
+        let err = conclude(summary).unwrap_err();
+        assert_eq!(err.failed, 3);
     }
 }

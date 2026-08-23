@@ -102,8 +102,9 @@ turned off without touching the command line.
 | `10` | Config error, including "config was just created, go edit it" |
 | `11` | Auth error |
 | `12` | Network / rate-limit / runtime failure |
+| `13` | `calendar` partial failure: at least one course synced and at least one failed. All courses failing is **not** this code — it is a hard failure and surfaces as `12` instead. |
 
-Codes 13–15 are not currently emitted. Do not document them until they are.
+Codes 14–15 are not currently emitted. Do not document them until they are.
 
 ---
 
@@ -324,7 +325,10 @@ Documented so they are not rediscovered as surprises:
   unreadable page therefore kills the whole run, including courses not yet
   reached — while an unreadable *file* is merely recorded via
   `State::record_error` and skipped. The file behaviour is the intended one;
-  aligning pages and assignments with it is the obvious fix.
+  aligning pages and assignments with it is the obvious fix. `calendar` does
+  **not** share this edge: a course whose assignment fetch fails is logged and
+  skipped, the rest of the run continues, and the run reports exit code `13`
+  if the failure was partial (spec ticket 11).
 * **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
   `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
