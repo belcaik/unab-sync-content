@@ -28,7 +28,7 @@
 //! [`RunOutcome`] (or a [`TotalFailure`] when every course failed). All three
 //! are plain data in, data out — testable without touching the network.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -58,11 +58,30 @@ pub struct PlannedWrite {
     pub state_key: String,
 }
 
+/// One calendar file to delete, in full (spec D5, ticket 10): the assignment
+/// it belongs to no longer appears in Canvas's response, so its projected
+/// component must stop existing on disk — `caldir push` propagates the
+/// removal to the CalDAV server (spec D8; verified empirically by the
+/// ticket 01 spike), so it is enough for u_crawler to remove the local file.
+///
+/// Carries the same `assignment_id`/`state_key` pairing as [`PlannedWrite`]
+/// so the executor can, after removing the file, also drop the matching
+/// `state.json` entry ([`record_deletes`]) — without that, the same
+/// assignment would look "deleted" again on every subsequent run forever,
+/// since its old state entry would keep failing to match anything in a
+/// Canvas response that (rightly) no longer mentions it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedDelete {
+    pub path: PathBuf,
+    pub assignment_id: u64,
+    pub state_key: String,
+}
+
 /// The outcome of planning: which files to write and which to delete.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Plan {
     pub writes: Vec<PlannedWrite>,
-    pub deletes: Vec<PathBuf>,
+    pub deletes: Vec<PlannedDelete>,
 }
 
 /// The on-disk name of the directory holding deadline `VTODO` files for a
@@ -122,23 +141,34 @@ fn window_filename(assignment_id: u64) -> String {
     format!("assignment-{assignment_id}.ics")
 }
 
-/// The `state.json` namespace for a deadline `VTODO`'s projected content
-/// (spec D5): `calendar:{assignment_id}`. Distinct from the content flow's
-/// own `assignment:{id}` key (`syncer.rs`) — same assignment, different
-/// projection, so a separate key stops the two flows from clobbering each
-/// other's bookkeeping.
+/// Prefix of the `state.json` namespace for a deadline `VTODO`'s projected
+/// content (spec D5): `calendar:{assignment_id}`. Distinct from the content
+/// flow's own `assignment:{id}` key (`syncer.rs`) — same assignment,
+/// different projection, so a separate key stops the two flows from
+/// clobbering each other's bookkeeping. Exposed as a constant (not just
+/// baked into [`calendar_state_key`]) because the reconciliation pass in
+/// [`plan`] (ticket 10) needs to recognize this namespace when scanning
+/// `prev`'s keys, not just build one.
+const CALENDAR_KEY_PREFIX: &str = "calendar:";
+
+/// Prefix of the `state.json` namespace for an availability-window
+/// `VEVENT`'s projected content (spec D5, ticket 08):
+/// `calendar-window:{assignment_id}`. Distinct from
+/// [`CALENDAR_KEY_PREFIX`] — the VTODO and VEVENT for the same assignment
+/// are two different projections with two different hashes, and sharing a
+/// namespace would make writing (or deleting) one component affect the
+/// other regardless of its own state.
+const WINDOW_KEY_PREFIX: &str = "calendar-window:";
+
+/// The `state.json` key for a deadline `VTODO`'s projected content.
 fn calendar_state_key(assignment_id: u64) -> String {
-    format!("calendar:{assignment_id}")
+    format!("{CALENDAR_KEY_PREFIX}{assignment_id}")
 }
 
-/// The `state.json` namespace for an availability-window `VEVENT`'s projected
-/// content (spec D5, ticket 08): `calendar-window:{assignment_id}`. Distinct
-/// from [`calendar_state_key`]'s `calendar:{assignment_id}` — the VTODO and
-/// VEVENT for the same assignment are two different projections with two
-/// different hashes, and sharing one key would make writing one component
-/// mark the other "unchanged" (or vice versa) regardless of its own content.
+/// The `state.json` key for an availability-window `VEVENT`'s projected
+/// content.
 fn window_state_key(assignment_id: u64) -> String {
-    format!("calendar-window:{assignment_id}")
+    format!("{WINDOW_KEY_PREFIX}{assignment_id}")
 }
 
 /// Hash rendered content the same way `syncer.rs` hashes markdown before
@@ -361,6 +391,26 @@ fn render_vevent(
 /// zero- or negative-length event. An assignment with no `due_at` produces
 /// neither component: a window needs both ends, so it cannot exist without a
 /// due date either.
+///
+/// **Deletion (spec D5, ticket 10).** Canvas is the source of truth: what
+/// `assignments` does not mention today is not in the calendar. After
+/// planning writes, this scans `prev` for every `calendar:{id}` and
+/// `calendar-window:{id}` entry and, for each whose `{id}` is not the id of
+/// any assignment in `assignments`, plans a delete of that component's file
+/// — both the `VTODO` and the `VEVENT` when both existed, since they are
+/// tracked under separate state keys and neither implies the other. This is
+/// why `plan` takes the *whole* `assignments` list for the course, not just
+/// the ones with a `due_at`: an assignment id absent from it entirely is
+/// what "deleted from Canvas" means here, deliberately narrower than "lost
+/// its due date" (out of this ticket's contract).
+///
+/// **Safety.** `plan` trusts `assignments` completely — it has no way to
+/// tell "Canvas returned zero assignments" apart from "the fetch failed and
+/// an empty list was substituted for it". That distinction has to be made
+/// by the caller *before* calling `plan`, which is exactly what
+/// [`plan_for_course`] exists to make into a testable, non-optional step:
+/// see its doc comment for how a failed fetch is kept from ever reaching
+/// this function.
 pub fn plan(
     caldir_root: &Path,
     course: &Course,
@@ -426,10 +476,76 @@ pub fn plan(
             }
         }
     }
-    Plan {
-        writes,
-        deletes: Vec::new(),
+
+    // Reconciliation (spec D5, ticket 10): anything `prev` remembers under a
+    // calendar namespace whose assignment id is no longer in `assignments`
+    // has been deleted from Canvas, so its file must go too.
+    let current_ids: HashSet<u64> = assignments.iter().map(|a| a.id).collect();
+    let mut deletes = Vec::new();
+    for key in prev.items.keys() {
+        if let Some(id) = key
+            .strip_prefix(CALENDAR_KEY_PREFIX)
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if !current_ids.contains(&id) {
+                deletes.push(PlannedDelete {
+                    path: deadlines_dir.join(deadline_filename(id)),
+                    assignment_id: id,
+                    state_key: key.clone(),
+                });
+            }
+        } else if let Some(id) = key
+            .strip_prefix(WINDOW_KEY_PREFIX)
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if !current_ids.contains(&id) {
+                deletes.push(PlannedDelete {
+                    path: windows_dir.join(window_filename(id)),
+                    assignment_id: id,
+                    state_key: key.clone(),
+                });
+            }
+        }
     }
+
+    Plan { writes, deletes }
+}
+
+/// Gate [`plan`] on both of a course's fetches having actually succeeded
+/// (spec ticket 10's safety requirement): "un ramo que falla al consultarse
+/// NO dispara el borrado de sus componentes". `plan` itself cannot make this
+/// distinction — an empty `Vec<Assignment>` and a failed fetch look
+/// identical once they are both just `&[Assignment]` — so the two have to be
+/// told apart *before* `plan` is called, not inside it. `Err(())` stands in
+/// for "the fetch failed"; the caller has already logged the real error by
+/// the time it gets here; only the fact of failure matters for this
+/// decision.
+///
+/// Returns `None` — no plan attempted at all, not an empty one — when either
+/// fetch failed, so a network blip can never be mistaken for "Canvas says
+/// this course now has zero assignments" and wipe every calendar file for
+/// it. `run_calendar` is the only caller; extracted here (alongside
+/// [`select_active_courses`] and [`conclude`]) so the guarantee is a
+/// testable predicate rather than something only visible by reading
+/// `run_calendar`'s control flow.
+pub fn plan_for_course(
+    caldir_root: &Path,
+    course: &Course,
+    assignments: Result<Vec<Assignment>, ()>,
+    submissions: Result<Vec<Submission>, ()>,
+    now: DateTime<Utc>,
+    prev: &State,
+) -> Option<Plan> {
+    let assignments = assignments.ok()?;
+    let submissions = submissions.ok()?;
+    Some(plan(
+        caldir_root,
+        course,
+        &assignments,
+        &submissions,
+        now,
+        prev,
+    ))
 }
 
 /// Select which courses the calendar-sync executor should plan for.
@@ -461,7 +577,7 @@ pub fn select_active_courses(
 /// so the other courses can still sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CourseResult {
-    Synced { writes: usize },
+    Synced { writes: usize, deletes: usize },
     Failed,
 }
 
@@ -473,6 +589,7 @@ pub struct RunSummary {
     pub synced: usize,
     pub failed: usize,
     pub writes: usize,
+    pub deletes: usize,
 }
 
 impl RunSummary {
@@ -481,9 +598,10 @@ impl RunSummary {
         let mut summary = RunSummary::default();
         for result in results {
             match result {
-                CourseResult::Synced { writes } => {
+                CourseResult::Synced { writes, deletes } => {
                     summary.synced += 1;
                     summary.writes += writes;
+                    summary.deletes += deletes;
                 }
                 CourseResult::Failed => summary.failed += 1,
             }
@@ -565,6 +683,19 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// a full success apart from a partial one (exit code 13) — a hard error
 /// (config, auth, or every course failing) still comes back as `Err`,
 /// unchanged from before.
+///
+/// **Deletion (spec D5, ticket 10).** [`plan`] compares `assignments`
+/// against `state` and plans a delete for any component whose assignment
+/// Canvas no longer mentions. [`plan_for_course`] is the gate that decides
+/// whether `plan` runs at all: assignments are only unwrapped to a bare
+/// `Vec` (losing the fetch-failed/fetch-empty distinction) *after* both
+/// fetches are confirmed `Ok`, so a failed fetch can never reach `plan` and
+/// be mistaken for "this course now has no assignments". On a successful
+/// apply, [`record_deletes`] removes the deleted components' entries from
+/// `state` — the mirror of [`record_writes`] — so a deleted assignment is
+/// not deleted again, forever, on every subsequent run. In `--dry-run`,
+/// deletes are reported (see the `deletes` field logged below) and nothing
+/// is removed, on disk or in `state`, exactly like writes.
 pub async fn run_calendar(
     filter_course_id: Option<u64>,
     dry_run: bool,
@@ -592,43 +723,50 @@ pub async fn run_calendar(
     let mut results = Vec::with_capacity(selected.len());
 
     for course in &selected {
-        let assignments = match canvas.list_assignments(course.id).await {
-            Ok(assignments) => assignments,
-            Err(e) => {
-                tracing::error!(
-                    course_id = course.id,
-                    error = %e,
-                    "failed to fetch assignments; skipping this course"
-                );
-                results.push(CourseResult::Failed);
-                continue;
-            }
-        };
+        let assignments: Result<Vec<Assignment>, ()> =
+            match canvas.list_assignments(course.id).await {
+                Ok(assignments) => Ok(assignments),
+                Err(e) => {
+                    tracing::error!(
+                        course_id = course.id,
+                        error = %e,
+                        "failed to fetch assignments; skipping this course"
+                    );
+                    Err(())
+                }
+            };
 
-        let submissions = match canvas.list_submissions(course.id).await {
-            Ok(submissions) => submissions,
-            Err(e) => {
-                tracing::error!(
-                    course_id = course.id,
-                    error = %e,
-                    "failed to fetch submissions; skipping this course"
-                );
-                results.push(CourseResult::Failed);
-                continue;
+        // Only attempt the submissions fetch when the assignments fetch
+        // already succeeded — no point spending a second call on a course
+        // that is going to be skipped regardless.
+        let submissions: Result<Vec<Submission>, ()> = if assignments.is_ok() {
+            match canvas.list_submissions(course.id).await {
+                Ok(submissions) => Ok(submissions),
+                Err(e) => {
+                    tracing::error!(
+                        course_id = course.id,
+                        error = %e,
+                        "failed to fetch submissions; skipping this course"
+                    );
+                    Err(())
+                }
             }
+        } else {
+            Err(())
         };
 
         let state_path = fsutil::course_dir(&download_root, course).join("state.json");
         let mut state = State::load(&state_path).await;
 
-        let course_plan = plan(
-            &caldir_root,
-            course,
-            &assignments,
-            &submissions,
-            now,
-            &state,
-        );
+        // Ticket 10's safety requirement: a fetch failure must never reach
+        // `plan` disguised as an empty `Vec` — see `plan_for_course`'s doc
+        // comment. `None` here means "no plan attempted", not "empty plan".
+        let Some(course_plan) =
+            plan_for_course(&caldir_root, course, assignments, submissions, now, &state)
+        else {
+            results.push(CourseResult::Failed);
+            continue;
+        };
 
         if dry_run {
             tracing::info!(
@@ -639,6 +777,7 @@ pub async fn run_calendar(
             );
             results.push(CourseResult::Synced {
                 writes: course_plan.writes.len(),
+                deletes: course_plan.deletes.len(),
             });
             continue;
         }
@@ -646,6 +785,7 @@ pub async fn run_calendar(
         match apply_plan(course.id, &course_plan).await {
             Ok(()) => {
                 record_writes(&mut state, &course_plan.writes);
+                record_deletes(&mut state, &course_plan.deletes);
                 if let Err(e) = state.save(&state_path).await {
                     tracing::error!(
                         course_id = course.id,
@@ -657,6 +797,7 @@ pub async fn run_calendar(
                 }
                 results.push(CourseResult::Synced {
                     writes: course_plan.writes.len(),
+                    deletes: course_plan.deletes.len(),
                 });
             }
             Err(e) => {
@@ -673,9 +814,10 @@ pub async fn run_calendar(
     let summary = RunSummary::from_results(&results);
 
     status!(
-        "{}Calendar: {} deadline file(s) across {} course(s) synced, {} failed",
+        "{}Calendar: {} deadline file(s) written, {} removed, across {} course(s) synced, {} failed",
         if dry_run { "DRY-RUN: " } else { "" },
         summary.writes,
+        summary.deletes,
         summary.synced,
         summary.failed,
     );
@@ -697,8 +839,10 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
         tracing::info!(course_id, path = %write.path.display(), "wrote calendar file");
     }
     for delete in &course_plan.deletes {
-        match tokio::fs::remove_file(delete).await {
-            Ok(()) => tracing::info!(course_id, path = %delete.display(), "removed calendar file"),
+        match tokio::fs::remove_file(&delete.path).await {
+            Ok(()) => {
+                tracing::info!(course_id, path = %delete.path.display(), "removed calendar file")
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
@@ -725,6 +869,20 @@ fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
                 error_count: None,
             },
         );
+    }
+}
+
+/// Remove every successfully-applied delete's entry from `state` (spec D5,
+/// ticket 10), the mirror of [`record_writes`]. Without this, an assignment
+/// removed from Canvas would look "deleted" again on every subsequent run
+/// forever: `plan` would keep finding its stale `calendar:{id}` /
+/// `calendar-window:{id}` entry in `prev`, plan another (harmless but
+/// pointless) delete of an already-missing file, and never let the state
+/// entry go. Does not save to disk — the caller does that, and only outside
+/// `--dry-run`.
+fn record_deletes(state: &mut State, deletes: &[PlannedDelete]) {
+    for delete in deletes {
+        state.items.remove(&delete.state_key);
     }
 }
 
@@ -825,7 +983,7 @@ mod tests {
             fixed_now(),
             &State::default(),
         );
-        assert_eq!(got.deletes, Vec::<PathBuf>::new());
+        assert_eq!(got.deletes, Vec::<PlannedDelete>::new());
         assert_eq!(got.writes.len(), 1);
         let write = &got.writes[0];
         assert_eq!(
@@ -1558,26 +1716,40 @@ mod tests {
     #[test]
     fn summary_counts_synced_courses_and_their_writes() {
         let results = vec![
-            CourseResult::Synced { writes: 3 },
-            CourseResult::Synced { writes: 2 },
+            CourseResult::Synced {
+                writes: 3,
+                deletes: 0,
+            },
+            CourseResult::Synced {
+                writes: 2,
+                deletes: 1,
+            },
         ];
         let summary = RunSummary::from_results(&results);
         assert_eq!(summary.synced, 2);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.writes, 5);
+        assert_eq!(summary.deletes, 1);
     }
 
     #[test]
     fn summary_counts_failed_courses_separately_from_synced() {
         let results = vec![
-            CourseResult::Synced { writes: 1 },
+            CourseResult::Synced {
+                writes: 1,
+                deletes: 0,
+            },
             CourseResult::Failed,
-            CourseResult::Synced { writes: 4 },
+            CourseResult::Synced {
+                writes: 4,
+                deletes: 2,
+            },
         ];
         let summary = RunSummary::from_results(&results);
         assert_eq!(summary.synced, 2);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.writes, 5);
+        assert_eq!(summary.deletes, 2);
     }
 
     #[test]
@@ -1586,6 +1758,7 @@ mod tests {
             synced: 3,
             failed: 0,
             writes: 7,
+            deletes: 0,
         };
         assert_eq!(conclude(summary).unwrap(), RunOutcome::Success);
     }
@@ -1596,6 +1769,7 @@ mod tests {
             synced: 2,
             failed: 1,
             writes: 4,
+            deletes: 0,
         };
         assert_eq!(conclude(summary).unwrap(), RunOutcome::PartialFailure);
     }
@@ -1606,6 +1780,7 @@ mod tests {
             synced: 0,
             failed: 3,
             writes: 0,
+            deletes: 0,
         };
         let err = conclude(summary).unwrap_err();
         assert_eq!(err.failed, 3);
@@ -1651,11 +1826,282 @@ mod tests {
         let path = tmp.path().join("does-not-exist.ics");
         let course_plan = Plan {
             writes: Vec::new(),
-            deletes: vec![path],
+            deletes: vec![PlannedDelete {
+                path,
+                assignment_id: 1,
+                state_key: calendar_state_key(1),
+            }],
         };
 
         let result = apply_plan(1, &course_plan).await;
 
         assert!(result.is_ok());
+    }
+
+    // --- deletion reconciliation (ticket 10, spec D5) ---
+    //
+    // The three cases the ticket names by name: an assignment gone from
+    // Canvas gets deleted, one still present does not, and a failed course
+    // fetch must never reach `plan` disguised as an empty list. Plus: both
+    // the VTODO and the VEVENT go when both existed, and `record_deletes`
+    // stops the state from referencing what was just deleted.
+
+    #[test]
+    fn assignment_absent_from_canvas_deletes_both_vtodo_and_vevent() {
+        let root = Path::new("/caldir");
+        let deleted_id = 555;
+        let mut prev = State::default();
+        prev.set(
+            calendar_state_key(deleted_id),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("stale-todo-hash".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+        prev.set(
+            window_state_key(deleted_id),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("stale-window-hash".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+
+        // Canvas's current response for this course no longer mentions
+        // `deleted_id` at all.
+        let got = plan(root, &course(), &[], &[], fixed_now(), &prev);
+
+        assert!(got.writes.is_empty());
+        assert_eq!(got.deletes.len(), 2);
+
+        let todo_delete = got
+            .deletes
+            .iter()
+            .find(|d| d.state_key == calendar_state_key(deleted_id))
+            .expect("vtodo delete planned");
+        assert_eq!(
+            todo_delete.path,
+            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+        );
+        assert_eq!(todo_delete.assignment_id, deleted_id);
+
+        let window_delete = got
+            .deletes
+            .iter()
+            .find(|d| d.state_key == window_state_key(deleted_id))
+            .expect("vevent delete planned");
+        assert_eq!(
+            window_delete.path,
+            Path::new("/caldir/Intro_to_Testing_TST101/windows/assignment-555.ics")
+        );
+        assert_eq!(window_delete.assignment_id, deleted_id);
+    }
+
+    #[test]
+    fn assignment_still_present_in_canvas_is_not_deleted() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date(); // id 555
+        let content = render_vtodo(
+            &deadline_uid(assignment.id),
+            &assignment,
+            assignment.due_at.unwrap(),
+            false,
+        );
+        let prev = state_with_hash(assignment.id, &content);
+
+        let got = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &prev,
+        );
+
+        assert!(got.deletes.is_empty());
+    }
+
+    #[test]
+    fn a_failed_course_fetch_never_reaches_plan_and_produces_no_deletions() {
+        // Ticket 10's safety requirement, in the form the ticket asks for: a
+        // course whose assignment fetch failed must not trigger a delete of
+        // its previously-tracked components. `plan_for_course` is the gate
+        // -- an `Err` for either fetch must short-circuit to `None` before
+        // `plan`'s reconciliation pass (which would otherwise see "no
+        // assignments" and delete everything the previous state remembers)
+        // ever runs.
+        let root = Path::new("/caldir");
+        let assignment_id = 555;
+        let mut prev = State::default();
+        prev.set(
+            calendar_state_key(assignment_id),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("stale-hash".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+
+        let assignments_failed: Result<Vec<Assignment>, ()> = Err(());
+        let submissions_failed: Result<Vec<Submission>, ()> = Err(());
+
+        let got = plan_for_course(
+            root,
+            &course(),
+            assignments_failed,
+            submissions_failed,
+            fixed_now(),
+            &prev,
+        );
+
+        // No plan at all was produced -- not an empty one.
+        assert!(got.is_none());
+
+        // The state entry from before is left completely untouched: it
+        // still compares as "the same stale hash it always was", which is
+        // exactly what must be true after a failure.
+        assert_eq!(
+            prev.get(&calendar_state_key(assignment_id))
+                .and_then(|i| i.content_hash.as_deref()),
+            Some("stale-hash")
+        );
+    }
+
+    #[test]
+    fn assignments_fetch_ok_but_submissions_fetch_failed_also_produces_no_plan() {
+        // Both fetches must succeed, not just the first one -- a submissions
+        // failure is exactly as dangerous as an assignments failure, since
+        // `plan` needs both to render a `VTODO`'s STATUS correctly.
+        let root = Path::new("/caldir");
+        let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
+        let submissions_failed: Result<Vec<Submission>, ()> = Err(());
+
+        let got = plan_for_course(
+            root,
+            &course(),
+            assignments_ok,
+            submissions_failed,
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn both_fetches_succeeding_produces_a_plan() {
+        let root = Path::new("/caldir");
+        let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
+        let submissions_ok: Result<Vec<Submission>, ()> = Ok(vec![]);
+
+        let got = plan_for_course(
+            root,
+            &course(),
+            assignments_ok,
+            submissions_ok,
+            fixed_now(),
+            &State::default(),
+        )
+        .expect("both fetches succeeded");
+
+        assert_eq!(got.writes.len(), 1);
+    }
+
+    #[test]
+    fn record_deletes_removes_the_state_entry() {
+        let mut state = State::default();
+        state.set(
+            calendar_state_key(9),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("whatever".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+        let deletes = vec![PlannedDelete {
+            path: PathBuf::from("/caldir/course/deadlines/assignment-9.ics"),
+            assignment_id: 9,
+            state_key: calendar_state_key(9),
+        }];
+
+        record_deletes(&mut state, &deletes);
+
+        assert!(state.get(&calendar_state_key(9)).is_none());
+    }
+
+    #[test]
+    fn deleting_one_assignment_does_not_disturb_a_kept_ones_state_entry() {
+        let mut state = State::default();
+        state.set(
+            calendar_state_key(1),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("kept".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+        state.set(
+            calendar_state_key(2),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("gone".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+        let deletes = vec![PlannedDelete {
+            path: PathBuf::from("/caldir/course/deadlines/assignment-2.ics"),
+            assignment_id: 2,
+            state_key: calendar_state_key(2),
+        }];
+
+        record_deletes(&mut state, &deletes);
+
+        assert!(state.get(&calendar_state_key(1)).is_some());
+        assert!(state.get(&calendar_state_key(2)).is_none());
+    }
+
+    #[test]
+    fn an_unrelated_state_key_with_the_calendar_prefix_as_a_substring_is_not_touched() {
+        // `state.json` is shared with `syncer.rs`, which uses its own
+        // `assignment:{id}` namespace for unrelated bookkeeping. This pins
+        // that the reconciliation scan only matches the real
+        // `calendar:`/`calendar-window:` prefixes, not anything that merely
+        // contains "calendar" as a substring elsewhere in the key.
+        let root = Path::new("/caldir");
+        let mut prev = State::default();
+        prev.set(
+            "assignment:555".to_string(),
+            ItemState {
+                etag: None,
+                updated_at: None,
+                size: None,
+                content_hash: Some("unrelated".into()),
+                last_error: None,
+                error_count: None,
+            },
+        );
+
+        let got = plan(root, &course(), &[], &[], fixed_now(), &prev);
+
+        assert!(got.deletes.is_empty());
     }
 }
