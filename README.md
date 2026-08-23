@@ -15,6 +15,7 @@ off.
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Install](#install)
+  - [Building without Zoom](#building-without-zoom)
 - [Getting started](#getting-started)
 - [Commands](#commands)
 - [Configuration](#configuration)
@@ -49,9 +50,9 @@ so `max_rps` and `concurrency` apply to everything.
 | Requirement | Notes |
 |---|---|
 | Rust 1.70+ | Only to build from source. |
-| Git | One dependency (`chromiumoxide`) is fetched from a Git repository at build time, so the build needs network and `git`. |
-| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`. |
-| Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. |
+| Git | Only with the default `zoom` feature: `chromiumoxide` is fetched from a Git repository at build time, so that build needs network and `git`. `cargo build --no-default-features` needs neither — see [Building without Zoom](#building-without-zoom). |
+| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`, or if built with `--no-default-features`. |
+| Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. Not needed at all with `--no-default-features`. |
 
 Linux and macOS are the primary targets; the release workflow also builds for
 Windows.
@@ -75,6 +76,28 @@ Verify:
 u_crawler --version
 u_crawler --help
 ```
+
+### Building without Zoom
+
+The headless browser (`chromiumoxide`) and the whole Zoom flow — session
+capture, SSO, recording listing and download — live behind a cargo feature
+named `zoom`, which is **on by default**. The Canvas content sync, the
+announcements flow and the calendar-sync flow never touch a browser, so they
+build and run fully without it:
+
+```bash
+cargo build --release --no-default-features
+```
+
+This build needs neither `git` (to resolve `chromiumoxide`) nor Chrome/Chromium
+nor `ffmpeg`, and produces a smaller binary — the intended build for a
+cron/calendar-only deployment. `sync` still runs, but silently skips the Zoom
+stage; `zoom flow` still parses as a command but exits with a clear error
+telling you this build does not include it, instead of failing at compile time
+or behaving like a silent no-op.
+
+Everything else — `cargo build`, `cargo build --release`, `cargo test`,
+`cargo clippy --all-features` — keeps today's full behaviour unchanged.
 
 ---
 
@@ -218,7 +241,10 @@ downloads nothing** — use `zoom flow` for that.
 ### `zoom flow`
 
 Captures a Zoom session and downloads that course's recordings. See
-[Zoom recordings](#zoom-recordings).
+[Zoom recordings](#zoom-recordings). Requires a build with the default `zoom`
+feature; a `--no-default-features` build accepts the command but reports that
+it is unavailable and exits `12` (see
+[Building without Zoom](#building-without-zoom)).
 
 | Flag | Required | Description |
 |---|---|---|
@@ -549,8 +575,18 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test
 ```
 
-CI runs all three, plus release builds for Linux and Windows. `Cargo.toml`
-carries a `[lints.clippy]` table so local runs deny the same lints CI does.
+Also verify the `--no-default-features` build (see
+[Building without Zoom](#building-without-zoom)) before relying on it:
+
+```bash
+cargo clippy --all-targets --no-default-features --locked -- -D warnings
+cargo test --no-default-features
+```
+
+CI runs all of the above, for both feature configurations, plus release builds
+for Linux and Windows (and, for the musl target specifically, both
+configurations too — see `.github/workflows/ci.yml`). `Cargo.toml` carries a
+`[lints.clippy]` table so local runs deny the same lints CI does.
 
 `AGENTS.md` documents the internal architecture and the invariants the code
 holds to. Some worth knowing before changing anything:

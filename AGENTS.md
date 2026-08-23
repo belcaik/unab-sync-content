@@ -43,7 +43,12 @@ recordings that session can reach.
 * **Config:** TOML (`directories`, `toml`)
 * **Parsing:** `serde`, `serde_json`, `regex`, `url`, `html2md`
 * **Storage:** `rusqlite` (Zoom session store), JSON (`state.json` per course)
-* **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml)
+* **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml).
+  Gated behind the default-on `zoom` cargo feature, along with the rest of the
+  Zoom flow (`rusqlite`, `cookie`, `cookie_store`, `reqwest_cookie_store`,
+  `base64`, `futures`). `cargo build --no-default-features` drops all of
+  these and needs neither network+git for `chromiumoxide` nor a browser —
+  see "Building without Zoom" below.
 * **Errors:** `thiserror` for typed module errors, `anyhow` for orchestration
 * **UX:** `indicatif`
 * **Process:** `tokio::process` (for `ffmpeg`)
@@ -68,6 +73,38 @@ recordings that session can reach.
 * **Tests:** `cargo test`. Prefer pure functions that can be tested without a
   network or a browser — that is why `links`, `download`, `zoom::app_conf` and
   `zoom::sso` are separate from the flows that call them.
+
+---
+
+## Building without Zoom
+
+The `zoom` cargo feature (default-on) gates `src/zoom/` in its entirety and
+the `chromiumoxide` dependency that only it uses:
+
+```bash
+cargo build --release --no-default-features   # no browser, no git dependency
+cargo test --no-default-features
+cargo clippy --all-targets --no-default-features --locked -- -D warnings
+```
+
+With the feature off:
+
+* `src/lib.rs` does not compile `pub mod zoom` at all.
+* `sync` still runs, but the Zoom stage is a no-op (logged at `info`) instead
+  of calling `zoom::zoom_flow`, regardless of `zoom.enabled` in the config.
+* `zoom flow` still exists as a `clap` subcommand — it is not removed from
+  `--help` — but its handler prints a clear "this build does not include the
+  Zoom flow" message to stderr and exits `12`, rather than failing to parse or
+  silently doing nothing.
+* `tests/zoom_db.rs` is gated with `#![cfg(feature = "zoom")]` since it drives
+  `zoom::db` directly and needs `rusqlite`, which is optional and only pulled
+  in by the `zoom` feature.
+
+This is what makes the calendar-sync flow buildable without `chromiumoxide`
+(spec: `docs/specs/calendar-sync-flow.md`, "Docker" under Further Notes) — the
+motivating case is a small, reproducible image for the calendar cron
+container. Every other flow (`sync` with Zoom, `zoom flow`) is unaffected when
+the feature is left on, which is the default.
 
 ---
 
@@ -279,6 +316,14 @@ the GitHub Actions jobs in a container:
 act pull_request -l                                        # list jobs
 act pull_request -j clippy -s GITHUB_TOKEN="$(gh auth token)"
 ```
+
+`check`, `clippy` and `test` each run as a 2-entry matrix (`default` and
+`no-default`) covering both feature configurations from "Building without
+Zoom" above; `build-check` adds a `no-default-features` entry for the musl
+target specifically, since that combination is the one the spec calls out as
+fragile and the one that matters for the cron image. `act` runs one matrix
+entry at a time — pass `--matrix features:no-default` (or `features:default`)
+to pick one.
 
 Pass the token explicitly — `act` needs it to clone the actions themselves, and
 the checked-in `.secrets` file is not guaranteed to hold a current one. The

@@ -17,13 +17,22 @@ env:
 
 jobs:
   check:
-    name: Check
+    name: Check (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["default", "no-default"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
       - run: cargo check --locked
+        if: matrix.features == 'default'
+      - run: cargo check --no-default-features --locked
+        if: matrix.features == 'no-default'
 
   fmt:
     name: Rustfmt
@@ -36,30 +45,53 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["default", "no-default"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+        if: matrix.features == 'default'
+      - run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
+        if: matrix.features == 'no-default'
 
   test:
-    name: Test
+    name: Test (${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["default", "no-default"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
       - run: cargo test --all-features --locked
+        if: matrix.features == 'default'
+      - run: cargo test --no-default-features --locked
+        if: matrix.features == 'no-default'
 
   # Build verification for the release targets.
   # Must stay in step with the matrix in release.yml: a target that only exists
   # there fails at tag time, with CI green.
+  #
+  # The musl target also gets a `no-default-features` entry: it is the one that
+  # matters for the calendar-sync cron image (docs/specs/calendar-sync-flow.md,
+  # "Docker"), and musl + chromiumoxide + rustls is the fragile corner of this
+  # matrix — this is the gate release.yml itself does not provide.
   build-check:
-    name: Build (${{ matrix.target }})
+    name: Build (${{ matrix.target }}, ${{ matrix.features }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -67,10 +99,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            features: default
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            features: default
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: no-default
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            features: default
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -81,5 +119,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ matrix.features }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+        if: matrix.features == 'default'
+      - run: cargo build --release --locked --no-default-features --target ${{ matrix.target }}
+        if: matrix.features == 'no-default'

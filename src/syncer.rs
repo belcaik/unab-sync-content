@@ -140,21 +140,32 @@ pub async fn run_sync(
         //
         // The Zoom flow launches a browser, performs an interactive SSO and downloads
         // video, so it must not run under --dry-run, and it must honour zoom.enabled.
-        if !cfg.zoom.enabled {
-            info!(course_id = c.id, "zoom disabled in config; skipping");
-        } else if dry_run {
-            status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
-        } else {
-            status!("Starting Zoom sync for course {}...", c.id);
-            match crate::zoom::zoom_flow(c.id, None).await {
-                Ok(()) => {
-                    status!("✓ Zoom sync completed for course {}", c.id);
-                }
-                Err(e) => {
-                    warn!(course_id = c.id, error = %e, "zoom flow failed for course");
-                    // Continue with other courses even if Zoom fails
+        // It is only compiled in when the `zoom` feature is enabled (see AGENTS.md).
+        #[cfg(feature = "zoom")]
+        {
+            if !cfg.zoom.enabled {
+                info!(course_id = c.id, "zoom disabled in config; skipping");
+            } else if dry_run {
+                status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
+            } else {
+                status!("Starting Zoom sync for course {}...", c.id);
+                match crate::zoom::zoom_flow(c.id, None).await {
+                    Ok(()) => {
+                        status!("✓ Zoom sync completed for course {}", c.id);
+                    }
+                    Err(e) => {
+                        warn!(course_id = c.id, error = %e, "zoom flow failed for course");
+                        // Continue with other courses even if Zoom fails
+                    }
                 }
             }
+        }
+        #[cfg(not(feature = "zoom"))]
+        {
+            info!(
+                course_id = c.id,
+                "zoom feature not compiled into this build; skipping"
+            );
         }
 
         if !dry_run {

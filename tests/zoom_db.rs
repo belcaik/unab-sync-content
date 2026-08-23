@@ -1,3 +1,7 @@
+//! Exercises the Zoom session store, so it only makes sense — and only
+//! compiles — when the `zoom` feature (default-on) is enabled.
+#![cfg(feature = "zoom")]
+
 use std::error::Error;
 
 use chrono::Utc;
