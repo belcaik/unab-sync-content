@@ -106,6 +106,11 @@ motivating case is a small, reproducible image for the calendar cron
 container. Every other flow (`sync` with Zoom, `zoom flow`) is unaffected when
 the feature is left on, which is the default.
 
+The cron container itself is `Dockerfile` + `docker-compose.yml` +
+`.env.example` + `docker/` at the repo root — see README.md "Docker / cron
+deployment" for the full startup sequence, including the config-must-be-
+mounted-first trap in `main.rs`.
+
 ---
 
 ## CLI Spec
