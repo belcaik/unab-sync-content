@@ -20,6 +20,7 @@ off.
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [What ends up on disk](#what-ends-up-on-disk)
+- [Docker / cron deployment](#docker--cron-deployment)
 - [Zoom recordings](#zoom-recordings)
 - [Exit codes](#exit-codes)
 - [Troubleshooting](#troubleshooting)
@@ -462,6 +463,105 @@ tool, not run by u_crawler) reads this tree and syncs it to a CalDAV server;
 u_crawler itself never speaks CalDAV. An assignment with no due date produces
 no file. A sibling directory for availability windows is planned but not yet
 implemented.
+
+---
+
+## Docker / cron deployment
+
+`calendar` is meant to run unattended, once a day, inside a container on a
+homeserver, writing into a volume that another container (or `caldir push`
+run separately) consumes. The image, `Dockerfile`, `docker-compose.yml`,
+`.env.example` and `docker/` at the repo root are that deployment.
+
+The image is built with `cargo build --no-default-features` — no Zoom, no
+headless browser, no `chromiumoxide` (see
+[Building without Zoom](#building-without-zoom)) — so it is small and its
+build has no `chromiumoxide` git dependency to resolve.
+
+### The startup trap
+
+**Read this before your first `docker compose up`.** `main.rs` loads the
+config *before* dispatching any subcommand (`src/main.rs`, around
+`Config::load_or_init()`). If `~/.config/u_crawler/config.toml` does not
+exist, it is created on the spot with placeholder values and the process
+exits **`10`** — for every command, `calendar` included. In a fresh
+container this means: mount a real, filled-in config **before** the first
+start, or the first (and every subsequent) run fails with exit code `10`
+until you do. There is no way around this from inside the container; it is
+`u_crawler`'s existing safety behaviour and this ticket does not change it.
+
+### What to mount
+
+| Container path | Contents | Notes |
+|---|---|---|
+| `/home/appuser/.config/u_crawler` | `config.toml` (+ the log file `u_crawler.log`, written here too) | Must contain a **complete, valid** config before first start — see `docker/config.toml.example`. Holds the Canvas token; keep it out of version control. |
+| `/home/appuser/Caldir` | the caldir tree | `calendar.caldir_root` inside the mounted `config.toml` must equal this container-side path. u_crawler owns this tree exclusively (`AGENTS.md`); `caldir push` reads it from elsewhere, it does not write to it. |
+
+Credentials are never baked into the image or the compose file — they live
+only in the mounted `config.toml` (`canvas.token` or `canvas.token_cmd`).
+`docker-compose.yml` and `Dockerfile` are safe to share or publish as-is.
+
+### What to configure
+
+`docker-compose.yml` reads these from `.env` (copy `.env.example` and edit):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PUID` / `PGID` | `1000` / `1000` | uid:gid the container writes as. Set to match the host user who owns `CALDIR_DIR` / runs `caldir push`, or files land owned by an id useless to the host. Applied both at image build time and re-applied at container start, so changing `.env` and restarting is enough — no rebuild required. |
+| `CRON_SCHEDULE` | `0 6 * * *` | Standard 5-field cron expression; when the flow runs daily. |
+| `TZ` | `UTC` | Container timezone; affects both the schedule and log timestamps. |
+| `RUN_ON_START` | `true` | Also run the flow once immediately at container start (in addition to the daily schedule), so a fresh container's first run is visible right away instead of waiting up to 24h for the first cron tick. |
+| `CONFIG_DIR` | `./data/config` | Host directory bind-mounted to the config path above. |
+| `CALDIR_DIR` | `./data/caldir` | Host directory bind-mounted to the caldir path above. |
+
+### First run, step by step
+
+```bash
+cp .env.example .env                       # edit if PUID/PGID/schedule need changing
+mkdir -p data/config data/caldir
+cp docker/config.toml.example data/config/config.toml
+$EDITOR data/config/config.toml             # set canvas.base_url and token (or token_cmd)
+docker compose up -d --build
+docker compose logs -f
+```
+
+### Verifying the first run
+
+Look for these lines in `docker compose logs -f`:
+
+```
+[entrypoint] ... u_crawler calendar cron container starting
+[entrypoint] schedule='0 6 * * *' uid=1000 gid=1000 run_on_start=true
+[entrypoint] running the flow once now, so a fresh container proves itself without waiting for the next cron tick
+[u_crawler] ... starting: u_crawler calendar
+[u_crawler] ... u_crawler calendar exited with code 0
+```
+
+Exit code `0` means it worked; check `data/caldir` on the host for
+`.ics` files. Any other code means something needs attention — see
+[Exit codes](#exit-codes) (`10` config, `11` auth, `12` runtime, `13`
+partial). If you instead see the container repeatedly logging a config
+creation message and exiting, the config was not mounted (or not filled in)
+before the first start — go back to "First run, step by step".
+
+### Failures stay visible
+
+Every invocation — the startup run and every cron tick — is wrapped by
+`docker/run-calendar.sh`, which echoes the command's exit code to stdout
+before exiting with it, and cron itself is configured (`docker/entrypoint.sh`)
+to redirect job output to the container's own stdout/stderr
+(`/proc/1/fd/1`/`2`) rather than cron's default of emailing it nowhere. So a
+failure is always a `docker logs` grep away — `docker compose logs | grep
+"exited with code"` — and the exit code distinguishes config (`10`), auth
+(`11`), runtime (`12`) and partial (`13`) failures per `AGENTS.md`.
+
+### What this does not do
+
+`u_crawler` does not speak CalDAV (spec D8): the container only writes
+`.ics` files into the mounted caldir volume. Publishing them to Radicale is
+`caldir push`'s job, run separately (its own container, its own cron, or
+by hand) against the same `CALDIR_DIR`. This image does not run, wrap, or
+depend on `caldir`.
 
 ---
 

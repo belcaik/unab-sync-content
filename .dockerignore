@@ -1,0 +1,7 @@
+target
+.git
+.scratch
+.github
+*.log
+data
+.env
