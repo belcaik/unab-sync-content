@@ -1,7 +1,7 @@
 use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::config::Config;
 use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{atomic_write, ensure_dir, sanitize_component};
+use crate::fsutil::{atomic_write, course_dir, ensure_dir, sanitize_component};
 use crate::http::{build_http_client, HttpCtx};
 use crate::links::{classify_by_filename, extract_links, MediaRef};
 use crate::progress::{progress_bar, spinner};
@@ -53,7 +53,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     for course in selected {
         course_pb.inc(1);
         course_pb.set_message(format!("Course {}", course.id));
-        let course_dir = course_dir_for(&cfg, &course);
+        let course_dir = course_dir(Path::new(&cfg.download_root), &course);
         if !dry_run {
             ensure_dir(&course_dir).await?;
         }
@@ -107,19 +107,6 @@ impl std::ops::AddAssign for CourseSummary {
         self.links += rhs.links;
         self.media += rhs.media;
     }
-}
-
-fn course_dir_for(cfg: &Config, course: &crate::canvas::Course) -> PathBuf {
-    let code = course.course_code.clone().unwrap_or_default();
-    PathBuf::from(&cfg.download_root).join(if code.is_empty() {
-        sanitize_component(&course.name)
-    } else {
-        format!(
-            "{}_{}",
-            sanitize_component(&course.name),
-            sanitize_component(code)
-        )
-    })
 }
 
 /// One course's announcement sync.
