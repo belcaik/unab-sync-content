@@ -43,4 +43,10 @@ pub mod syncer;
 /// User-facing terminal output.
 pub mod ui;
 /// Zoom recordings: session capture, listing and download.
+///
+/// Gated behind the `zoom` cargo feature (default-on). It is the only part of
+/// the crate that pulls in `chromiumoxide`, a git-pinned headless browser
+/// dependency — building with `--no-default-features` drops it, and the
+/// calendar-sync flow works completely without it.
+#[cfg(feature = "zoom")]
 pub mod zoom;

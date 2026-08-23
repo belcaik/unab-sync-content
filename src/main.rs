@@ -7,6 +7,7 @@ use u_crawler::progress;
 use u_crawler::recordings;
 use u_crawler::state::State;
 use u_crawler::syncer;
+#[cfg(feature = "zoom")]
 use u_crawler::zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
@@ -228,6 +229,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
             ZoomCommands::Flow { course_id, since } => {
                 match zoom::zoom_flow(course_id, since).await {
@@ -240,6 +242,15 @@ async fn main() -> ExitCode {
                 }
             }
         },
+        #[cfg(not(feature = "zoom"))]
+        Commands::Zoom { .. } => {
+            eprintln!(
+                "error: this build of u_crawler was compiled without the `zoom` feature; \
+                 the Zoom flow (headless browser, SSO capture, recording download) is not \
+                 available. Rebuild with the default features enabled to use it."
+            );
+            ExitCode::from(12)
+        }
         Commands::Status { verbose } => match handle_status(verbose).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
