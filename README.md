@@ -187,6 +187,23 @@ attachments are downloaded, and an `index.json` records all of it.
 | `--course-id ID` | Only this course |
 | `--dry-run` | Report counts; write nothing |
 
+### `calendar`
+
+Projects each active course's assignment deadlines to `.ics` `VTODO` files
+under `calendar.caldir_root` — a separate tree from `download_root`, meant to
+be picked up by [caldir](https://caldir.org/) and pushed to a CalDAV server.
+Each file is named and identified (`UID`) from the Canvas assignment id, never
+from its due date, so an assignment whose date moves rewrites the same file
+rather than leaving an orphan behind.
+
+| Flag | Description |
+|---|---|
+| `--course-id ID` | Only this course |
+| `--dry-run` | Report what would be written; write nothing, create no directory |
+
+Courses listed in `canvas.ignored_courses` are skipped, same as `sync` and
+`announcements`. Set `calendar.enabled = false` to make the command a no-op.
+
 ### `recordings`
 
 A discovery report: scans course pages, module items and assignment
@@ -287,6 +304,10 @@ sso_password = ""
 [announcements]
 enabled = true          # include announcements in `sync`
 download_media = true   # also download attachments and inline media
+
+[calendar]
+enabled = true                      # false makes `calendar` a no-op
+caldir_root = "~/Caldir"            # root of the caldir tree; `~` is expanded
 
 [zoom]
 enabled = true          # false skips Zoom entirely during `sync`
@@ -396,6 +417,25 @@ An array of records, one per announcement:
 relative to the course directory. `local_path` is null when the media was not
 downloaded — either because `download_media` is false, or because it is not
 hosted on Canvas.
+
+### The calendar tree
+
+`calendar` writes to its own root, `calendar.caldir_root`, separate from
+`download_root`:
+
+```
+<calendar.caldir_root>/
+└── <Course Name>_<COURSE_CODE>/
+    └── deadlines/
+        └── assignment-<assignment_id>.ics    one VTODO per assignment with a due date
+```
+
+u_crawler is the exclusive owner of everything it creates under
+`caldir_root` — nothing else should write there. `caldir push` (a separate
+tool, not run by u_crawler) reads this tree and syncs it to a CalDAV server;
+u_crawler itself never speaks CalDAV. An assignment with no due date produces
+no file. A sibling directory for availability windows is planned but not yet
+implemented.
 
 ---
 

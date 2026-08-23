@@ -1,4 +1,5 @@
-//! Pure planning of deadline calendar files for the calendar-sync flow.
+//! Pure planning of deadline calendar files for the calendar-sync flow, plus
+//! the I/O executor that runs it end to end.
 //!
 //! [`plan`] decides which calendar files should exist for a course's
 //! assignment deadlines. It performs no I/O and reads no clock — the current
@@ -6,14 +7,25 @@
 //! (D3, D4, D9, D10) for the design this implements. This module only
 //! understands deadlines (`VTODO`); priority, availability windows and
 //! submission status are later work that widens the same seam.
+//!
+//! [`run_calendar`] is the executor half (spec D10): it fetches active
+//! courses and their assignments, calls [`plan`], and applies the result to
+//! disk with [`fsutil::atomic_write`]. Per spec "Fuera del alcance de los
+//! tests", the executor and the Canvas calls are untested here — the repo has
+//! no HTTP mock server and this ticket does not add one. [`select_active_courses`]
+//! is pulled out of the executor specifically so the one piece of decision
+//! logic in it (course/`ignored_courses` selection) stays testable without a
+//! network.
 
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use crate::canvas::{Assignment, Course};
+use crate::canvas::{Assignment, CanvasClient, Course};
+use crate::config::Config;
 use crate::fsutil;
 use crate::state::State;
+use crate::status;
 
 /// A submission record for one assignment.
 ///
@@ -154,6 +166,126 @@ pub fn plan(
         writes,
         deletes: Vec::new(),
     }
+}
+
+/// Select which courses the calendar-sync executor should plan for.
+///
+/// Pure selection logic, extracted so it is testable without a network call:
+/// the executor (`run_calendar` in `main.rs`) is the only caller, and mirrors
+/// the same course/`ignored_courses` interplay already used by
+/// `announcements::run_discovery`. When `filter_course_id` is set it wins
+/// outright — an explicit `--course-id` is an instruction to plan that one
+/// course, ignored or not. Otherwise, courses listed in `ignored_courses`
+/// (matched by their string id, as `canvas.ignored_courses` stores them) are
+/// dropped: they produce no calendars (spec user story 15).
+pub fn select_active_courses(
+    courses: Vec<Course>,
+    filter_course_id: Option<u64>,
+    ignored_courses: &[String],
+) -> Vec<Course> {
+    if let Some(cid) = filter_course_id {
+        return courses.into_iter().filter(|c| c.id == cid).collect();
+    }
+    courses
+        .into_iter()
+        .filter(|c| !ignored_courses.iter().any(|id| id == &c.id.to_string()))
+        .collect()
+}
+
+/// What one run of the calendar-sync flow produced.
+#[derive(Debug, Default, Clone, Copy)]
+struct RunSummary {
+    courses: usize,
+    writes: usize,
+}
+
+/// Runs the calendar-sync flow end to end (spec D10, the executor half).
+///
+/// Fetches active courses (honouring `canvas.ignored_courses` via
+/// [`select_active_courses`], and `filter_course_id` when given), fetches each
+/// course's assignments through [`CanvasClient::list_assignments`] (which goes
+/// through the shared paginator), calls the pure [`plan`], and applies the
+/// result with [`fsutil::atomic_write`].
+///
+/// Submission data and the previous [`State`] are not wired in yet: submission
+/// status is ticket 09's scope, and `state.json` diffing for the calendar
+/// namespace is ticket 06's — this ticket always plans against an empty
+/// submission list and a fresh, empty `State`, which is what makes every
+/// matching assignment with a due date always get (re)written.
+///
+/// `dry_run` reports the plan without writing a byte and without creating any
+/// directory — matching the `--dry-run` contract the rest of the CLI upholds.
+///
+/// A course whose assignment fetch fails aborts the whole run for now; ticket
+/// 11 (per-course error isolation) is deliberately not implemented here.
+pub async fn run_calendar(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
+    let cfg = Config::load_or_init()?;
+
+    if !cfg.calendar.enabled {
+        status!("Calendar sync is disabled (calendar.enabled = false).");
+        return Ok(());
+    }
+
+    let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
+    let canvas = CanvasClient::from_config().await?;
+
+    let courses = canvas.list_courses().await?;
+    let selected = select_active_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
+
+    if selected.is_empty() {
+        status!("No matching courses.");
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let mut summary = RunSummary::default();
+
+    for course in &selected {
+        let assignments = canvas.list_assignments(course.id).await?;
+        let course_plan = plan(
+            &caldir_root,
+            course,
+            &assignments,
+            &[],
+            now,
+            &State::default(),
+        );
+
+        summary.courses += 1;
+        summary.writes += course_plan.writes.len();
+
+        if dry_run {
+            tracing::info!(
+                course_id = course.id,
+                writes = course_plan.writes.len(),
+                deletes = course_plan.deletes.len(),
+                "dry-run calendar plan"
+            );
+            continue;
+        }
+
+        for write in &course_plan.writes {
+            fsutil::atomic_write(&write.path, write.content.as_bytes()).await?;
+            tracing::info!(course_id = course.id, path = %write.path.display(), "wrote calendar file");
+        }
+        for delete in &course_plan.deletes {
+            match tokio::fs::remove_file(delete).await {
+                Ok(()) => {
+                    tracing::info!(course_id = course.id, path = %delete.display(), "removed calendar file")
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    status!(
+        "{}Calendar: {} deadline file(s) across {} course(s)",
+        if dry_run { "DRY-RUN: " } else { "" },
+        summary.writes,
+        summary.courses,
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -377,5 +509,53 @@ mod tests {
         let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
         let after = plan(root, &course(), &[a2], &[], fixed_now(), &State::default());
         assert_eq!(before.writes[0].content, after.writes[0].content);
+    }
+
+    fn course_with(id: u64, name: &str) -> Course {
+        Course {
+            id,
+            name: name.into(),
+            course_code: None,
+        }
+    }
+
+    #[test]
+    fn ignored_courses_produce_no_calendars() {
+        let courses = vec![
+            course_with(1, "Kept"),
+            course_with(2, "Ignored"),
+            course_with(3, "Also Kept"),
+        ];
+        let got = select_active_courses(courses, None, &["2".to_string()]);
+        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn no_ignored_courses_keeps_everything() {
+        let courses = vec![course_with(1, "A"), course_with(2, "B")];
+        let got = select_active_courses(courses, None, &[]);
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn filter_course_id_wins_over_ignored_courses() {
+        let courses = vec![course_with(1, "A"), course_with(2, "B")];
+        // Course 2 is ignored, but an explicit --course-id=2 must still select it.
+        let got = select_active_courses(courses, Some(2), &["2".to_string()]);
+        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![2]);
+    }
+
+    #[test]
+    fn filter_course_id_excludes_every_other_course() {
+        let courses = vec![
+            course_with(1, "A"),
+            course_with(2, "B"),
+            course_with(3, "C"),
+        ];
+        let got = select_active_courses(courses, Some(2), &[]);
+        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![2]);
     }
 }

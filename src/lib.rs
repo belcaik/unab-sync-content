@@ -14,7 +14,7 @@
 
 /// Course announcements: fetched, rendered to markdown, and indexed.
 pub mod announcements;
-/// The pure calendar-sync deadline planner.
+/// The calendar-sync flow: a pure deadline planner plus its I/O executor.
 pub mod calendar;
 /// The Canvas LMS REST client.
 pub mod canvas;

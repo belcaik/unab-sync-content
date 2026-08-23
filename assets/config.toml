@@ -23,6 +23,10 @@ sso_password = "<your password>"
 enabled = true                  # sync course announcements as markdown
 download_media = true           # also download Canvas-hosted attachments and inline media
 
+[calendar]
+enabled = true                   # set false to skip the calendar-sync flow
+caldir_root = "<your caldir root>"  # root of the caldir tree u_crawler owns exclusively
+
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely
 ffmpeg_path = "ffmpeg"          # or a full path if not on $PATH

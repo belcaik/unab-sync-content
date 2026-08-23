@@ -1,4 +1,5 @@
 use u_crawler::announcements;
+use u_crawler::calendar;
 use u_crawler::canvas;
 use u_crawler::config;
 use u_crawler::logger;
@@ -57,6 +58,15 @@ enum Commands {
         #[arg(long)]
         course_id: Option<u64>,
         /// Do not write files or state; show planned actions
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Project assignment deadlines to the caldir tree as .ics files
+    Calendar {
+        /// Run only for a specific course id
+        #[arg(long)]
+        course_id: Option<u64>,
+        /// Do not write files; show planned actions
         #[arg(long)]
         dry_run: bool,
     },
@@ -189,6 +199,16 @@ async fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     tracing::error!(error = %e, "announcements failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            }
+        }
+        Commands::Calendar { course_id, dry_run } => {
+            match calendar::run_calendar(course_id, dry_run).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    tracing::error!(error = %e, "calendar sync failed");
                     eprintln!("error: {e}");
                     ExitCode::from(12)
                 }

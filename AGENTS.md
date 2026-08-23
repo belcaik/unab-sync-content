@@ -28,6 +28,9 @@ recordings that session can reach.
 * **Nothing outside `main.rs` writes to stdout.** Library modules emit `tracing`
   events; user-facing output goes through the `status!` macro in `ui`, which
   prints through the shared progress-bar group.
+* **`u_crawler` is the exclusive owner of the directories it creates under
+  `calendar.caldir_root`.** No other process writes there; `caldir push` reads
+  and syncs it to Radicale but is not a writer of it (spec D4, D8).
 
 ---
 
@@ -83,6 +86,7 @@ recordings that session can reach.
 | `scan` | `--course-id` | Enumerate courses/modules/files. No writes. |
 | `sync` | `--course-id`, `--dry-run`, `--verbose` | Mirror Canvas content, announcements and Zoom recordings. |
 | `announcements` | `--course-id`, `--dry-run` | Announcements only: markdown bodies, extracted links and media, `index.json`. |
+| `calendar` | `--course-id`, `--dry-run` | Project assignment deadlines to `.ics` `VTODO` files under `calendar.caldir_root`. |
 | `recordings` | `--course-id`, `--dry-run` | Report Zoom links found across a course. Does not download. |
 | `zoom flow` | `--course-id`, `--since` | Capture a Zoom session and download its recordings. |
 | `status` | `--verbose` | Per-course file counts, storage, last sync, failed items. |
@@ -130,6 +134,10 @@ sso_password = ""            # SECURITY: stored in cleartext
 enabled = true
 download_media = true
 
+[calendar]
+enabled = true
+caldir_root = "~/Caldir"     # root of the caldir tree u_crawler owns exclusively
+
 [zoom]
 enabled = true
 ffmpeg_path = "ffmpeg"
@@ -168,6 +176,21 @@ documented as working is worse than no configuration.
 There is no week-folding. Names are sanitized and transliterated to ASCII by
 `fsutil::sanitize_component`.
 
+### Directory Layout (Calendar)
+
+```
+<calendar.caldir_root>/
+  <Course Name>_<Course Code>/
+    deadlines/
+      assignment-<assignment_id>.ics    # one VTODO per assignment with a due date
+```
+
+Separate tree from `download_root`, and named per course the same way
+(`fsutil::course_dir`). A sibling directory for availability-window `VEVENT`s
+(spec D4) is planned for a later ticket and will not require moving anything
+under `deadlines/`. Filenames and UIDs derive from the Canvas assignment id,
+never from the due date, so a moved deadline rewrites the same file in place.
+
 ---
 
 ## Architecture
@@ -184,6 +207,7 @@ src/
   links.rs          # HTML -> links, media refs, zoom URLs
   syncer.rs         # CourseSync / ModuleCtx: the main sync flow
   announcements.rs  # AnnouncementSync
+  calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
   ffmpeg.rs         # ffmpeg invocation
