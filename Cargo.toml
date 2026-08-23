@@ -33,7 +33,7 @@ sha1 = "0.10"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 urlencoding = "2.1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"
 # Pinned: chromiumoxide has no crates.io release with the CDP Fetch APIs this uses.
