@@ -249,6 +249,19 @@ under two distinct `state.json` namespaces — `calendar:{assignment_id}` for
 the `VTODO`, `calendar-window:{assignment_id}` for the `VEVENT` — so writing
 one component never marks the other "unchanged".
 
+An assignment recorded in `state.json` but absent from Canvas's response is
+removed: both components' files are deleted and both state entries dropped, so
+the calendar does not accumulate tasks the teacher has withdrawn. u_crawler
+deletes only the local file — `caldir push` propagates the removal to the
+server, which is why nothing here speaks CalDAV (spec D8).
+
+**A course whose fetch failed is never reconciled.** `plan_for_course` takes
+each fetch as a `Result` and returns `None` unless both succeeded, so a failed
+course cannot reach the planner with an empty assignment list that would read
+as "everything was deleted". This is structural rather than a convention to
+remember: one network blip must not silently wipe a course's calendar under
+cron, where nobody would notice until the data was gone.
+
 ---
 
 ## Architecture
