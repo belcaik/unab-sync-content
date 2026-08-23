@@ -48,7 +48,7 @@ in the one file that matters. They are serialized into a single lane instead.
 
 | Wave | Runs | Parallelism | Gate to exit |
 |---|---|---|---|
-| **W0** | 02 prefactor · 03 datos (01 closed up front) | 2 lanes, disjoint files | `cargo test` green; 02 changed no behavior |
+| ~~**W0**~~ | ~~02 prefactor · 03 datos~~ | **DONE** | Merged. fmt/clippy clean, 47 tests pass. One box deferred to the 02 human gate. |
 | **W1** | 04 planner | 1 | Planner tests green, zero I/O in the function |
 | **W2** | 05 subcomando | 1 | Manual: run it, `caldir push`, deadlines visible in the client |
 | **W3** | 11 resiliencia ∥ 12 build sin headless | 2 lanes | Both merged; `--no-default-features` build proven |
@@ -176,6 +176,7 @@ These cannot be delegated. The plan stops at each until you clear it.
 
 | After | You verify |
 |---|---|
+| 02 | Run `sync --dry-run` (or `announcements --dry-run`) against an already-synced course and confirm no new directory is proposed and nothing is renamed. The extraction is provably identical by inspection, but no agent has live credentials to run it. |
 | 05 | Run the command, `caldir push`, confirm deadlines appear in your calendar client. **Then change one deadline in Canvas, re-run, re-push, and confirm the client shows the new date and not a duplicate** — this is the one spike question left unobserved. |
 | 07 | High-priority tasks render differently in the client. |
 | 08 | The window calendar can be hidden without hiding deadlines. |
