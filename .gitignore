@@ -20,3 +20,9 @@ response.json
 
 # Subagent worktrees
 .claude/worktrees/
+
+# Docker deployment: bind-mount host paths. `data/config/config.toml` holds the
+# Canvas PAT (and sso_password in cleartext) once the user follows the compose
+# quickstart, so it must never be committable.
+data/
+.env
