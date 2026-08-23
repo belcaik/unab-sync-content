@@ -9,7 +9,8 @@
 //! carrying a `PRIORITY` derived from Canvas grading state ([`priority_for`],
 //! spec D6, ticket 07); and, when `unlock_at` is present and before `due_at`,
 //! an availability-window `VEVENT` spanning that interval (spec D3, ticket
-//! 08). Submission/completed status is later work that widens the same seam.
+//! 08), marked `STATUS:COMPLETED` when the caller's own submission for that
+//! assignment is submitted or graded (spec D7, ticket 09).
 //!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
@@ -27,26 +28,17 @@
 //! [`RunOutcome`] (or a [`TotalFailure`] when every course failed). All three
 //! are plain data in, data out — testable without touching the network.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use sha1::{Digest, Sha1};
 
-use crate::canvas::{Assignment, CanvasClient, Course};
+use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::config::Config;
 use crate::fsutil;
 use crate::state::{ItemState, State};
 use crate::status;
-
-/// A submission record for one assignment.
-///
-/// Intentionally minimal: this ticket accepts submissions as a parameter so
-/// later tickets (submission/completed status) can widen [`plan`] without
-/// changing call sites, but does not yet act on submission data.
-#[derive(Debug, Clone)]
-pub struct Submission {
-    pub assignment_id: u64,
-}
 
 /// One calendar file to write, in full.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +201,28 @@ fn priority_for(assignment: &Assignment) -> u8 {
     }
 }
 
+/// Whether a submission counts as "done" for `STATUS:COMPLETED` purposes
+/// (spec D7, ticket 09): `submitted_at` is present, or `workflow_state` is
+/// `"graded"` — grading without a recorded submission timestamp still counts,
+/// since a teacher can grade an in-person or verbally-assessed piece of work
+/// that Canvas never saw a file for.
+///
+/// Deliberately reads only these two fields. In particular it does not special
+/// -case group assignments: Canvas already propagates a group member's
+/// submission onto every teammate's own submission record, so the caller's
+/// own `students/submissions?student_ids[]=self` response reflects a
+/// groupmate's turn-in without this function needing to know groups exist.
+fn is_submission_done(submission: &Submission) -> bool {
+    submission.submitted_at.is_some() || submission.workflow_state.as_deref() == Some("graded")
+}
+
+/// Index submissions by assignment id for O(1) lookup while planning. Not a
+/// `HashMap<u64, Submission>` in the public API — this is planning-internal
+/// bookkeeping, not part of [`plan`]'s contract.
+fn index_submissions(submissions: &[Submission]) -> HashMap<u64, &Submission> {
+    submissions.iter().map(|s| (s.assignment_id, s)).collect()
+}
+
 /// Derive the `DTSTAMP` for a deadline `VTODO` (RFC 5545 §3.6.2 requires
 /// exactly one). This must NOT be `now`: doing so would make every run emit
 /// different content for unchanged data, defeating the "no changes, empty
@@ -227,7 +241,27 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
 
 /// Render a single assignment deadline as a complete `.ics` file: one
 /// `VCALENDAR` wrapping one `VTODO`.
-fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> String {
+///
+/// `done` (spec D7, ticket 09) controls `STATUS`: when `true`, a
+/// `STATUS:COMPLETED` line is emitted so the component shows as finished
+/// without being deleted — the record of what was done must remain visible.
+/// When `false`, **no `STATUS` line is emitted at all**, rather than an
+/// explicit `STATUS:NEEDS-ACTION`. Two reasons, both about not asserting more
+/// than Canvas told us:
+///
+/// - RFC 5545 §3.8.1.11 already treats an absent `STATUS` on a `VTODO` as
+///   "needs action" — omitting it says exactly the same thing as spelling it
+///   out, so there is nothing to gain from the explicit form.
+/// - Emitting `NEEDS-ACTION` would be an active claim that this item is *not*
+///   done, sourced from nothing but "Canvas has no opinion". Omission makes
+///   the same silence structurally visible in the content itself: this
+///   component carries no completion assertion one way or the other.
+///
+/// This also keeps the projection stable in the sense [`plan`]'s content-hash
+/// comparison (spec D5) needs: for a given assignment/submission pair the
+/// rendered content is a pure function of that data, so an unrelated field
+/// changing produces a diff exactly where the data changed and nowhere else.
+fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>, done: bool) -> String {
     let dtstamp = dtstamp_for(assignment, due);
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
@@ -238,11 +272,14 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> Strin
         format!("DTSTAMP:{}", ics_datetime(dtstamp)),
         format!("DUE:{}", ics_datetime(due)),
         format!("PRIORITY:{}", priority_for(assignment)),
-        format!(
-            "SUMMARY:{}",
-            escape_text(assignment.name.as_deref().unwrap_or(""))
-        ),
     ];
+    if done {
+        lines.push("STATUS:COMPLETED".to_string());
+    }
+    lines.push(format!(
+        "SUMMARY:{}",
+        escape_text(assignment.name.as_deref().unwrap_or(""))
+    ));
     if let Some(url) = &assignment.html_url {
         lines.push(format!("URL:{}", escape_text(url)));
     }
@@ -291,9 +328,12 @@ fn render_vevent(
 /// (spec D3, ticket 08).
 ///
 /// Pure: no network, no disk access and no system clock — `now` is the
-/// caller's injected instant. `submissions` is accepted so later tickets can
-/// widen this function without changing every call site; this ticket does
-/// not build logic on it yet.
+/// caller's injected instant. `submissions` is the caller's own submissions
+/// for this course (spec D1, ticket 09): a deadline `VTODO` is marked
+/// `STATUS:COMPLETED` when [`is_submission_done`] says so for the matching
+/// assignment id, per D7 ("submitted, or graded"). No group-assignment
+/// special-casing lives here — see [`is_submission_done`]'s doc comment for
+/// why the bulk `self` query already covers it.
 ///
 /// `prev` is the previous run's persisted state (spec D5): for each
 /// component, the rendered content is hashed and compared against `prev`'s
@@ -325,22 +365,27 @@ pub fn plan(
     caldir_root: &Path,
     course: &Course,
     assignments: &[Assignment],
-    _submissions: &[Submission],
+    submissions: &[Submission],
     _now: DateTime<Utc>,
     prev: &State,
 ) -> Plan {
     let course_dir = fsutil::course_dir(caldir_root, course);
     let deadlines_dir = course_dir.join(DEADLINES_DIR);
     let windows_dir = course_dir.join(WINDOWS_DIR);
+    let submissions_by_assignment = index_submissions(submissions);
     let mut writes = Vec::new();
     for assignment in assignments {
         let Some(due) = assignment.due_at else {
             continue;
         };
 
+        let done = submissions_by_assignment
+            .get(&assignment.id)
+            .is_some_and(|s| is_submission_done(s));
+
         let uid = deadline_uid(assignment.id);
         let path = deadlines_dir.join(deadline_filename(assignment.id));
-        let content = render_vtodo(&uid, assignment, due);
+        let content = render_vtodo(&uid, assignment, due, done);
         let hash = content_hash(&content);
         let key = calendar_state_key(assignment.id);
         let unchanged =
@@ -485,8 +530,12 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// through the shared paginator), calls the pure [`plan`], and applies the
 /// result with [`fsutil::atomic_write`].
 ///
-/// Submission data is not wired in yet — submission status is ticket 09's
-/// scope, so this always plans with an empty submission list. The previous
+/// Each course's submissions are fetched with one bulk call
+/// ([`CanvasClient::list_submissions`], spec D1, ticket 09) rather than one
+/// per assignment, and handed to [`plan`] alongside that course's
+/// assignments. A submissions fetch failure is treated the same as an
+/// assignments fetch failure (spec ticket 11): the course is logged and
+/// skipped rather than aborting the run. The previous
 /// [`State`] *is* wired in (ticket 06): it is loaded from the course's
 /// existing `state.json` under `download_root` — the same file `sync` and
 /// `announcements` already read and write, under the `calendar:{id}`
@@ -556,10 +605,30 @@ pub async fn run_calendar(
             }
         };
 
+        let submissions = match canvas.list_submissions(course.id).await {
+            Ok(submissions) => submissions,
+            Err(e) => {
+                tracing::error!(
+                    course_id = course.id,
+                    error = %e,
+                    "failed to fetch submissions; skipping this course"
+                );
+                results.push(CourseResult::Failed);
+                continue;
+            }
+        };
+
         let state_path = fsutil::course_dir(&download_root, course).join("state.json");
         let mut state = State::load(&state_path).await;
 
-        let course_plan = plan(&caldir_root, course, &assignments, &[], now, &state);
+        let course_plan = plan(
+            &caldir_root,
+            course,
+            &assignments,
+            &submissions,
+            now,
+            &state,
+        );
 
         if dry_run {
             tracing::info!(
@@ -662,7 +731,7 @@ fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::Course;
+    use crate::canvas::{Course, Submission};
 
     /// A fixed instant, so a future accidental dependency on `now` in `plan`
     /// shows up as a test failure rather than as flake.
@@ -1298,6 +1367,141 @@ mod tests {
         let second = plan(root, &course(), &[assignment], &[], fixed_now(), &state);
 
         assert!(second.writes.is_empty());
+    }
+
+    // --- submission/completed status (ticket 09, spec D7) ---
+    //
+    // The three states the ticket names, asserted through the Plan's
+    // rendered content (seam S3), never by calling `is_submission_done`
+    // directly.
+
+    fn submission_submitted(assignment_id: u64) -> Submission {
+        Submission {
+            assignment_id,
+            submitted_at: Some(
+                DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z")
+                    .unwrap()
+                    .into(),
+            ),
+            workflow_state: Some("submitted".into()),
+        }
+    }
+
+    fn submission_graded_without_submitted_at(assignment_id: u64) -> Submission {
+        Submission {
+            assignment_id,
+            submitted_at: None,
+            workflow_state: Some("graded".into()),
+        }
+    }
+
+    fn submission_untouched(assignment_id: u64) -> Submission {
+        Submission {
+            assignment_id,
+            submitted_at: None,
+            workflow_state: Some("unsubmitted".into()),
+        }
+    }
+
+    #[test]
+    fn submission_with_submitted_at_marks_the_vtodo_completed() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let submissions = vec![submission_submitted(assignment.id)];
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(got.writes.len(), 1);
+        assert!(got.writes[0].content.contains("STATUS:COMPLETED"));
+    }
+
+    #[test]
+    fn submission_graded_without_submitted_at_marks_the_vtodo_completed() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let submissions = vec![submission_graded_without_submitted_at(assignment.id)];
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(got.writes.len(), 1);
+        assert!(got.writes[0].content.contains("STATUS:COMPLETED"));
+    }
+
+    #[test]
+    fn submission_neither_submitted_nor_graded_stays_pending() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let submissions = vec![submission_untouched(assignment.id)];
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(got.writes.len(), 1);
+        assert!(!got.writes[0].content.contains("STATUS:COMPLETED"));
+        assert!(!got.writes[0].content.contains("STATUS:"));
+    }
+
+    #[test]
+    fn no_matching_submission_stays_pending() {
+        // No submission record at all for this assignment id -- must not be
+        // confused with "done".
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(got.writes.len(), 1);
+        assert!(!got.writes[0].content.contains("STATUS:"));
+    }
+
+    #[test]
+    fn submission_for_a_different_assignment_does_not_leak_completion() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let submissions = vec![submission_submitted(assignment.id + 1)];
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(got.writes.len(), 1);
+        assert!(!got.writes[0].content.contains("STATUS:"));
+    }
+
+    #[test]
+    fn identical_pending_input_produces_byte_identical_content_across_runs() {
+        // The stability property the pending-STATUS decision rests on: same
+        // assignment, same (absent) submission state, twice -> identical
+        // bytes, so an unrelated later run with the same input plans nothing
+        // (spec user story 14).
+        let root = Path::new("/caldir");
+        let a1 = assignment_with_due_date();
+        let a2 = assignment_with_due_date();
+        let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
+        let after = plan(root, &course(), &[a2], &[], fixed_now(), &State::default());
+        assert_eq!(before.writes[0].content, after.writes[0].content);
     }
 
     fn course_with(id: u64, name: &str) -> Course {

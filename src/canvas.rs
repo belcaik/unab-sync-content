@@ -291,6 +291,43 @@ impl CanvasClient {
         )
         .await
     }
+
+    /// Fetches the caller's own submissions for every assignment in a course,
+    /// in one bulk request rather than one per assignment (calendar-sync
+    /// spec D1, ticket 09). `student_ids[]=self` is Canvas's shorthand for
+    /// "the authenticated user" and needs no id lookup.
+    ///
+    /// `list_paginated` joins a plain `&str` onto `base` and `CanvasClient`
+    /// has no query builder (spec D1's "nota de encaje"), so the repeated
+    /// `student_ids[]` param is pre-encoded here (`%5B%5D`) rather than
+    /// passed as literal `[]` — the same approach `get_page` already uses for
+    /// `page_url` via `urlencoding::encode`.
+    pub async fn list_submissions(&self, course_id: u64) -> Result<Vec<Submission>, CanvasError> {
+        self.list_paginated(
+            &format!(
+                "/api/v1/courses/{course_id}/students/submissions\
+                 ?student_ids%5B%5D=self&per_page=100"
+            ),
+            "submissions",
+        )
+        .await
+    }
+}
+
+/// One student's submission record for one assignment, as returned by the
+/// bulk `students/submissions` endpoint.
+///
+/// Minimal by design: the calendar-sync flow (spec D7) only needs to decide
+/// "done or not", which `submitted_at` and `workflow_state` answer between
+/// them. Other fields Canvas returns (`grade`, `score`, `attempt`, …) have no
+/// consumer yet and are left off rather than carried speculatively.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Submission {
+    pub assignment_id: u64,
+    #[serde(default)]
+    pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub workflow_state: Option<String>,
 }
 
 #[cfg(test)]
@@ -346,6 +383,50 @@ mod tests {
             i = (i + 1).min(headers.len() - 1);
         }
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn submissions_path_pre_encodes_the_repeated_bracket_param() {
+        let course_id = 42u64;
+        let path = format!(
+            "/api/v1/courses/{course_id}/students/submissions\
+             ?student_ids%5B%5D=self&per_page=100"
+        );
+        assert_eq!(
+            base().join(&path).unwrap().as_str(),
+            "https://canvas.example.com/api/v1/courses/42/students/submissions\
+             ?student_ids%5B%5D=self&per_page=100"
+        );
+    }
+
+    #[test]
+    fn submission_deserializes_submitted_at_and_workflow_state() {
+        let body = r#"
+        {
+            "assignment_id": 4501,
+            "submitted_at": "2026-02-18T10:00:00Z",
+            "workflow_state": "submitted"
+        }
+        "#;
+        let submission: Submission = serde_json::from_str(body).unwrap();
+        assert_eq!(submission.assignment_id, 4501);
+        assert!(submission.submitted_at.is_some());
+        assert_eq!(submission.workflow_state.as_deref(), Some("submitted"));
+    }
+
+    #[test]
+    fn submission_without_submission_still_deserializes() {
+        let body = r#"
+        {
+            "assignment_id": 9001,
+            "submitted_at": null,
+            "workflow_state": "unsubmitted"
+        }
+        "#;
+        let submission: Submission = serde_json::from_str(body).unwrap();
+        assert_eq!(submission.assignment_id, 9001);
+        assert_eq!(submission.submitted_at, None);
+        assert_eq!(submission.workflow_state.as_deref(), Some("unsubmitted"));
     }
 
     #[test]

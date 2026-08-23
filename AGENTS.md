@@ -302,6 +302,7 @@ Rules that hold today and should keep holding:
 * Courses: `GET /api/v1/courses?enrollment_state=active&per_page=100`
 * Modules (+items): `GET /api/v1/courses/{id}/modules?include=items&per_page=100`
 * Assignments: `GET /api/v1/courses/{id}/assignments?per_page=100`
+* Submissions (own, bulk per course): `GET /api/v1/courses/{id}/students/submissions?student_ids[]=self&per_page=100`
 * Announcements: `GET /api/v1/courses/{id}/discussion_topics?only_announcements=true&per_page=100`
 * Pages: `GET /api/v1/courses/{id}/pages/{slug}`
 * Files: `GET /api/v1/files/{id}`; download via `download_url` or `url`
