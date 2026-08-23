@@ -17,3 +17,6 @@ response.json
 # Agent tooling scratch state
 .auto-claude-*
 .claude_settings.json
+
+# Subagent worktrees
+.claude/worktrees/

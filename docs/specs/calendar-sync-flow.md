@@ -1,6 +1,6 @@
 # Spec: flow de sincronización de calendario
 
-**Estado:** propuesto — bloqueado por T1 (round-trip de caldir)
+**Estado:** acordado — T1 resuelto empíricamente (ver «Hallazgos del spike»)
 **Destino:** spec acordado. La implementación es un esfuerzo aparte.
 
 ---
@@ -200,18 +200,30 @@ Casos que deben estar cubiertos:
 
 ## Further Notes
 
-### Riesgo abierto que bloquea este spec
+### Hallazgos del spike (T1) — resuelto
 
-**caldir no documenta soporte de VTODO en ningún lado.** Ni el README, ni caldir.org, ni la búsqueda: todo habla de *events*. Y VTODO es el componente central de D3.
+Verificado contra un Radicale real en el homeserver, 2026-08-23. **El riesgo que bloqueaba
+este spec está cerrado: D3 se mantiene.**
 
-Tampoco documenta:
-- Qué pasa cuando cambia la fecha de un evento. El nombre de archivo es `{ISO-datetime}__{slug}.ics`, **derivado del start** — un cambio de fecha cambia el nombre, con riesgo de duplicado en vez de update.
-- Cómo maneja UIDs: si reconcilia por el UID interno del archivo o por el nombre.
-- Qué `DTSTART` usaría para un VTODO, que no tiene `DTSTART` obligatorio.
+| Pregunta | Hallazgo |
+|---|---|
+| ¿Un `VTODO` sobrevive `archivo → push → Radicale → pull → archivo`? | **Sí.** El formato funciona; los campos vuelven intactos. |
+| ¿Qué nombre de archivo le da caldir a un `VTODO` sin `DTSTART`? | **Ninguno: respeta el que se le da.** caldir conservó el nombre elegido a mano. |
+| ¿Borrar un archivo local propaga el borrado al servidor en `push`? | **Sí.** D8 confirmado: u_crawler borra archivos y nunca habla CalDAV. |
+| ¿Qué hace caldir cuando cambia la fecha de un componente? | **No se probó.** Ver abajo por qué dejó de importar. |
 
-Esto no se resuelve discutiendo. **T1** lo resuelve empíricamente: escribir un VTODO a mano en un caldir, hacer `push` a un Radicale de prueba, `pull`, y verificar que `UID`, `DUE`, `PRIORITY` y `STATUS` vuelven intactos. Si no vuelven, **D3 se revisa antes de escribir código**.
+**Consecuencia de diseño — el nombre de archivo lo elige u_crawler.** Como caldir respeta el
+nombre dado, el archivo se nombra a partir del **UID**, que se deriva del id del assignment en
+Canvas y por lo tanto es estable frente a cambios de fecha y de título. El nombre
+`{ISO-datetime}__{slug}.ics` que caldir usa *cuando él crea el archivo* no aplica acá.
 
-Del lado del cliente no hay riesgo: Thunderbird soporta VTODO bien vía CalDAV. El eslabón dudoso está en el medio.
+Esto **elimina** el caso filoso del ticket 06: si la ruta no depende de la fecha, mover un
+deadline reescribe el mismo archivo y no puede quedar un duplicado viejo. La pregunta sin
+responder de la tabla deja de estar en el camino crítico.
+
+**Riesgo residual, a verificar en la puerta manual del ticket 05/06:** que caldir suba como
+*update* un archivo modificado que conserva su nombre. Es el caso de sincronización más básico
+que existe y casi con certeza funciona, pero no se observó directamente.
 
 ### Docker
 

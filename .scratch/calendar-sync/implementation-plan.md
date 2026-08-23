@@ -6,28 +6,34 @@
 
 ---
 
-## 0. Two decisions to make before Wave 0 ends
+## 0. Decisions — both closed 2026-08-23
 
-Everything else in this plan has a defensible default. These two do not:
+1. **Ticket 01 (spike): CLOSED.** Verified against the real Radicale on the homeserver. VTODO
+   round-trips with fields intact, local deletions propagate on `push` (D8 confirmed), and
+   **caldir respects the filename it is given**. Findings written into
+   `docs/specs/calendar-sync-flow.md` § "Hallazgos del spike". D3 stands unchanged.
+2. **Branching: CLOSED.** One long-lived `feat/calendar-sync` off `main`, one conventional
+   commit per ticket, subagents in git worktrees off that branch.
 
-1. **Who runs ticket 01.** It needs a live Radicale + caldir + a CalDAV client. A subagent
-   cannot stand that up. Either you run it and paste the findings, or you authorize the
-   orchestrator to spin up Radicale in Docker locally and drive caldir over a throwaway
-   calendar. Until 01 closes, **Wave 1 cannot start** — 04's component format depends on it.
-2. **Branch strategy.** Default assumed below: one long-lived `feat/calendar-sync` branch off
-   `main`, each ticket a squashed conventional commit onto it, subagents working in git
-   worktrees off that branch. The alternative (a PR per ticket into `main`) costs 13 review
-   cycles and buys little, since nothing before ticket 05 is independently useful.
+**The filename finding changes the shape of the work.** Because caldir keeps our names, the
+planner names files from the **UID**, which derives from the Canvas assignment id and is
+therefore stable across date and title changes. Consequences:
 
-Manual-verification gates are listed in §5 — tickets 05, 07, 08, 09, 11 and 13 each carry a
-"verificado a mano" acceptance box that no agent can tick.
+- Ticket 06's sharp case — "a date change makes a new file and orphans the old one" — **cannot
+  occur**. Its acceptance box "si el cambio de fecha implica un nombre de archivo distinto, el
+  archivo anterior deja de existir" is satisfied vacuously: the path never depends on the date.
+  The agent for 06 must state that explicitly rather than inventing cleanup code for a case the
+  design rules out.
+- The one thing the spike did not observe is whether caldir uploads a *modified, same-named*
+  file as an update. It is the most basic sync case there is, but it is unverified — so it
+  becomes an explicit check at the ticket 05 manual gate (§5).
 
 ---
 
 ## 1. Dependency graph and waves
 
 ```
-  01 spike ─┐
+  01 spike ─┐  (closed)
   03 datos ─┴─> 04 planner ─┬─> 05 subcomando ─┬─> 11 resiliencia
   02 prefactor ─────────────┘                  ├─> 12 build sin headless ──> 13 docker+cron
                                                └─> 06 idempotencia ──> 07 prioridad
@@ -42,7 +48,7 @@ in the one file that matters. They are serialized into a single lane instead.
 
 | Wave | Runs | Parallelism | Gate to exit |
 |---|---|---|---|
-| **W0** | 01 spike · 02 prefactor · 03 datos | 3 lanes, disjoint files | Spike answer written into the spec; `cargo test` green; 02 changed no behavior |
+| **W0** | 02 prefactor · 03 datos (01 closed up front) | 2 lanes, disjoint files | `cargo test` green; 02 changed no behavior |
 | **W1** | 04 planner | 1 | Planner tests green, zero I/O in the function |
 | **W2** | 05 subcomando | 1 | Manual: run it, `caldir push`, deadlines visible in the client |
 | **W3** | 11 resiliencia ∥ 12 build sin headless | 2 lanes | Both merged; `--no-default-features` build proven |
@@ -99,6 +105,9 @@ So five subagents don't each re-litigate them:
   (ticket 04), with the `VEVENT` UID distinguishable from the `VTODO` UID of the same
   assignment (ticket 08). Suggested: `u_crawler-todo-{assignment_id}@<host-ish>` /
   `u_crawler-window-{assignment_id}@…`. The agent for 04 fixes the exact form and 08 follows it.
+- **Filenames derive from the UID, never from a date.** The spike proved caldir keeps the name
+  we give it, so the path stays stable when a deadline moves and the file is simply rewritten
+  in place. No date component in any filename.
 - **Every HTTP call goes through `HttpCtx`; every list goes through `list_paginated`.**
   `AGENTS.md` non-negotiable. `student_ids[]=self` must be pre-encoded into the path string
   because `CanvasClient` has no query builder (spec D1).
@@ -167,8 +176,7 @@ These cannot be delegated. The plan stops at each until you clear it.
 
 | After | You verify |
 |---|---|
-| 01 | The spike environment exists and the round-trip answers are real, not assumed. If VTODO does not survive, D3 gets revised **before** Wave 1. |
-| 05 | Run the command, `caldir push`, confirm deadlines appear in your calendar client. |
+| 05 | Run the command, `caldir push`, confirm deadlines appear in your calendar client. **Then change one deadline in Canvas, re-run, re-push, and confirm the client shows the new date and not a duplicate** — this is the one spike question left unobserved. |
 | 07 | High-priority tasks render differently in the client. |
 | 08 | The window calendar can be hidden without hiding deadlines. |
 | 09 | A group assignment submitted by a teammate shows as completed. |
