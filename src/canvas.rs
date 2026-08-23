@@ -219,6 +219,24 @@ pub struct Assignment {
     pub name: Option<String>,
     pub description: Option<String>,
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub unlock_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub lock_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub points_possible: Option<f64>,
+    #[serde(default)]
+    pub omit_from_final_grade: Option<bool>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub assignment_group_id: Option<u64>,
+    #[serde(default)]
+    pub submission_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub published: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,5 +346,95 @@ mod tests {
             i = (i + 1).min(headers.len() - 1);
         }
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn assignment_deserializes_dates_and_grading_metadata_from_a_full_response() {
+        let body = r#"
+        {
+            "id": 4501,
+            "name": "Problem Set 3",
+            "description": "<p>Solve the attached problems.</p>",
+            "updated_at": "2026-02-10T18:04:00Z",
+            "due_at": "2026-02-20T23:59:00Z",
+            "unlock_at": "2026-02-13T00:00:00Z",
+            "lock_at": "2026-02-21T06:00:00Z",
+            "points_possible": 25.0,
+            "omit_from_final_grade": false,
+            "html_url": "https://canvas.example.com/courses/1/assignments/4501",
+            "assignment_group_id": 77,
+            "submission_types": ["online_upload", "online_text_entry"],
+            "published": true
+        }
+        "#;
+
+        let assignment: Assignment = serde_json::from_str(body).unwrap();
+
+        assert_eq!(assignment.id, 4501);
+        assert_eq!(assignment.name.as_deref(), Some("Problem Set 3"));
+        assert_eq!(
+            assignment.due_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-02-20T23:59:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+        assert_eq!(
+            assignment.unlock_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-02-13T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+        assert_eq!(
+            assignment.lock_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-02-21T06:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
+        assert_eq!(assignment.points_possible, Some(25.0));
+        assert_eq!(assignment.omit_from_final_grade, Some(false));
+        assert_eq!(
+            assignment.html_url.as_deref(),
+            Some("https://canvas.example.com/courses/1/assignments/4501")
+        );
+        assert_eq!(assignment.assignment_group_id, Some(77));
+        assert_eq!(
+            assignment.submission_types,
+            Some(vec![
+                "online_upload".to_string(),
+                "online_text_entry".to_string()
+            ])
+        );
+        assert_eq!(assignment.published, Some(true));
+    }
+
+    #[test]
+    fn assignment_without_optional_fields_still_deserializes() {
+        let body = r#"
+        {
+            "id": 9001,
+            "name": "Reading Reflection",
+            "description": null,
+            "updated_at": "2026-01-05T09:00:00Z"
+        }
+        "#;
+
+        let assignment: Assignment = serde_json::from_str(body).unwrap();
+
+        assert_eq!(assignment.id, 9001);
+        assert_eq!(assignment.due_at, None);
+        assert_eq!(assignment.unlock_at, None);
+        assert_eq!(assignment.lock_at, None);
+        assert_eq!(assignment.points_possible, None);
+        assert_eq!(assignment.omit_from_final_grade, None);
+        assert_eq!(assignment.html_url, None);
+        assert_eq!(assignment.assignment_group_id, None);
+        assert_eq!(assignment.submission_types, None);
+        assert_eq!(assignment.published, None);
     }
 }
