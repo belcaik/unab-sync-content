@@ -49,7 +49,7 @@ in the one file that matters. They are serialized into a single lane instead.
 | Wave | Runs | Parallelism | Gate to exit |
 |---|---|---|---|
 | ~~**W0**~~ | ~~02 prefactor · 03 datos~~ | **DONE** | Merged. fmt/clippy clean, 47 tests pass. One box deferred to the 02 human gate. |
-| **W1** | 04 planner | 1 | Planner tests green, zero I/O in the function |
+| ~~**W1**~~ | ~~04 planner~~ | **DONE** | Merged after one rework round: missing `DTSTAMP` (RFC 5545) and a UID lacking a semantics discriminator. 55 tests green. |
 | **W2** | 05 subcomando | 1 | Manual: run it, `caldir push`, deadlines visible in the client |
 | **W3** | 11 resiliencia ∥ 12 build sin headless | 2 lanes | Both merged; `--no-default-features` build proven |
 | **W4** | Lane A: 06 → 07 → 08 → 09 → 10 (sequential) ∥ Lane B: 13 docker | 2 lanes | Full suite + manual gates |
@@ -105,6 +105,8 @@ So five subagents don't each re-litigate them:
   (ticket 04), with the `VEVENT` UID distinguishable from the `VTODO` UID of the same
   assignment (ticket 08). Suggested: `u_crawler-todo-{assignment_id}@<host-ish>` /
   `u_crawler-window-{assignment_id}@…`. The agent for 04 fixes the exact form and 08 follows it.
+- **UID scheme is settled by ticket 04 and must not change:** `u_crawler-todo-{assignment_id}@u-crawler.local`, with `u_crawler-window-{assignment_id}@u-crawler.local` reserved for ticket 08. A UID is the server-side identity of a published object — changing one after the first push orphans it rather than updating it.
+- **`DTSTAMP` is derived from `updated_at`, falling back to `due_at` — never from `now`.** A clock-derived DTSTAMP would rewrite every file every run and make ticket 06 unsatisfiable.
 - **Filenames derive from the UID, never from a date.** The spike proved caldir keeps the name
   we give it, so the path stays stable when a deadline moves and the file is simply rewritten
   in place. No date component in any filename.
