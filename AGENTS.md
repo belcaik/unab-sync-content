@@ -226,13 +226,28 @@ There is no week-folding. Names are sanitized and transliterated to ASCII by
   <Course Name>_<Course Code>/
     deadlines/
       assignment-<assignment_id>.ics    # one VTODO per assignment with a due date
+    windows/
+      assignment-<assignment_id>.ics    # one VEVENT per assignment with unlock_at < due_at
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`fsutil::course_dir`). A sibling directory for availability-window `VEVENT`s
-(spec D4) is planned for a later ticket and will not require moving anything
-under `deadlines/`. Filenames and UIDs derive from the Canvas assignment id,
-never from the due date, so a moved deadline rewrites the same file in place.
+(`fsutil::course_dir`). `deadlines/` and `windows/` are sibling directories
+per course × semantics (spec D4), so a client can subscribe to one without
+the other; a third directory for recurring-class semantics has room to land
+later without moving anything under either. Filenames and UIDs derive from
+the Canvas assignment id, never from any date, so a moved deadline or window
+rewrites the same file in place. The `VEVENT` UID
+(`u_crawler-window-{assignment_id}@u-crawler.local`) is deliberately distinct
+from the `VTODO` UID (`u_crawler-todo-{assignment_id}@u-crawler.local`) —
+UIDs are the CalDAV server-side identity and must be globally unique; see
+Radicale issue #101 in `docs/specs/calendar-sync-flow.md` for the bug shape a
+collision would reproduce. An assignment with no `due_at` produces neither
+component. An assignment with `due_at` but no `unlock_at`, or with
+`unlock_at` at or after `due_at` (inconsistent Canvas data), gets its `VTODO`
+and no `VEVENT`. State that gates whether a component is rewritten lives
+under two distinct `state.json` namespaces — `calendar:{assignment_id}` for
+the `VTODO`, `calendar-window:{assignment_id}` for the `VEVENT` — so writing
+one component never marks the other "unchanged".
 
 ---
 

@@ -213,12 +213,15 @@ attachments are downloaded, and an `index.json` records all of it.
 
 ### `calendar`
 
-Projects each active course's assignment deadlines to `.ics` `VTODO` files
-under `calendar.caldir_root` — a separate tree from `download_root`, meant to
-be picked up by [caldir](https://caldir.org/) and pushed to a CalDAV server.
-Each file is named and identified (`UID`) from the Canvas assignment id, never
-from its due date, so an assignment whose date moves rewrites the same file
-rather than leaving an orphan behind.
+Projects each active course's assignments to `.ics` files under
+`calendar.caldir_root` — a separate tree from `download_root`, meant to be
+picked up by [caldir](https://caldir.org/) and pushed to a CalDAV server. Two
+components per assignment, in two sibling directories (see "The calendar
+tree" below): a `VTODO` deadline, and — when the assignment has an unlock
+date before its due date — a `VEVENT` availability window. Each file is named
+and identified (`UID`) from the Canvas assignment id, never from a date, so a
+moved deadline or window rewrites the same file rather than leaving an orphan
+behind.
 
 | Flag | Description |
 |---|---|
@@ -453,16 +456,26 @@ hosted on Canvas.
 ```
 <calendar.caldir_root>/
 └── <Course Name>_<COURSE_CODE>/
-    └── deadlines/
-        └── assignment-<assignment_id>.ics    one VTODO per assignment with a due date
+    ├── deadlines/
+    │   └── assignment-<assignment_id>.ics    one VTODO per assignment with a due date
+    └── windows/
+        └── assignment-<assignment_id>.ics    one VEVENT per assignment with a due date AND an unlock date before it
 ```
+
+`deadlines/` and `windows/` are separate calendars per course, on purpose: a
+CalDAV client subscribes to each independently, so the availability-window
+noise can be hidden while keeping deadlines visible, or vice versa. A third
+directory for recurring-class semantics (spec D4) has room to land later
+without moving anything under either.
 
 u_crawler is the exclusive owner of everything it creates under
 `caldir_root` — nothing else should write there. `caldir push` (a separate
 tool, not run by u_crawler) reads this tree and syncs it to a CalDAV server;
 u_crawler itself never speaks CalDAV. An assignment with no due date produces
-no file. A sibling directory for availability windows is planned but not yet
-implemented.
+no file at all — a window needs both ends, so it cannot exist without a due
+date either. An assignment with a due date but no unlock date, or with an
+unlock date on or after its due date (inconsistent Canvas data), gets its
+`VTODO` and no `VEVENT`.
 
 ---
 

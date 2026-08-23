@@ -2,12 +2,14 @@
 //! the I/O executor that runs it end to end.
 //!
 //! [`plan`] decides which calendar files should exist for a course's
-//! assignment deadlines. It performs no I/O and reads no clock — the current
-//! instant is injected by the caller. See `docs/specs/calendar-sync-flow.md`
-//! (D3, D4, D6, D9, D10) for the design this implements. This module
-//! understands deadlines (`VTODO`), each carrying a `PRIORITY` derived from
-//! Canvas grading state ([`priority_for`], spec D6, ticket 07); availability
-//! windows and submission status are later work that widens the same seam.
+//! assignments. It performs no I/O and reads no clock — the current instant
+//! is injected by the caller. See `docs/specs/calendar-sync-flow.md` (D3, D4,
+//! D6, D9, D10) for the design this implements. This module emits up to two
+//! components per assignment, in sibling directories: a deadline `VTODO`,
+//! carrying a `PRIORITY` derived from Canvas grading state ([`priority_for`],
+//! spec D6, ticket 07); and, when `unlock_at` is present and before `due_at`,
+//! an availability-window `VEVENT` spanning that interval (spec D3, ticket
+//! 08). Submission/completed status is later work that widens the same seam.
 //!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
@@ -53,9 +55,15 @@ pub struct PlannedWrite {
     pub content: String,
     /// The Canvas assignment this write projects. Carried alongside `path`/
     /// `content` so the executor can record the write against the same
-    /// `calendar:{assignment_id}` state key `plan` compared it against,
-    /// without having to reverse-engineer an id out of a filename.
+    /// state key `plan` compared it against, without having to
+    /// reverse-engineer an id out of a filename.
     pub assignment_id: u64,
+    /// The `state.json` key this write's content hash was (and must again
+    /// be) compared against — [`calendar_state_key`] for a deadline `VTODO`,
+    /// [`window_state_key`] for an availability-window `VEVENT`. Two
+    /// components can share an `assignment_id` but never this key: that is
+    /// what stops recording one from marking the other "unchanged".
+    pub state_key: String,
 }
 
 /// The outcome of planning: which files to write and which to delete.
@@ -66,9 +74,16 @@ pub struct Plan {
 }
 
 /// The on-disk name of the directory holding deadline `VTODO` files for a
-/// course. A sibling directory for a future "availability window" semantics
-/// (spec D4) can be added later without moving anything under this one.
+/// course. A sibling directory holds the availability-window `VEVENT`s
+/// ([`WINDOWS_DIR`]); a third semantics (recurring classes, spec D4) has room
+/// to land later without moving anything under either.
 const DEADLINES_DIR: &str = "deadlines";
+
+/// The on-disk name of the directory holding availability-window `VEVENT`
+/// files for a course (spec D4, ticket 08). Sibling of [`DEADLINES_DIR`], not
+/// nested under it — the point is that a client can subscribe to one and not
+/// the other.
+const WINDOWS_DIR: &str = "windows";
 
 /// Derive the calendar UID for an assignment's deadline `VTODO`.
 ///
@@ -96,6 +111,25 @@ fn deadline_filename(assignment_id: u64) -> String {
     format!("assignment-{assignment_id}.ics")
 }
 
+/// Derive the calendar UID for an assignment's availability-window `VEVENT`
+/// (spec D4, ticket 08). The `window-` discriminator is what keeps this
+/// distinct from [`deadline_uid`]'s `todo-` for the same assignment id — see
+/// that function's doc comment for why the distinction is load-bearing
+/// (Radicale issue #101, cited in the spec). Fixed by ticket 04's plan; do not
+/// change it.
+fn window_uid(assignment_id: u64) -> String {
+    format!("u_crawler-window-{assignment_id}@u-crawler.local")
+}
+
+/// Derive the on-disk filename for an assignment's availability-window
+/// `VEVENT`. Lives under [`WINDOWS_DIR`], a different directory from
+/// [`deadline_filename`]'s [`DEADLINES_DIR`], so the two never collide on
+/// disk even though both derive their name the same way from the assignment
+/// id.
+fn window_filename(assignment_id: u64) -> String {
+    format!("assignment-{assignment_id}.ics")
+}
+
 /// The `state.json` namespace for a deadline `VTODO`'s projected content
 /// (spec D5): `calendar:{assignment_id}`. Distinct from the content flow's
 /// own `assignment:{id}` key (`syncer.rs`) — same assignment, different
@@ -103,6 +137,16 @@ fn deadline_filename(assignment_id: u64) -> String {
 /// other's bookkeeping.
 fn calendar_state_key(assignment_id: u64) -> String {
     format!("calendar:{assignment_id}")
+}
+
+/// The `state.json` namespace for an availability-window `VEVENT`'s projected
+/// content (spec D5, ticket 08): `calendar-window:{assignment_id}`. Distinct
+/// from [`calendar_state_key`]'s `calendar:{assignment_id}` — the VTODO and
+/// VEVENT for the same assignment are two different projections with two
+/// different hashes, and sharing one key would make writing one component
+/// mark the other "unchanged" (or vice versa) regardless of its own content.
+fn window_state_key(assignment_id: u64) -> String {
+    format!("calendar-window:{assignment_id}")
 }
 
 /// Hash rendered content the same way `syncer.rs` hashes markdown before
@@ -207,7 +251,44 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> Strin
     lines.join("\r\n") + "\r\n"
 }
 
-/// Plan the deadline calendar files for one course.
+/// Render a single assignment's availability window as a complete `.ics`
+/// file: one `VCALENDAR` wrapping one `VEVENT` spanning `unlock` to `due`
+/// (spec D3, ticket 08). No `PRIORITY` or `STATUS` — those are `VTODO`
+/// concepts (submission/completed status is ticket 09's scope, not this
+/// one's).
+fn render_vevent(
+    uid: &str,
+    assignment: &Assignment,
+    unlock: DateTime<Utc>,
+    due: DateTime<Utc>,
+) -> String {
+    let dtstamp = dtstamp_for(assignment, due);
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".to_string(),
+        "PRODID:-//u_crawler//calendar-sync//EN".to_string(),
+        "BEGIN:VEVENT".to_string(),
+        format!("UID:{uid}"),
+        format!("DTSTAMP:{}", ics_datetime(dtstamp)),
+        format!("DTSTART:{}", ics_datetime(unlock)),
+        format!("DTEND:{}", ics_datetime(due)),
+        format!(
+            "SUMMARY:{}",
+            escape_text(assignment.name.as_deref().unwrap_or(""))
+        ),
+    ];
+    if let Some(url) = &assignment.html_url {
+        lines.push(format!("URL:{}", escape_text(url)));
+    }
+    lines.push("END:VEVENT".to_string());
+    lines.push("END:VCALENDAR".to_string());
+    lines.join("\r\n") + "\r\n"
+}
+
+/// Plan the calendar files for one course: a deadline `VTODO` per assignment
+/// with a due date, plus an availability-window `VEVENT` for each such
+/// assignment that also has an `unlock_at` strictly before its `due_at`
+/// (spec D3, ticket 08).
 ///
 /// Pure: no network, no disk access and no system clock — `now` is the
 /// caller's injected instant. `submissions` is accepted so later tickets can
@@ -215,19 +296,31 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>) -> Strin
 /// not build logic on it yet.
 ///
 /// `prev` is the previous run's persisted state (spec D5): for each
-/// assignment with a due date, the rendered `VTODO` is hashed and compared
-/// against `prev`'s `calendar:{assignment_id}` entry. A match means Canvas's
-/// projected component is unchanged, so **no write is planned** — this is
-/// what keeps an unchanged run's plan empty (spec user story 14, the ticket's
-/// "test más importante"). A mismatch (including "no entry yet") plans a
-/// write with the freshly rendered content, Canvas winning per D5.
+/// component, the rendered content is hashed and compared against `prev`'s
+/// entry under that component's own state key — [`calendar_state_key`] for
+/// the `VTODO`, [`window_state_key`] for the `VEVENT`. The two live in
+/// distinct namespaces, so writing one never marks the other "unchanged". A
+/// match means Canvas's projected component is unchanged, so **no write is
+/// planned** for it — this is what keeps an unchanged run's plan empty (spec
+/// user story 14), and it holds independently per component: an assignment
+/// can plan a window write while its deadline is unchanged, or vice versa. A
+/// mismatch (including "no entry yet") plans a write with the freshly
+/// rendered content, Canvas winning per D5.
 ///
 /// The filename and UID both derive only from the assignment id (see
-/// [`deadline_uid`], [`deadline_filename`]), never from the due date, so a
-/// due-date change rewrites the same path rather than orphaning a
-/// differently-named old file — the sharp case ticket 06 names is designed
-/// out at the source, not cleaned up here. A title change is exactly the
-/// same code path: the hash changes, the path does not.
+/// [`deadline_uid`]/[`deadline_filename`] and [`window_uid`]/
+/// [`window_filename`]), never from any date, so a due-date or unlock-date
+/// change rewrites the same path rather than orphaning a differently-named
+/// old file — the sharp case ticket 06 names is designed out at the source,
+/// not cleaned up here. A title change is exactly the same code path: the
+/// hash changes, the path does not.
+///
+/// No `unlock_at` at all produces the `VTODO` and no `VEVENT` — there is no
+/// window to represent. An `unlock_at` at or after `due_at` is treated as
+/// inconsistent Canvas data and also produces no `VEVENT`, rather than a
+/// zero- or negative-length event. An assignment with no `due_at` produces
+/// neither component: a window needs both ends, so it cannot exist without a
+/// due date either.
 pub fn plan(
     caldir_root: &Path,
     course: &Course,
@@ -236,27 +329,57 @@ pub fn plan(
     _now: DateTime<Utc>,
     prev: &State,
 ) -> Plan {
-    let dir = fsutil::course_dir(caldir_root, course).join(DEADLINES_DIR);
+    let course_dir = fsutil::course_dir(caldir_root, course);
+    let deadlines_dir = course_dir.join(DEADLINES_DIR);
+    let windows_dir = course_dir.join(WINDOWS_DIR);
     let mut writes = Vec::new();
     for assignment in assignments {
         let Some(due) = assignment.due_at else {
             continue;
         };
+
         let uid = deadline_uid(assignment.id);
-        let path = dir.join(deadline_filename(assignment.id));
+        let path = deadlines_dir.join(deadline_filename(assignment.id));
         let content = render_vtodo(&uid, assignment, due);
         let hash = content_hash(&content);
         let key = calendar_state_key(assignment.id);
         let unchanged =
             prev.get(&key).and_then(|item| item.content_hash.as_deref()) == Some(hash.as_str());
-        if unchanged {
-            continue;
+        if !unchanged {
+            writes.push(PlannedWrite {
+                path,
+                content,
+                assignment_id: assignment.id,
+                state_key: key,
+            });
         }
-        writes.push(PlannedWrite {
-            path,
-            content,
-            assignment_id: assignment.id,
-        });
+
+        // Availability window (spec D3, ticket 08): only when `unlock_at` is
+        // present and strictly before `due_at`. Absent `unlock_at` means
+        // there is no window to represent; an `unlock_at` at or after `due_at`
+        // is inconsistent Canvas data and is treated as "no window" rather
+        // than emitting a zero/negative-length event.
+        if let Some(unlock) = assignment.unlock_at {
+            if unlock < due {
+                let window_uid = window_uid(assignment.id);
+                let window_path = windows_dir.join(window_filename(assignment.id));
+                let window_content = render_vevent(&window_uid, assignment, unlock, due);
+                let window_hash = content_hash(&window_content);
+                let window_key = window_state_key(assignment.id);
+                let window_unchanged = prev
+                    .get(&window_key)
+                    .and_then(|item| item.content_hash.as_deref())
+                    == Some(window_hash.as_str());
+                if !window_unchanged {
+                    writes.push(PlannedWrite {
+                        path: window_path,
+                        content: window_content,
+                        assignment_id: assignment.id,
+                        state_key: window_key,
+                    });
+                }
+            }
+        }
     }
     Plan {
         writes,
@@ -515,15 +638,15 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
 }
 
 /// Record every successfully-applied write's content hash back into `state`,
-/// under its `calendar:{assignment_id}` key, so the next run's [`plan`] call
-/// sees what was actually written and can produce an empty plan when Canvas
-/// hasn't changed. Does not save to disk — the caller does that, and only
-/// outside `--dry-run`.
+/// under its own `state_key` (deadline or window — see [`PlannedWrite`]), so
+/// the next run's [`plan`] call sees what was actually written and can
+/// produce an empty plan when Canvas hasn't changed. Does not save to disk —
+/// the caller does that, and only outside `--dry-run`.
 fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
     for write in writes {
         let hash = content_hash(&write.content);
         state.set(
-            calendar_state_key(write.assignment_id),
+            write.state_key.clone(),
             ItemState {
                 etag: None,
                 updated_at: None,
@@ -878,6 +1001,156 @@ mod tests {
         assert_eq!(before.writes[0].content, after.writes[0].content);
     }
 
+    // --- availability window (ticket 08, spec D3) ---
+    //
+    // The three date cases the ticket names, plus confirmation that the
+    // "unchanged -> empty plan" guarantee (ticket 06) still holds once two
+    // components exist per assignment.
+
+    #[test]
+    fn unlock_before_due_produces_a_vevent_in_a_sibling_windows_directory() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // The VTODO is still emitted, plus the VEVENT.
+        assert_eq!(got.writes.len(), 2);
+
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+        assert_eq!(
+            vtodo.path,
+            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+        );
+
+        let vevent = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VEVENT"))
+            .expect("vevent present");
+        assert_eq!(
+            vevent.path,
+            Path::new("/caldir/Intro_to_Testing_TST101/windows/assignment-555.ics")
+        );
+        assert!(vevent
+            .content
+            .contains("UID:u_crawler-window-555@u-crawler.local"));
+        assert!(vevent.content.contains("DTSTART:20260801T000000Z"));
+        assert!(vevent.content.contains("DTEND:20260901T235900Z"));
+        assert!(vevent.content.contains("SUMMARY:Essay Draft"));
+        assert!(vevent.content.contains("END:VEVENT"));
+        // Distinguishable from the VTODO UID for the same assignment.
+        assert_ne!(vevent.content, vtodo.content);
+        assert!(!vevent
+            .content
+            .contains("UID:u_crawler-todo-555@u-crawler.local"));
+    }
+
+    #[test]
+    fn missing_unlock_at_produces_the_vtodo_and_no_vevent() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        assert!(assignment.unlock_at.is_none());
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        assert!(got.writes[0].content.contains("BEGIN:VTODO"));
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
+    #[test]
+    fn unlock_at_after_due_at_is_inconsistent_and_produces_no_vevent() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        assert!(got.writes[0].content.contains("BEGIN:VTODO"));
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
+    #[test]
+    fn unchanged_vtodo_and_vevent_together_produce_an_empty_plan() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+
+        let first = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(first.writes.len(), 2);
+
+        let mut prev = State::default();
+        for write in &first.writes {
+            prev.set(
+                write.state_key.clone(),
+                ItemState {
+                    etag: None,
+                    updated_at: None,
+                    size: None,
+                    content_hash: Some(content_hash(&write.content)),
+                    last_error: None,
+                    error_count: None,
+                },
+            );
+        }
+
+        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &prev);
+
+        assert!(second.writes.is_empty());
+        assert!(second.deletes.is_empty());
+    }
+
     // --- idempotency and date-change handling (ticket 06) ---
 
     /// Build a `State` recording, under the `calendar:{id}` namespace, a
@@ -996,6 +1269,7 @@ mod tests {
             path: PathBuf::from("/caldir/course/deadlines/assignment-9.ics"),
             content: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
             assignment_id: 9,
+            state_key: calendar_state_key(9),
         }];
 
         record_writes(&mut state, &writes);
@@ -1157,6 +1431,7 @@ mod tests {
                 path,
                 content: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
                 assignment_id: 1,
+                state_key: calendar_state_key(1),
             }],
             deletes: Vec::new(),
         };
