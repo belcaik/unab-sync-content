@@ -50,8 +50,8 @@ in the one file that matters. They are serialized into a single lane instead.
 |---|---|---|---|
 | ~~**W0**~~ | ~~02 prefactor · 03 datos~~ | **DONE** | Merged. fmt/clippy clean, 47 tests pass. One box deferred to the 02 human gate. |
 | ~~**W1**~~ | ~~04 planner~~ | **DONE** | Merged after one rework round: missing `DTSTAMP` (RFC 5545) and a UID lacking a semantics discriminator. 55 tests green. |
-| **W2** | 05 subcomando | 1 | Manual: run it, `caldir push`, deadlines visible in the client |
-| **W3** | 11 resiliencia ∥ 12 build sin headless | 2 lanes | Both merged; `--no-default-features` build proven |
+| ~~**W2**~~ | ~~05 subcomando~~ | **DONE (manual gate OPEN)** | Merged + a follow-up fix aligning the `caldir_root` default across code/AGENTS.md/README/template. |
+| ~~**W3**~~ | ~~11 resiliencia ∥ 12 build sin headless~~ | **DONE** | Both merged. 11 reworked to isolate write failures too. 12 found the coupling shallow and implemented rather than deferring. Verified in both build configs; chromiumoxide absent from the no-default tree. |
 | **W4** | Lane A: 06 → 07 → 08 → 09 → 10 (sequential) ∥ Lane B: 13 docker | 2 lanes | Full suite + manual gates |
 
 **File-conflict map** (why the parallel lanes are safe):
@@ -100,7 +100,10 @@ So five subagents don't each re-litigate them:
 - **`chrono` gains `serde`** in ticket 03 (`features = ["clock", "serde"]`). Dates become
   `Option<DateTime<Utc>>`, per spec D2.
 - **State namespace** is `calendar:{assignment_id}`, per spec D5, stored in the existing
-  per-course `state.json` via `state::State`.
+  per-course `state.json` under `download_root` — **never inside the caldir tree**. caldir scans
+  its directories for `.ics` files; a `state.json` sitting in a calendar collection is at best
+  ignored and at worst confuses it, and spec D4 makes u_crawler the exclusive owner of what it
+  puts there. State is u_crawler's bookkeeping, not calendar data.
 - **UID scheme:** derived from the Canvas assignment id so it survives title and date changes
   (ticket 04), with the `VEVENT` UID distinguishable from the `VTODO` UID of the same
   assignment (ticket 08). Suggested: `u_crawler-todo-{assignment_id}@<host-ish>` /
