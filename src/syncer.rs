@@ -1,7 +1,9 @@
 use crate::canvas::{Assignment, CanvasClient, Module};
 use crate::config::Config;
 use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext};
+use crate::fsutil::{
+    atomic_write, course_dir, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
+};
 use crate::http::{build_http_client, HttpCtx};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
@@ -59,16 +61,7 @@ pub async fn run_sync(
     for c in selected_courses {
         course_progress.inc(1);
         course_progress.set_message(format!("Syncing course {}", c.id));
-        let code = c.course_code.clone().unwrap_or_default();
-        let course_dir = PathBuf::from(&cfg.download_root).join(if code.is_empty() {
-            sanitize_component(&c.name)
-        } else {
-            format!(
-                "{}_{}",
-                sanitize_component(&c.name),
-                sanitize_component(code)
-            )
-        });
+        let course_dir = course_dir(Path::new(&cfg.download_root), &c);
         if !dry_run {
             ensure_dir(&course_dir).await?;
         }
