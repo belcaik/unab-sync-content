@@ -52,7 +52,7 @@ in the one file that matters. They are serialized into a single lane instead.
 | ~~**W1**~~ | ~~04 planner~~ | **DONE** | Merged after one rework round: missing `DTSTAMP` (RFC 5545) and a UID lacking a semantics discriminator. 55 tests green. |
 | ~~**W2**~~ | ~~05 subcomando~~ | **DONE (manual gate OPEN)** | Merged + a follow-up fix aligning the `caldir_root` default across code/AGENTS.md/README/template. |
 | ~~**W3**~~ | ~~11 resiliencia ∥ 12 build sin headless~~ | **DONE** | Both merged. 11 reworked to isolate write failures too. 12 found the coupling shallow and implemented rather than deferring. Verified in both build configs; chromiumoxide absent from the no-default tree. |
-| **W4** | Lane A: 06 → 07 → 08 → 09 → 10 (sequential) ∥ Lane B: 13 docker | 2 lanes | Full suite + manual gates |
+| ~~**W4**~~ | ~~Lane A: 06 → 07 → 08 → 09 → 10 ∥ Lane B: 13 docker~~ | **DONE** | All 13 tickets merged. 98 tests default / 92 no-default, clippy clean in both configs. Manual gates outstanding. |
 
 **File-conflict map** (why the parallel lanes are safe):
 
