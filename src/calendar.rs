@@ -282,16 +282,23 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// `dry_run` reports the plan without writing a byte and without creating any
 /// directory — matching the `--dry-run` contract the rest of the CLI upholds.
 ///
-/// Per spec ticket 11 (resiliencia por ramo), a course whose assignment fetch
-/// fails does **not** abort the run: it is logged with its course id and
-/// counted as failed via [`CourseResult::Failed`], and the remaining courses
-/// still sync. The fold of every course's [`CourseResult`] into a
-/// [`RunSummary`] and the verdict derived from it ([`conclude`]) are pure and
-/// covered by unit tests; only the network/disk plumbing around them is
-/// exercised here. The return type widens from `anyhow::Result<()>` to
-/// `anyhow::Result<RunOutcome>` so `main.rs` can tell a full success apart
-/// from a partial one (exit code 13) — a hard error (config, auth, or every
-/// course failing) still comes back as `Err`, unchanged from before.
+/// Per spec ticket 11 (resiliencia por ramo), a course that fails does
+/// **not** abort the run — whether the failure happens fetching its
+/// assignments or writing/deleting its calendar files. Either way it is
+/// logged with its course id and counted as failed via
+/// [`CourseResult::Failed`], and the remaining courses still sync. A course
+/// that fails partway through its writes is counted as failed as a whole;
+/// nothing already written is rolled back, because each file lands atomically
+/// ([`fsutil::atomic_write`]) and a partial course self-heals on the next run.
+/// A `NotFound` on delete is not a failure at all — the file is already gone,
+/// which is the desired end state. The fold of every course's
+/// [`CourseResult`] into a [`RunSummary`] and the verdict derived from it
+/// ([`conclude`]) are pure and covered by unit tests; only the network/disk
+/// plumbing around them is exercised here. The return type widens from
+/// `anyhow::Result<()>` to `anyhow::Result<RunOutcome>` so `main.rs` can tell
+/// a full success apart from a partial one (exit code 13) — a hard error
+/// (config, auth, or every course failing) still comes back as `Err`,
+/// unchanged from before.
 pub async fn run_calendar(
     filter_course_id: Option<u64>,
     dry_run: bool,
@@ -352,23 +359,19 @@ pub async fn run_calendar(
             continue;
         }
 
-        for write in &course_plan.writes {
-            fsutil::atomic_write(&write.path, write.content.as_bytes()).await?;
-            tracing::info!(course_id = course.id, path = %write.path.display(), "wrote calendar file");
-        }
-        for delete in &course_plan.deletes {
-            match tokio::fs::remove_file(delete).await {
-                Ok(()) => {
-                    tracing::info!(course_id = course.id, path = %delete.display(), "removed calendar file")
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+        match apply_plan(course.id, &course_plan).await {
+            Ok(()) => results.push(CourseResult::Synced {
+                writes: course_plan.writes.len(),
+            }),
+            Err(e) => {
+                tracing::error!(
+                    course_id = course.id,
+                    error = %e,
+                    "failed to write this course's calendar files; skipping the rest of this course"
+                );
+                results.push(CourseResult::Failed);
             }
         }
-
-        results.push(CourseResult::Synced {
-            writes: course_plan.writes.len(),
-        });
     }
 
     let summary = RunSummary::from_results(&results);
@@ -382,6 +385,29 @@ pub async fn run_calendar(
     );
 
     conclude(summary).map_err(anyhow::Error::from)
+}
+
+/// Apply one course's plan to disk: write every planned file, then remove
+/// every planned deletion. Isolated from `run_calendar` so a failure here is
+/// caught and turned into `CourseResult::Failed` instead of aborting the
+/// whole run (spec ticket 11) — a bad-permissions volume mount under cron
+/// must not cost every other course its update.
+///
+/// A `NotFound` on delete is not an error: the file is already gone, which is
+/// the wanted end state.
+async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
+    for write in &course_plan.writes {
+        fsutil::atomic_write(&write.path, write.content.as_bytes()).await?;
+        tracing::info!(course_id, path = %write.path.display(), "wrote calendar file");
+    }
+    for delete in &course_plan.deletes {
+        match tokio::fs::remove_file(delete).await {
+            Ok(()) => tracing::info!(course_id, path = %delete.display(), "removed calendar file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -712,5 +738,51 @@ mod tests {
         };
         let err = conclude(summary).unwrap_err();
         assert_eq!(err.failed, 3);
+    }
+
+    // --- apply_plan (ticket 11 follow-up): a course's write/delete failure
+    // must be classified the same as a fetch failure. apply_plan is the I/O
+    // executor half (spec "Fuera del alcance de los tests" keeps run_calendar
+    // itself untested), so these two exercise real disk I/O against a
+    // tempdir rather than a mock -- the repo has no filesystem-mocking
+    // infrastructure and this ticket does not add one. What they pin is
+    // narrow: does apply_plan surface an `Err` (which run_calendar's match
+    // arm turns into `CourseResult::Failed`) on a genuine write failure, and
+    // does it stay `Ok` (=> `CourseResult::Synced`) when a delete target is
+    // simply already gone.
+
+    #[tokio::test]
+    async fn apply_plan_reports_a_write_failure_instead_of_succeeding() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Put a plain file where a directory needs to go, so atomic_write's
+        // create_dir_all hits a real ENOTDIR -- not a simulated error.
+        let blocker = tmp.path().join("blocked");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let path = blocker.join("assignment-1.ics");
+        let course_plan = Plan {
+            writes: vec![PlannedWrite {
+                path,
+                content: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
+            }],
+            deletes: Vec::new(),
+        };
+
+        let result = apply_plan(1, &course_plan).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_plan_treats_an_already_missing_delete_target_as_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.ics");
+        let course_plan = Plan {
+            writes: Vec::new(),
+            deletes: vec![path],
+        };
+
+        let result = apply_plan(1, &course_plan).await;
+
+        assert!(result.is_ok());
     }
 }
