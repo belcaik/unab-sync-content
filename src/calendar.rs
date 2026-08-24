@@ -1502,7 +1502,12 @@ mod tests {
         record_writes(&mut state, &writes);
 
         let stored = state.get("calendar:9").expect("key recorded");
-        assert_eq!(stored.content_hash, Some(content_hash(&writes[0].content)));
+        // A known-good literal, not `content_hash(...)` recomputed: asserting
+        // against the helper under test could never disagree with it.
+        assert_eq!(
+            stored.content_hash.as_deref(),
+            Some("8b506967e3fe6f7878a37106c9c3ff102684e991")
+        );
     }
 
     #[test]
