@@ -384,9 +384,22 @@ docker run --rm -v /tmp/cichk:/src -w /src rust:latest \
   bash -c 'export CARGO_HOME=/tmp/ch; cargo check --locked'
 ```
 
-`release.yml` and `changelog.yml` must **not** be run with `act`: they push
-commits and create GitHub releases. Review them statically. `cliff.toml` can be
-validated on its own, which has no side effects:
+`release.yml`, `changelog.yml` and `container.yml` must **not** be run with
+`act` as they stand: they push commits, create GitHub releases, and push an
+image to GHCR. Review them statically — `actionlint <file>` catches the
+mechanical errors.
+
+`container.yml`'s tag logic is worth exercising, though, since the rules differ
+per event. Copy it to a scratch file, delete the login step and truncate it
+after the `metadata` step (so no credential and no push survive), echo
+`steps.meta.outputs.tags`, and run that copy with `-e` event payloads for
+`refs/tags/v1.2.3`, a `-beta.1` pre-release, and a branch dispatch. The three
+cases that matter: a release tag gets `latest`, a pre-release does not, and a
+`workflow_dispatch` on a branch still yields a non-empty tag list — the semver
+rules alone emit nothing off a tag, which is what `type=ref,event=branch` and
+`type=sha` are there to cover.
+
+`cliff.toml` can be validated on its own, which has no side effects:
 
 ```bash
 docker run --rm -v "$PWD":/app -w /app \

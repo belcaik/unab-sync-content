@@ -491,6 +491,21 @@ headless browser, no `chromiumoxide` (see
 [Building without Zoom](#building-without-zoom)) — so it is small and its
 build has no `chromiumoxide` git dependency to resolve.
 
+### The published image
+
+Every release tag publishes this image to GHCR
+(`.github/workflows/container.yml`), so a deployment does not have to build it:
+
+```bash
+docker pull ghcr.io/belcaik/unab-sync-content:latest
+```
+
+`latest` tracks the newest release tag; pre-releases (`v1.2.3-beta.1`) publish
+under their own version tag and never move `latest`. Pin a version
+(`:1.2.3`, `:1.2`, `:1`) for anything you care about staying put. To use it
+instead of a local build, set `image:` in `docker-compose.yml` to the pulled
+tag and drop `--build` from the startup command below.
+
 ### The startup trap
 
 **Read this before your first `docker compose up`.** `main.rs` loads the
