@@ -24,6 +24,11 @@ RUN cargo build --release --locked --no-default-features && \
 # ---- runtime -------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
+# Links the GHCR package back to this repo. `.github/workflows/container.yml`
+# also injects this via docker/metadata-action, which overrides what is set
+# here; the LABEL is what a plain local `docker build` gets.
+LABEL org.opencontainers.image.source="https://github.com/belcaik/unab-sync-content"
+
 ARG PUID=1000
 ARG PGID=1000
 

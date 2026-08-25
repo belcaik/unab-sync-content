@@ -1,0 +1,86 @@
+# Publishes the calendar-sync cron image (Dockerfile at the repo root) to GHCR.
+#
+# The image is the `--no-default-features` build — no Zoom, no chromiumoxide —
+# see AGENTS.md "Building without Zoom". The Dockerfile owns that choice; this
+# workflow only builds it and pushes the result.
+#
+# Runs on release tags, mirroring the trigger in release.yml so a tag produces
+# the binaries and the image together. `workflow_dispatch` is for rebuilding
+# without cutting a tag; it publishes a branch/sha tag only, never `latest`.
+name: Publish container
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*" # Pre-releases like v1.0.0-beta.1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# A re-run of the same tag would race the first for the same image tags.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `github.repository` is already lowercase for this repo, which GHCR
+      # requires; a hardcoded name silently rots if the repo is renamed.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          # `latest=false` disables the implicit auto-latest so the explicit
+          # `type=raw` rule below is the only thing that can move `latest`.
+          flavor: |
+            latest=false
+          # The semver rules fire only on tag pushes. `type=ref,event=branch`
+          # and `type=sha` are what keep the tag list non-empty on a
+          # workflow_dispatch run — an empty list makes build-push-action fail.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # amd64 only: the builder stage compiles Rust from source, and an
+          # arm64 leg under QEMU emulation costs far more than it is worth
+          # for a cron container that runs on x86 hosts.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
