@@ -1,0 +1,43 @@
+# u_crawler calendar-sync cron service.
+#
+# Runs `u_crawler calendar` once a day inside a container built without the
+# Zoom / headless-browser feature (see Dockerfile). Nothing here bakes in a
+# credential: the config file (which holds the Canvas token or `token_cmd`)
+# is a bind mount, supplied by you, never part of the image.
+#
+# Quick start:
+#   cp .env.example .env                          # edit PUID/PGID/CRON_SCHEDULE if needed
+#   mkdir -p data/config data/caldir
+#   cp docker/config.toml.example data/config/config.toml
+#   $EDITOR data/config/config.toml               # fill in canvas.base_url and token(_cmd)
+#   docker compose up -d --build
+#   docker compose logs -f                        # confirm the RUN_ON_START pass succeeded
+services:
+  calendar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    image: u_crawler-calendar:latest
+    container_name: u_crawler-calendar
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-UTC}
+      # Standard 5-field cron expression, evaluated in TZ above.
+      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 6 * * *}
+      # Run the flow once immediately at container start, in addition to the
+      # daily cron schedule, so a fresh container's first run is observable
+      # without waiting for the next tick. Set to "false" to disable.
+      RUN_ON_START: ${RUN_ON_START:-true}
+    volumes:
+      # Mounted config.toml (+ log file) — MUST exist before first start, or
+      # the container's first run creates a stub and exits 10 until you edit
+      # it. See README.md "Docker / cron deployment".
+      - ${CONFIG_DIR:-./data/config}:/home/appuser/.config/u_crawler
+      # caldir tree u_crawler owns exclusively. `calendar.caldir_root` inside
+      # the mounted config.toml must equal this container-side path.
+      - ${CALDIR_DIR:-./data/caldir}:/home/appuser/Caldir

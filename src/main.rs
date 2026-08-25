@@ -1,4 +1,5 @@
 use u_crawler::announcements;
+use u_crawler::calendar;
 use u_crawler::canvas;
 use u_crawler::config;
 use u_crawler::logger;
@@ -6,6 +7,7 @@ use u_crawler::progress;
 use u_crawler::recordings;
 use u_crawler::state::State;
 use u_crawler::syncer;
+#[cfg(feature = "zoom")]
 use u_crawler::zoom;
 
 use clap::{ArgGroup, Parser, Subcommand};
@@ -57,6 +59,15 @@ enum Commands {
         #[arg(long)]
         course_id: Option<u64>,
         /// Do not write files or state; show planned actions
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Project assignment deadlines to the caldir tree as .ics files
+    Calendar {
+        /// Run only for a specific course id
+        #[arg(long)]
+        course_id: Option<u64>,
+        /// Do not write files; show planned actions
         #[arg(long)]
         dry_run: bool,
     },
@@ -194,6 +205,20 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Commands::Calendar { course_id, dry_run } => {
+            match calendar::run_calendar(course_id, dry_run).await {
+                Ok(calendar::RunOutcome::Success) => ExitCode::SUCCESS,
+                Ok(calendar::RunOutcome::PartialFailure) => {
+                    eprintln!("warning: some courses failed to sync; see the log for details");
+                    ExitCode::from(13) // partial failure: some courses failed
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "calendar sync failed");
+                    eprintln!("error: {e}");
+                    ExitCode::from(12)
+                }
+            }
+        }
         Commands::Recordings { course_id, dry_run } => {
             match recordings::run_discovery(course_id, dry_run).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -204,6 +229,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
             ZoomCommands::Flow { course_id, since } => {
                 match zoom::zoom_flow(course_id, since).await {
@@ -216,6 +242,15 @@ async fn main() -> ExitCode {
                 }
             }
         },
+        #[cfg(not(feature = "zoom"))]
+        Commands::Zoom { .. } => {
+            eprintln!(
+                "error: this build of u_crawler was compiled without the `zoom` feature; \
+                 the Zoom flow (headless browser, SSO capture, recording download) is not \
+                 available. Rebuild with the default features enabled to use it."
+            );
+            ExitCode::from(12)
+        }
         Commands::Status { verbose } => match handle_status(verbose).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

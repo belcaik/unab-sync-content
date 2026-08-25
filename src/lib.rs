@@ -14,6 +14,8 @@
 
 /// Course announcements: fetched, rendered to markdown, and indexed.
 pub mod announcements;
+/// The calendar-sync flow: a pure deadline planner plus its I/O executor.
+pub mod calendar;
 /// The Canvas LMS REST client.
 pub mod canvas;
 /// Configuration file loading, validation and path expansion.
@@ -41,4 +43,10 @@ pub mod syncer;
 /// User-facing terminal output.
 pub mod ui;
 /// Zoom recordings: session capture, listing and download.
+///
+/// Gated behind the `zoom` cargo feature (default-on). It is the only part of
+/// the crate that pulls in `chromiumoxide`, a git-pinned headless browser
+/// dependency — building with `--no-default-features` drops it, and the
+/// calendar-sync flow works completely without it.
+#[cfg(feature = "zoom")]
 pub mod zoom;

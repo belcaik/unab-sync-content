@@ -31,6 +31,8 @@ pub struct Config {
     pub zoom: Zoom,
     #[serde(default)]
     pub announcements: Announcements,
+    #[serde(default)]
+    pub calendar: Calendar,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +50,34 @@ impl Default for Announcements {
             download_media: true,
         }
     }
+}
+
+/// Settings for the calendar-sync flow (`u_crawler calendar`), which projects
+/// assignment deadlines to `.ics` files under [`Calendar::caldir_root`]. See
+/// `docs/specs/calendar-sync-flow.md` (D4, D11).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Calendar {
+    /// Master switch for the flow. Reserved for future use by `sync`; the
+    /// dedicated `calendar` subcommand also honours it directly.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Root of the caldir tree that u_crawler owns exclusively (spec D4). Not
+    /// the same directory as `download_root`.
+    #[serde(default = "default_caldir_root")]
+    pub caldir_root: String,
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            caldir_root: default_caldir_root(),
+        }
+    }
+}
+
+fn default_caldir_root() -> String {
+    "~/Documents/Caldir".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +131,7 @@ impl Default for Config {
                 external_tool_id: 187,
             },
             announcements: Announcements::default(),
+            calendar: Calendar::default(),
         }
     }
 }
@@ -171,6 +202,7 @@ impl Config {
         if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) {
             self.download_root = expand_tilde(&self.download_root, &home);
             self.logging.file = expand_tilde(&self.logging.file, &home);
+            self.calendar.caldir_root = expand_tilde(&self.calendar.caldir_root, &home);
         }
     }
 }

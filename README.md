@@ -15,10 +15,12 @@ off.
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Install](#install)
+  - [Building without Zoom](#building-without-zoom)
 - [Getting started](#getting-started)
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [What ends up on disk](#what-ends-up-on-disk)
+- [Docker / cron deployment](#docker--cron-deployment)
 - [Zoom recordings](#zoom-recordings)
 - [Exit codes](#exit-codes)
 - [Troubleshooting](#troubleshooting)
@@ -49,9 +51,9 @@ so `max_rps` and `concurrency` apply to everything.
 | Requirement | Notes |
 |---|---|
 | Rust 1.70+ | Only to build from source. |
-| Git | One dependency (`chromiumoxide`) is fetched from a Git repository at build time, so the build needs network and `git`. |
-| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`. |
-| Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. |
+| Git | Only with the default `zoom` feature: `chromiumoxide` is fetched from a Git repository at build time, so that build needs network and `git`. `cargo build --no-default-features` needs neither — see [Building without Zoom](#building-without-zoom). |
+| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`, or if built with `--no-default-features`. |
+| Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. Not needed at all with `--no-default-features`. |
 
 Linux and macOS are the primary targets; the release workflow also builds for
 Windows.
@@ -75,6 +77,28 @@ Verify:
 u_crawler --version
 u_crawler --help
 ```
+
+### Building without Zoom
+
+The headless browser (`chromiumoxide`) and the whole Zoom flow — session
+capture, SSO, recording listing and download — live behind a cargo feature
+named `zoom`, which is **on by default**. The Canvas content sync, the
+announcements flow and the calendar-sync flow never touch a browser, so they
+build and run fully without it:
+
+```bash
+cargo build --release --no-default-features
+```
+
+This build needs neither `git` (to resolve `chromiumoxide`) nor Chrome/Chromium
+nor `ffmpeg`, and produces a smaller binary — the intended build for a
+cron/calendar-only deployment. `sync` still runs, but silently skips the Zoom
+stage; `zoom flow` still parses as a command but exits with a clear error
+telling you this build does not include it, instead of failing at compile time
+or behaving like a silent no-op.
+
+Everything else — `cargo build`, `cargo build --release`, `cargo test`,
+`cargo clippy --all-features` — keeps today's full behaviour unchanged.
 
 ---
 
@@ -187,6 +211,26 @@ attachments are downloaded, and an `index.json` records all of it.
 | `--course-id ID` | Only this course |
 | `--dry-run` | Report counts; write nothing |
 
+### `calendar`
+
+Projects each active course's assignments to `.ics` files under
+`calendar.caldir_root` — a separate tree from `download_root`, meant to be
+picked up by [caldir](https://caldir.org/) and pushed to a CalDAV server. Two
+components per assignment, in two sibling directories (see "The calendar
+tree" below): a `VTODO` deadline, and — when the assignment has an unlock
+date before its due date — a `VEVENT` availability window. Each file is named
+and identified (`UID`) from the Canvas assignment id, never from a date, so a
+moved deadline or window rewrites the same file rather than leaving an orphan
+behind.
+
+| Flag | Description |
+|---|---|
+| `--course-id ID` | Only this course |
+| `--dry-run` | Report what would be written; write nothing, create no directory |
+
+Courses listed in `canvas.ignored_courses` are skipped, same as `sync` and
+`announcements`. Set `calendar.enabled = false` to make the command a no-op.
+
 ### `recordings`
 
 A discovery report: scans course pages, module items and assignment
@@ -201,7 +245,10 @@ downloads nothing** — use `zoom flow` for that.
 ### `zoom flow`
 
 Captures a Zoom session and downloads that course's recordings. See
-[Zoom recordings](#zoom-recordings).
+[Zoom recordings](#zoom-recordings). Requires a build with the default `zoom`
+feature; a `--no-default-features` build accepts the command but reports that
+it is unavailable and exits `12` (see
+[Building without Zoom](#building-without-zoom)).
 
 | Flag | Required | Description |
 |---|---|---|
@@ -287,6 +334,10 @@ sso_password = ""
 [announcements]
 enabled = true          # include announcements in `sync`
 download_media = true   # also download attachments and inline media
+
+[calendar]
+enabled = true                      # false makes `calendar` a no-op
+caldir_root = "~/Documents/Caldir"  # root of the caldir tree; `~` is expanded
 
 [zoom]
 enabled = true          # false skips Zoom entirely during `sync`
@@ -396,6 +447,134 @@ An array of records, one per announcement:
 relative to the course directory. `local_path` is null when the media was not
 downloaded — either because `download_media` is false, or because it is not
 hosted on Canvas.
+
+### The calendar tree
+
+`calendar` writes to its own root, `calendar.caldir_root`, separate from
+`download_root`:
+
+```
+<calendar.caldir_root>/
+└── <Course Name>_<COURSE_CODE>/
+    ├── deadlines/
+    │   └── assignment-<assignment_id>.ics    one VTODO per assignment with a due date
+    └── windows/
+        └── assignment-<assignment_id>.ics    one VEVENT per assignment with a due date AND an unlock date before it
+```
+
+`deadlines/` and `windows/` are separate calendars per course, on purpose: a
+CalDAV client subscribes to each independently, so the availability-window
+noise can be hidden while keeping deadlines visible, or vice versa. A third
+directory for recurring-class semantics (spec D4) has room to land later
+without moving anything under either.
+
+u_crawler is the exclusive owner of everything it creates under
+`caldir_root` — nothing else should write there. `caldir push` (a separate
+tool, not run by u_crawler) reads this tree and syncs it to a CalDAV server;
+u_crawler itself never speaks CalDAV. An assignment with no due date produces
+no file at all — a window needs both ends, so it cannot exist without a due
+date either. An assignment with a due date but no unlock date, or with an
+unlock date on or after its due date (inconsistent Canvas data), gets its
+`VTODO` and no `VEVENT`.
+
+---
+
+## Docker / cron deployment
+
+`calendar` is meant to run unattended, once a day, inside a container on a
+homeserver, writing into a volume that another container (or `caldir push`
+run separately) consumes. The image, `Dockerfile`, `docker-compose.yml`,
+`.env.example` and `docker/` at the repo root are that deployment.
+
+The image is built with `cargo build --no-default-features` — no Zoom, no
+headless browser, no `chromiumoxide` (see
+[Building without Zoom](#building-without-zoom)) — so it is small and its
+build has no `chromiumoxide` git dependency to resolve.
+
+### The startup trap
+
+**Read this before your first `docker compose up`.** `main.rs` loads the
+config *before* dispatching any subcommand (`src/main.rs`, around
+`Config::load_or_init()`). If `~/.config/u_crawler/config.toml` does not
+exist, it is created on the spot with placeholder values and the process
+exits **`10`** — for every command, `calendar` included. In a fresh
+container this means: mount a real, filled-in config **before** the first
+start, or the first (and every subsequent) run fails with exit code `10`
+until you do. There is no way around this from inside the container; it is
+`u_crawler`'s existing safety behaviour and this ticket does not change it.
+
+### What to mount
+
+| Container path | Contents | Notes |
+|---|---|---|
+| `/home/appuser/.config/u_crawler` | `config.toml` (+ the log file `u_crawler.log`, written here too) | Must contain a **complete, valid** config before first start — see `docker/config.toml.example`. Holds the Canvas token; keep it out of version control. |
+| `/home/appuser/Caldir` | the caldir tree | `calendar.caldir_root` inside the mounted `config.toml` must equal this container-side path. u_crawler owns this tree exclusively (`AGENTS.md`); `caldir push` reads it from elsewhere, it does not write to it. |
+
+Credentials are never baked into the image or the compose file — they live
+only in the mounted `config.toml` (`canvas.token` or `canvas.token_cmd`).
+`docker-compose.yml` and `Dockerfile` are safe to share or publish as-is.
+
+### What to configure
+
+`docker-compose.yml` reads these from `.env` (copy `.env.example` and edit):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PUID` / `PGID` | `1000` / `1000` | uid:gid the container writes as. Set to match the host user who owns `CALDIR_DIR` / runs `caldir push`, or files land owned by an id useless to the host. Applied both at image build time and re-applied at container start, so changing `.env` and restarting is enough — no rebuild required. |
+| `CRON_SCHEDULE` | `0 6 * * *` | Standard 5-field cron expression; when the flow runs daily. |
+| `TZ` | `UTC` | Container timezone; affects both the schedule and log timestamps. |
+| `RUN_ON_START` | `true` | Also run the flow once immediately at container start (in addition to the daily schedule), so a fresh container's first run is visible right away instead of waiting up to 24h for the first cron tick. |
+| `CONFIG_DIR` | `./data/config` | Host directory bind-mounted to the config path above. |
+| `CALDIR_DIR` | `./data/caldir` | Host directory bind-mounted to the caldir path above. |
+
+### First run, step by step
+
+```bash
+cp .env.example .env                       # edit if PUID/PGID/schedule need changing
+mkdir -p data/config data/caldir
+cp docker/config.toml.example data/config/config.toml
+$EDITOR data/config/config.toml             # set canvas.base_url and token (or token_cmd)
+docker compose up -d --build
+docker compose logs -f
+```
+
+### Verifying the first run
+
+Look for these lines in `docker compose logs -f`:
+
+```
+[entrypoint] ... u_crawler calendar cron container starting
+[entrypoint] schedule='0 6 * * *' uid=1000 gid=1000 run_on_start=true
+[entrypoint] running the flow once now, so a fresh container proves itself without waiting for the next cron tick
+[u_crawler] ... starting: u_crawler calendar
+[u_crawler] ... u_crawler calendar exited with code 0
+```
+
+Exit code `0` means it worked; check `data/caldir` on the host for
+`.ics` files. Any other code means something needs attention — see
+[Exit codes](#exit-codes) (`10` config, `11` auth, `12` runtime, `13`
+partial). If you instead see the container repeatedly logging a config
+creation message and exiting, the config was not mounted (or not filled in)
+before the first start — go back to "First run, step by step".
+
+### Failures stay visible
+
+Every invocation — the startup run and every cron tick — is wrapped by
+`docker/run-calendar.sh`, which echoes the command's exit code to stdout
+before exiting with it, and cron itself is configured (`docker/entrypoint.sh`)
+to redirect job output to the container's own stdout/stderr
+(`/proc/1/fd/1`/`2`) rather than cron's default of emailing it nowhere. So a
+failure is always a `docker logs` grep away — `docker compose logs | grep
+"exited with code"` — and the exit code distinguishes config (`10`), auth
+(`11`), runtime (`12`) and partial (`13`) failures per `AGENTS.md`.
+
+### What this does not do
+
+`u_crawler` does not speak CalDAV (spec D8): the container only writes
+`.ics` files into the mounted caldir volume. Publishing them to Radicale is
+`caldir push`'s job, run separately (its own container, its own cron, or
+by hand) against the same `CALDIR_DIR`. This image does not run, wrap, or
+depend on `caldir`.
 
 ---
 
@@ -509,8 +688,18 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test
 ```
 
-CI runs all three, plus release builds for Linux and Windows. `Cargo.toml`
-carries a `[lints.clippy]` table so local runs deny the same lints CI does.
+Also verify the `--no-default-features` build (see
+[Building without Zoom](#building-without-zoom)) before relying on it:
+
+```bash
+cargo clippy --all-targets --no-default-features --locked -- -D warnings
+cargo test --no-default-features
+```
+
+CI runs all of the above, for both feature configurations, plus release builds
+for Linux and Windows (and, for the musl target specifically, both
+configurations too — see `.github/workflows/ci.yml`). `Cargo.toml` carries a
+`[lints.clippy]` table so local runs deny the same lints CI does.
 
 `AGENTS.md` documents the internal architecture and the invariants the code
 holds to. Some worth knowing before changing anything:

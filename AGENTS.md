@@ -28,6 +28,9 @@ recordings that session can reach.
 * **Nothing outside `main.rs` writes to stdout.** Library modules emit `tracing`
   events; user-facing output goes through the `status!` macro in `ui`, which
   prints through the shared progress-bar group.
+* **`u_crawler` is the exclusive owner of the directories it creates under
+  `calendar.caldir_root`.** No other process writes there; `caldir push` reads
+  and syncs it to Radicale but is not a writer of it (spec D4, D8).
 
 ---
 
@@ -40,7 +43,12 @@ recordings that session can reach.
 * **Config:** TOML (`directories`, `toml`)
 * **Parsing:** `serde`, `serde_json`, `regex`, `url`, `html2md`
 * **Storage:** `rusqlite` (Zoom session store), JSON (`state.json` per course)
-* **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml)
+* **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml).
+  Gated behind the default-on `zoom` cargo feature, along with the rest of the
+  Zoom flow (`rusqlite`, `cookie`, `cookie_store`, `reqwest_cookie_store`,
+  `base64`, `futures`). `cargo build --no-default-features` drops all of
+  these and needs neither network+git for `chromiumoxide` nor a browser —
+  see "Building without Zoom" below.
 * **Errors:** `thiserror` for typed module errors, `anyhow` for orchestration
 * **UX:** `indicatif`
 * **Process:** `tokio::process` (for `ffmpeg`)
@@ -68,6 +76,43 @@ recordings that session can reach.
 
 ---
 
+## Building without Zoom
+
+The `zoom` cargo feature (default-on) gates `src/zoom/` in its entirety and
+the `chromiumoxide` dependency that only it uses:
+
+```bash
+cargo build --release --no-default-features   # no browser, no git dependency
+cargo test --no-default-features
+cargo clippy --all-targets --no-default-features --locked -- -D warnings
+```
+
+With the feature off:
+
+* `src/lib.rs` does not compile `pub mod zoom` at all.
+* `sync` still runs, but the Zoom stage is a no-op (logged at `info`) instead
+  of calling `zoom::zoom_flow`, regardless of `zoom.enabled` in the config.
+* `zoom flow` still exists as a `clap` subcommand — it is not removed from
+  `--help` — but its handler prints a clear "this build does not include the
+  Zoom flow" message to stderr and exits `12`, rather than failing to parse or
+  silently doing nothing.
+* `tests/zoom_db.rs` is gated with `#![cfg(feature = "zoom")]` since it drives
+  `zoom::db` directly and needs `rusqlite`, which is optional and only pulled
+  in by the `zoom` feature.
+
+This is what makes the calendar-sync flow buildable without `chromiumoxide`
+(spec: `docs/specs/calendar-sync-flow.md`, "Docker" under Further Notes) — the
+motivating case is a small, reproducible image for the calendar cron
+container. Every other flow (`sync` with Zoom, `zoom flow`) is unaffected when
+the feature is left on, which is the default.
+
+The cron container itself is `Dockerfile` + `docker-compose.yml` +
+`.env.example` + `docker/` at the repo root — see README.md "Docker / cron
+deployment" for the full startup sequence, including the config-must-be-
+mounted-first trap in `main.rs`.
+
+---
+
 ## CLI Spec
 
 ### Binary
@@ -83,6 +128,7 @@ recordings that session can reach.
 | `scan` | `--course-id` | Enumerate courses/modules/files. No writes. |
 | `sync` | `--course-id`, `--dry-run`, `--verbose` | Mirror Canvas content, announcements and Zoom recordings. |
 | `announcements` | `--course-id`, `--dry-run` | Announcements only: markdown bodies, extracted links and media, `index.json`. |
+| `calendar` | `--course-id`, `--dry-run` | Project assignment deadlines to `.ics` `VTODO` files under `calendar.caldir_root`. |
 | `recordings` | `--course-id`, `--dry-run` | Report Zoom links found across a course. Does not download. |
 | `zoom flow` | `--course-id`, `--since` | Capture a Zoom session and download its recordings. |
 | `status` | `--verbose` | Per-course file counts, storage, last sync, failed items. |
@@ -98,8 +144,9 @@ turned off without touching the command line.
 | `10` | Config error, including "config was just created, go edit it" |
 | `11` | Auth error |
 | `12` | Network / rate-limit / runtime failure |
+| `13` | `calendar` partial failure: at least one course synced and at least one failed. All courses failing is **not** this code — it is a hard failure and surfaces as `12` instead. |
 
-Codes 13–15 are not currently emitted. Do not document them until they are.
+Codes 14–15 are not currently emitted. Do not document them until they are.
 
 ---
 
@@ -129,6 +176,10 @@ sso_password = ""            # SECURITY: stored in cleartext
 [announcements]
 enabled = true
 download_media = true
+
+[calendar]
+enabled = true
+caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns exclusively
 
 [zoom]
 enabled = true
@@ -168,6 +219,49 @@ documented as working is worse than no configuration.
 There is no week-folding. Names are sanitized and transliterated to ASCII by
 `fsutil::sanitize_component`.
 
+### Directory Layout (Calendar)
+
+```
+<calendar.caldir_root>/
+  <Course Name>_<Course Code>/
+    deadlines/
+      assignment-<assignment_id>.ics    # one VTODO per assignment with a due date
+    windows/
+      assignment-<assignment_id>.ics    # one VEVENT per assignment with unlock_at < due_at
+```
+
+Separate tree from `download_root`, and named per course the same way
+(`fsutil::course_dir`). `deadlines/` and `windows/` are sibling directories
+per course × semantics (spec D4), so a client can subscribe to one without
+the other; a third directory for recurring-class semantics has room to land
+later without moving anything under either. Filenames and UIDs derive from
+the Canvas assignment id, never from any date, so a moved deadline or window
+rewrites the same file in place. The `VEVENT` UID
+(`u_crawler-window-{assignment_id}@u-crawler.local`) is deliberately distinct
+from the `VTODO` UID (`u_crawler-todo-{assignment_id}@u-crawler.local`) —
+UIDs are the CalDAV server-side identity and must be globally unique; see
+Radicale issue #101 in `docs/specs/calendar-sync-flow.md` for the bug shape a
+collision would reproduce. An assignment with no `due_at` produces neither
+component. An assignment with `due_at` but no `unlock_at`, or with
+`unlock_at` at or after `due_at` (inconsistent Canvas data), gets its `VTODO`
+and no `VEVENT`. State that gates whether a component is rewritten lives
+under two distinct `state.json` namespaces — `calendar:{assignment_id}` for
+the `VTODO`, `calendar-window:{assignment_id}` for the `VEVENT` — so writing
+one component never marks the other "unchanged".
+
+An assignment recorded in `state.json` but absent from Canvas's response is
+removed: both components' files are deleted and both state entries dropped, so
+the calendar does not accumulate tasks the teacher has withdrawn. u_crawler
+deletes only the local file — `caldir push` propagates the removal to the
+server, which is why nothing here speaks CalDAV (spec D8).
+
+**A course whose fetch failed is never reconciled.** `plan_for_course` takes
+each fetch as a `Result` and returns `None` unless both succeeded, so a failed
+course cannot reach the planner with an empty assignment list that would read
+as "everything was deleted". This is structural rather than a convention to
+remember: one network blip must not silently wipe a course's calendar under
+cron, where nobody would notice until the data was gone.
+
 ---
 
 ## Architecture
@@ -184,6 +278,7 @@ src/
   links.rs          # HTML -> links, media refs, zoom URLs
   syncer.rs         # CourseSync / ModuleCtx: the main sync flow
   announcements.rs  # AnnouncementSync
+  calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
   ffmpeg.rs         # ffmpeg invocation
@@ -220,6 +315,7 @@ Rules that hold today and should keep holding:
 * Courses: `GET /api/v1/courses?enrollment_state=active&per_page=100`
 * Modules (+items): `GET /api/v1/courses/{id}/modules?include=items&per_page=100`
 * Assignments: `GET /api/v1/courses/{id}/assignments?per_page=100`
+* Submissions (own, bulk per course): `GET /api/v1/courses/{id}/students/submissions?student_ids[]=self&per_page=100`
 * Announcements: `GET /api/v1/courses/{id}/discussion_topics?only_announcements=true&per_page=100`
 * Pages: `GET /api/v1/courses/{id}/pages/{slug}`
 * Files: `GET /api/v1/files/{id}`; download via `download_url` or `url`
@@ -255,6 +351,14 @@ the GitHub Actions jobs in a container:
 act pull_request -l                                        # list jobs
 act pull_request -j clippy -s GITHUB_TOKEN="$(gh auth token)"
 ```
+
+`check`, `clippy` and `test` each run as a 2-entry matrix (`default` and
+`no-default`) covering both feature configurations from "Building without
+Zoom" above; `build-check` adds a `no-default-features` entry for the musl
+target specifically, since that combination is the one the spec calls out as
+fragile and the one that matters for the cron image. `act` runs one matrix
+entry at a time — pass `--matrix features:no-default` (or `features:default`)
+to pick one.
 
 Pass the token explicitly — `act` needs it to clone the actions themselves, and
 the checked-in `.secrets` file is not guaranteed to hold a current one. The
@@ -300,7 +404,10 @@ Documented so they are not rediscovered as surprises:
   unreadable page therefore kills the whole run, including courses not yet
   reached — while an unreadable *file* is merely recorded via
   `State::record_error` and skipped. The file behaviour is the intended one;
-  aligning pages and assignments with it is the obvious fix.
+  aligning pages and assignments with it is the obvious fix. `calendar` does
+  **not** share this edge: a course whose assignment fetch fails is logged and
+  skipped, the rest of the run continues, and the run reports exit code `13`
+  if the failure was partial (spec ticket 11).
 * **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
   `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the

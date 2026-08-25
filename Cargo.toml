@@ -10,6 +10,23 @@ needless_collect = "deny"
 redundant_clone = "deny"
 large_enum_variant = "deny"
 
+[features]
+default = ["zoom"]
+# Gates the headless browser and the whole Zoom flow (session capture, SSO,
+# recording listing/download). `chromiumoxide` is a git-pinned dependency —
+# resolving it needs network+git and it is the fragile corner of the build
+# matrix against the musl target. The calendar-sync flow never touches any of
+# this, so building without it needs neither the browser nor git.
+zoom = [
+    "dep:chromiumoxide",
+    "dep:rusqlite",
+    "dep:reqwest_cookie_store",
+    "dep:cookie",
+    "dep:cookie_store",
+    "dep:base64",
+    "dep:futures",
+]
+
 [dependencies]
 tokio = { version = "1.39", features = ["fs", "macros", "rt-multi-thread", "process"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -33,16 +50,18 @@ sha1 = "0.10"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 urlencoding = "2.1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
-base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+base64 = { version = "0.22", optional = true }
 # Pinned: chromiumoxide has no crates.io release with the CDP Fetch APIs this uses.
 # Without a rev, `cargo update` would float browser-automation code to an arbitrary commit.
-chromiumoxide = { git = "https://github.com/mattsse/chromiumoxide", rev = "6f2392f78ae851e2acf33df8e9764cc299d837db", features = ["tokio-runtime"] }
-futures = "0.3"
-reqwest_cookie_store = "0.9.0"
-cookie = "0.18.1"
-cookie_store = "0.22.0"
+# Optional: gated behind the `zoom` feature (see [features] above) so a build
+# without it never needs network+git to resolve this dependency.
+chromiumoxide = { git = "https://github.com/mattsse/chromiumoxide", rev = "6f2392f78ae851e2acf33df8e9764cc299d837db", features = ["tokio-runtime"], optional = true }
+futures = { version = "0.3", optional = true }
+reqwest_cookie_store = { version = "0.9.0", optional = true }
+cookie = { version = "0.18.1", optional = true }
+cookie_store = { version = "0.22.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23.0"

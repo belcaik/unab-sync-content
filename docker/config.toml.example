@@ -1,0 +1,53 @@
+# Example config.toml for the calendar-sync cron container.
+#
+# Copy this to <CONFIG_DIR>/config.toml (default: ./data/config/config.toml)
+# BEFORE the first `docker compose up`. Fill in the placeholders. This file
+# is never baked into the image — it is bind-mounted at runtime (see
+# docker-compose.yml). Do not commit your filled-in copy.
+#
+# `u_crawler init` (run locally, outside the container, on the same
+# machine) generates the equivalent of this file interactively if you'd
+# rather not hand-edit it.
+
+download_root = "/home/appuser/Caldir"   # unused by `calendar`, but must be non-empty
+concurrency = 4
+max_rps = 2
+user_agent = ""
+
+[logging]
+level = "info"
+file = "/home/appuser/.config/u_crawler/u_crawler.log"
+
+[canvas]
+base_url = "https://<tenant>.instructure.com"
+
+# Provide exactly one of these. Prefer token_cmd (e.g. reading a Docker
+# secret file) over a literal token if your threat model allows it — either
+# way this file stays out of the image and off the image registry.
+token = "<your Canvas personal access token>"
+token_cmd = ""
+
+ignored_courses = []
+
+# Not used by `calendar`; leave blank in a calendar-only deployment.
+sso_email = ""
+sso_password = ""
+
+[announcements]
+enabled = true
+download_media = true
+
+[calendar]
+enabled = true
+# MUST match the container-side path of the caldir volume mount in
+# docker-compose.yml (the right-hand side of the `CALDIR_DIR` bind mount).
+caldir_root = "/home/appuser/Caldir"
+
+[zoom]
+# This image is built with `--no-default-features` (no headless browser, no
+# ffmpeg). Leave Zoom disabled — the `calendar` command never touches it,
+# but the field is required by the config schema regardless.
+enabled = false
+ffmpeg_path = "ffmpeg"
+user_agent = ""
+external_tool_id = 187
