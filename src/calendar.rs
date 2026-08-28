@@ -12,6 +12,19 @@
 //! 08), marked `STATUS:COMPLETED` when the caller's own submission for that
 //! assignment is submitted or graded (spec D7, ticket 09).
 //!
+//! The deadline `VTODO` is written for a human to read in an aggregated task
+//! list (`.scratch/calendar-rich-vtodo/spec.md`, ID1-ID3, ID6-ID7): its
+//! `SUMMARY` and the first line of its `DESCRIPTION` share one formatter,
+//! [`deadline_label`], so the course name and assignment title can never
+//! disagree between the two; [`deadline_description`] adds the availability
+//! window and the assignment link as plain text, because `caldir` forwards
+//! neither `URL` nor `DTSTART` to Google Tasks and `DESCRIPTION` is the only
+//! free-text field that survives the trip. Text values on this path go
+//! through [`vtodo_text`] (CR normalization then RFC 5545 §3.3.11 escaping)
+//! and every line through [`fold_line`] (§3.1, 75 octets). Both apply to the
+//! `VTODO` only: [`render_vevent`] and the whole `windows` collection are out
+//! of scope and emit exactly the bytes they always have.
+//!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
 //! disk with [`fsutil::atomic_write`]. Per spec "Fuera del alcance de los
@@ -31,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sha1::{Digest, Sha1};
 
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
@@ -269,6 +282,162 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or(due)
 }
 
+/// Collapse every flavour of line ending Canvas can hand us (`\r\n`, lone
+/// `\r`) down to a bare `\n`, so the escaper downstream sees exactly one
+/// representation of "line break".
+///
+/// This lives here and **not** inside [`escape_text`] on purpose. `escape_text`
+/// is shared with [`render_vevent`], whose bytes this ticket must not move;
+/// widening it would change the `windows` collection too. The `VTODO` text
+/// path is the only place that needs the normalization, so it is the only
+/// place that gets it.
+///
+/// Why it is needed at all: a lone `\r` survives [`escape_text`] untouched and
+/// reaches the published file verbatim. vassago's `unfold`
+/// (`merge-ucrawler.py:21`) treats a lone `\r` as a line terminator, so that
+/// stray octet silently splits one property into two on the way through the
+/// bridge. RFC 5545 §3.1 excludes CR from `VALUE-CHAR` as well
+/// (`CONTROL = %x00-08 / %x0A-1F / %x7F`), so emitting one was never
+/// conformant to begin with.
+fn normalize_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Prepare a Canvas-sourced string for use as an RFC 5545 TEXT value in the
+/// `VTODO`: normalize line endings first ([`normalize_newlines`]), then apply
+/// the §3.3.11 escaping ([`escape_text`]). Order matters — normalizing after
+/// escaping would leave the `\r` behind the `\n` that was already turned into
+/// a `\n` escape.
+fn vtodo_text(s: &str) -> String {
+    escape_text(&normalize_newlines(s))
+}
+
+/// Format an instant for the *human-readable* body of the `DESCRIPTION`:
+/// RFC 3339, UTC, whole seconds — `2026-09-09T14:00:00Z` (spec ID3).
+///
+/// Deliberately not [`ics_datetime`]'s `20260909T140000Z`: that form is for
+/// property values a machine reads, this one is read by a student inside a
+/// task's notes. It is UTC rather than a local zone because the project has
+/// no presentation timezone and this change does not invent one (spec D9,
+/// and AGENTS.md's ban on inert configuration). It also earns its keep: the
+/// `DUE` that reaches Google Tasks is reduced to a bare day, so this line is
+/// the only place the exact hour survives the pipeline.
+fn rfc3339_utc(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Build the `DESCRIPTION` value of a deadline `VTODO` (spec ID2): three
+/// logical lines, joined by the RFC 5545 §3.3.11 `\n` escape (a backslash and
+/// an `n`, two octets in the file — not a real line break).
+///
+/// 1. the [`deadline_label`], the same text `SUMMARY` carries;
+/// 2. `Disponible: <unlock_at> - Vence: <due_at>`, where a genuinely absent
+///    `unlock_at` reads `sin fecha de apertura` rather than a fabricated
+///    date;
+/// 3. the assignment's `html_url` — **omitted entirely** when Canvas did not
+///    give one, rather than emitted empty or padded.
+///
+/// The URL is repeated here even though the component already carries a
+/// `URL` property, and that is deliberate rather than redundant: `caldir`
+/// never forwards `URL` to Google Tasks (`to_google.rs:17-45`), so
+/// `DESCRIPTION` — which it maps to the task's `notes` — is the only route by
+/// which the link reaches the place the student reads.
+///
+/// `assignment.description` (Canvas's HTML body) is deliberately absent. It is
+/// exactly the large HTML-derived blob that makes vassago's `shared_signature`
+/// diverge when Google normalizes `notes`, producing a sticky `CONFLICT` that
+/// blocks publication. Short, plain and stable is the mitigation.
+///
+/// Line 2 always exists — this is only ever called for an assignment that has
+/// a `due_at` — so the value can never come out empty and there is no
+/// "omit the whole property" case to handle.
+fn deadline_description(course: &Course, assignment: &Assignment, due: DateTime<Utc>) -> String {
+    let available = match assignment.unlock_at {
+        Some(unlock) => rfc3339_utc(unlock),
+        None => "sin fecha de apertura".to_string(),
+    };
+    let mut logical_lines = vec![
+        vtodo_text(&deadline_label(course, assignment)),
+        vtodo_text(&format!(
+            "Disponible: {available} - Vence: {}",
+            rfc3339_utc(due)
+        )),
+    ];
+    if let Some(url) = &assignment.html_url {
+        logical_lines.push(vtodo_text(url));
+    }
+    logical_lines.join("\\n")
+}
+
+/// The RFC 5545 §3.1 ceiling for a content line: "Lines of text SHOULD NOT be
+/// longer than 75 octets, excluding the line break." Octets, not characters.
+const MAX_LINE_OCTETS: usize = 75;
+
+/// Fold one content line per RFC 5545 §3.1: split it into chunks of at most
+/// [`MAX_LINE_OCTETS`] octets joined by `CRLF` plus a single SPACE, which the
+/// reader's mandatory unfolding step removes again.
+///
+/// The continuation's leading SPACE counts against the 75, so a continuation
+/// carries at most 74 octets of value. Exactly one SPACE is inserted and no
+/// more: §3.1's own example shows a second space surviving unfolding as part
+/// of the value, which for a URL would be corruption.
+///
+/// Splits only on character boundaries. §3.1's note calls a fold made inside
+/// a UTF-8 multi-octet sequence "improperly folded"; with Spanish course
+/// names (`á`, `ñ`, `¿`, em dashes) a naive octet cut would hit one routinely.
+/// The longest UTF-8 sequence is 4 octets and the smallest budget here is 74,
+/// so backing up to a boundary always leaves progress to make and the loop
+/// always terminates.
+fn fold_line(line: &str) -> String {
+    if line.len() <= MAX_LINE_OCTETS {
+        return line.to_string();
+    }
+    let mut folded = String::with_capacity(line.len() + line.len() / MAX_LINE_OCTETS * 3);
+    let mut start = 0;
+    // The first line spends nothing on a continuation SPACE; every later one
+    // spends exactly one octet on it.
+    let mut budget = MAX_LINE_OCTETS;
+    while line.len() - start > budget {
+        let mut end = start + budget;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        folded.push_str(&line[start..end]);
+        folded.push_str("\r\n ");
+        start = end;
+        budget = MAX_LINE_OCTETS - 1;
+    }
+    folded.push_str(&line[start..]);
+    folded
+}
+
+/// The human-readable label for a deadline: `<course name> - <assignment
+/// title>` (spec ID1).
+///
+/// The course name is [`Course::name`] — the human name Canvas shows — and
+/// deliberately neither [`fsutil::course_dir`]'s output (sanitized and
+/// transliterated to ASCII) nor `course_code`. A student reading a list that
+/// aggregates every course needs the name they recognize, not a path
+/// component.
+///
+/// Only non-empty parts are joined, so a nameless assignment yields the bare
+/// course name rather than `"Course - "`, and a nameless course yields the
+/// bare title rather than `" - Title"`. A decorative dangling dash would be
+/// noise the data never justified.
+///
+/// One function, two call sites: `SUMMARY` and the first logical line of
+/// `DESCRIPTION` both render this, so the two can never drift apart.
+fn deadline_label(course: &Course, assignment: &Assignment) -> String {
+    [
+        course.name.as_str(),
+        assignment.name.as_deref().unwrap_or(""),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" - ")
+}
+
 /// Render a single assignment deadline as a complete `.ics` file: one
 /// `VCALENDAR` wrapping one `VTODO`.
 ///
@@ -291,7 +460,13 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
 /// comparison (spec D5) needs: for a given assignment/submission pair the
 /// rendered content is a pure function of that data, so an unrelated field
 /// changing produces a diff exactly where the data changed and nowhere else.
-fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>, done: bool) -> String {
+fn render_vtodo(
+    uid: &str,
+    course: &Course,
+    assignment: &Assignment,
+    due: DateTime<Utc>,
+    done: bool,
+) -> String {
     let dtstamp = dtstamp_for(assignment, due);
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
@@ -308,14 +483,26 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>, done: bo
     }
     lines.push(format!(
         "SUMMARY:{}",
-        escape_text(assignment.name.as_deref().unwrap_or(""))
+        vtodo_text(&deadline_label(course, assignment))
+    ));
+    lines.push(format!(
+        "DESCRIPTION:{}",
+        deadline_description(course, assignment, due)
     ));
     if let Some(url) = &assignment.html_url {
         lines.push(format!("URL:{}", escape_text(url)));
     }
     lines.push("END:VTODO".to_string());
     lines.push("END:VCALENDAR".to_string());
-    lines.join("\r\n") + "\r\n"
+    // Folding is applied here and nowhere else (spec ID7): `render_vevent`
+    // must keep emitting the same bytes it always has, so the `windows`
+    // collection stays untouched by this ticket.
+    lines
+        .iter()
+        .map(|line| fold_line(line))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
 }
 
 /// Render a single assignment's availability window as a complete `.ics`
@@ -435,7 +622,7 @@ pub fn plan(
 
         let uid = deadline_uid(assignment.id);
         let path = deadlines_dir.join(deadline_filename(assignment.id));
-        let content = render_vtodo(&uid, assignment, due, done);
+        let content = render_vtodo(&uid, course, assignment, due, done);
         let hash = content_hash(&content);
         let key = calendar_state_key(assignment.id);
         let unchanged =
@@ -995,11 +1182,398 @@ mod tests {
             .content
             .contains("UID:u_crawler-todo-555@u-crawler.local"));
         assert!(write.content.contains("DUE:20260901T235900Z"));
-        assert!(write.content.contains("SUMMARY:Essay Draft"));
+        // Hand-written literal: `<course human name> - <assignment title>`
+        // (spec ID1). The course name is `Course.name`, not the sanitized
+        // directory `Intro_to_Testing_TST101` and not the course code.
+        assert!(write
+            .content
+            .contains("SUMMARY:Intro to Testing - Essay Draft"));
         assert!(write
             .content
             .contains("URL:https://canvas.example.edu/courses/1/assignments/555"));
         assert!(write.content.contains("END:VTODO"));
+    }
+
+    /// Undo RFC 5545 §3.1 line folding, so a test can assert against one
+    /// logical content line. This is the *inverse* of what the renderer
+    /// does, not a copy of it: it never composes an expected value, it only
+    /// makes the produced value readable. Every expected string in these
+    /// tests is still a hand-written literal.
+    fn unfold(content: &str) -> Vec<String> {
+        let mut logical: Vec<String> = Vec::new();
+        for raw in content.split("\r\n") {
+            match raw.strip_prefix(' ') {
+                Some(rest) => match logical.last_mut() {
+                    Some(last) => last.push_str(rest),
+                    None => logical.push(rest.to_string()),
+                },
+                None => logical.push(raw.to_string()),
+            }
+        }
+        logical
+    }
+
+    /// The single logical content line of `content` starting with `prefix`.
+    fn logical_line(content: &str, prefix: &str) -> String {
+        let matches: Vec<String> = unfold(content)
+            .into_iter()
+            .filter(|line| line.starts_with(prefix))
+            .collect();
+        assert_eq!(matches.len(), 1, "expected exactly one {prefix} line");
+        matches.into_iter().next().expect("one match")
+    }
+
+    #[test]
+    fn the_vtodo_carries_a_three_line_description() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        // Hand-written literal (spec ID2/ID3): label, availability line with
+        // RFC 3339 UTC instants, then the assignment URL. `\n` here is the
+        // RFC 5545 §3.3.11 escape, two characters in the file.
+        assert_eq!(
+            logical_line(&vtodo.content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-08-01T00:00:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn a_missing_unlock_at_says_so_instead_of_inventing_a_date() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        assert!(assignment.unlock_at.is_none());
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn an_unlock_at_at_or_after_the_due_at_is_still_reported_verbatim() {
+        // Spec ID5: the availability line reports what Canvas said. Only a
+        // genuinely absent `unlock_at` reads "sin fecha de apertura" — an
+        // inconsistent one is not silently rewritten into it. (Whether such
+        // an `unlock_at` earns a `DTSTART` is ticket #14's question, not
+        // this line's.)
+        let root = Path::new("/caldir");
+        let mut same_instant = assignment_with_due_date();
+        same_instant.unlock_at = same_instant.due_at;
+        let got = plan(
+            root,
+            &course(),
+            &[same_instant],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-01T23:59:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+
+        let mut after = assignment_with_due_date();
+        after.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[after],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-15T00:00:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn a_missing_html_url_drops_the_third_description_line_entirely() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.html_url = None;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // Two logical lines, no trailing separator and no filler text.
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z"
+        );
+        assert!(!got.writes[0].content.contains("URL:"));
+    }
+
+    #[test]
+    fn special_characters_are_escaped_and_carriage_returns_normalized_away() {
+        // RFC 5545 §3.3.11: `\`, `;` and `,` are escaped, a line break
+        // becomes `\n`, and `:` is left alone. Spec ID6: `\r\n` and lone `\r`
+        // collapse to `\n` *before* escaping, since vassago's `unfold` treats
+        // a surviving lone `\r` as a line terminator and splits the property.
+        let root = Path::new("/caldir");
+        let messy_course = Course {
+            id: 1,
+            name: r"Cálculo, Álgebra; Nivel\Avanzado".into(),
+            course_code: Some("MAT101".into()),
+        };
+        let mut assignment = assignment_with_due_date();
+        assignment.name = Some("Tarea 1\r\nParte 2\rParte 3".into());
+
+        let got = plan(
+            root,
+            &messy_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let content = &got.writes[0].content;
+
+        assert_eq!(
+            logical_line(content, "SUMMARY:"),
+            r"SUMMARY:Cálculo\, Álgebra\; Nivel\\Avanzado - Tarea 1\nParte 2\nParte 3"
+        );
+        assert_eq!(
+            logical_line(content, "DESCRIPTION:"),
+            r"DESCRIPTION:Cálculo\, Álgebra\; Nivel\\Avanzado - Tarea 1\nParte 2\nParte 3\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+
+        // No stray CR survives inside any content line: the only carriage
+        // returns left in the file are the CRLF line terminators themselves.
+        for line in content.split("\r\n") {
+            assert!(!line.contains('\r'), "stray CR in {line:?}");
+        }
+    }
+
+    #[test]
+    fn long_vtodo_lines_are_folded_at_75_octets_on_character_boundaries() {
+        // RFC 5545 §3.1: "Lines of text SHOULD NOT be longer than 75 octets,
+        // excluding the line break", and a fold is CRLF plus one SPACE. The
+        // §3.1 note calls a fold inside a multi-octet UTF-8 sequence
+        // "improperly folded", which matters the moment a course is named in
+        // Spanish.
+        let root = Path::new("/caldir");
+        // Each 'ñ' is two octets, so a naive 75-octet cut would land inside
+        // one: "SUMMARY:" is 8 octets, leaving 67 for the value, and 67 is
+        // odd. The last whole character that fits is the 33rd.
+        let long_name = "ñ".repeat(50);
+        let long_course = Course {
+            id: 1,
+            name: long_name.clone(),
+            course_code: Some("MAT101".into()),
+        };
+        let mut assignment = assignment_with_due_date();
+        assignment.name = None;
+
+        let got = plan(
+            root,
+            &long_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let content = &got.writes[0].content;
+
+        for line in content.split("\r\n") {
+            assert!(
+                line.len() <= 75,
+                "line of {} octets exceeds the RFC 5545 §3.1 limit: {line:?}",
+                line.len()
+            );
+        }
+
+        // 33 characters of value on the first line (8 + 66 = 74 octets), the
+        // remaining 17 on a continuation opened by exactly one SPACE.
+        let expected_fold = format!("SUMMARY:{}\r\n {}\r\n", "ñ".repeat(33), "ñ".repeat(17));
+        assert!(
+            content.contains(&expected_fold),
+            "expected fold not found in {content:?}"
+        );
+
+        // Unfolding restores the value byte for byte — nothing was lost or
+        // duplicated at the seam.
+        assert_eq!(
+            logical_line(content, "SUMMARY:"),
+            format!("SUMMARY:{long_name}")
+        );
+    }
+
+    #[test]
+    fn a_fully_populated_assignment_renders_these_exact_vtodo_bytes() {
+        // The whole component, hand-written. Nothing here is recomputed with
+        // the renderer's own helpers, so a change to any of them — label,
+        // escaping, date format, fold points, property order — has to be
+        // restated here deliberately.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        assert_eq!(
+            vtodo.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-555@u-crawler.local\r\n",
+                "DTSTAMP:20260901T235900Z\r\n",
+                "DUE:20260901T235900Z\r\n",
+                "PRIORITY:9\r\n",
+                "SUMMARY:Intro to Testing - Essay Draft\r\n",
+                r"DESCRIPTION:Intro to Testing - Essay Draft\nDisponible: 2026-08-01T00:00:00",
+                "\r\n",
+                r" Z - Vence: 2026-09-01T23:59:00Z\nhttps://canvas.example.edu/courses/1/assi",
+                "\r\n",
+                " gnments/555\r\n",
+                "URL:https://canvas.example.edu/courses/1/assignments/555\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn the_window_vevent_bytes_are_unchanged_by_this_ticket() {
+        // Scope contract (spec ID7/ID9): `windows` is out of scope, so its
+        // component must be byte-identical to what it was before the `VTODO`
+        // grew a label, a DESCRIPTION and line folding. Pinned in full, not
+        // probed with `contains`, so any drift shows up here.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vevent = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VEVENT"))
+            .expect("vevent present");
+
+        assert_eq!(
+            vevent.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VEVENT\r\n",
+                "UID:u_crawler-window-555@u-crawler.local\r\n",
+                "DTSTAMP:20260901T235900Z\r\n",
+                "DTSTART:20260801T000000Z\r\n",
+                "DTEND:20260901T235900Z\r\n",
+                // Bare assignment title: no course prefix, because the label
+                // is a VTODO concern only.
+                "SUMMARY:Essay Draft\r\n",
+                "URL:https://canvas.example.edu/courses/1/assignments/555\r\n",
+                "END:VEVENT\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn an_assignment_without_a_title_summarises_as_the_bare_course_name() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.name = None;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // No dangling " - " with nothing after it (spec ID1).
+        assert!(got.writes[0]
+            .content
+            .contains("SUMMARY:Intro to Testing\r\n"));
+    }
+
+    #[test]
+    fn a_course_without_a_name_summarises_as_the_bare_assignment_title() {
+        let root = Path::new("/caldir");
+        let nameless = Course {
+            id: 1,
+            name: String::new(),
+            course_code: Some("TST101".into()),
+        };
+        let got = plan(
+            root,
+            &nameless,
+            &[assignment_with_due_date()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // No leading " - " (spec ID1).
+        assert!(got.writes[0].content.contains("SUMMARY:Essay Draft\r\n"));
     }
 
     #[test]
@@ -1485,7 +2059,9 @@ mod tests {
         assert!(got.writes[0]
             .content
             .contains("UID:u_crawler-todo-555@u-crawler.local"));
-        assert!(got.writes[0].content.contains("SUMMARY:Essay Final"));
+        assert!(got.writes[0]
+            .content
+            .contains("SUMMARY:Intro to Testing - Essay Final"));
         assert!(got.deletes.is_empty());
     }
 
@@ -1915,6 +2491,7 @@ mod tests {
         let assignment = assignment_with_due_date(); // id 555
         let content = render_vtodo(
             &deadline_uid(assignment.id),
+            &course(),
             &assignment,
             assignment.due_at.unwrap(),
             false,

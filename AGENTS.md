@@ -254,12 +254,14 @@ one component never marks the other "unchanged".
 The deadline `VTODO` carries `SUMMARY` = `<Course.name> - <assignment name>`
 (the human course name from Canvas, never the sanitized directory or the
 course code; the two halves are joined with `" - "` only when both are
-non-empty), a three-line `DESCRIPTION` (the same label, then
-`Disponible: … - Vence: …` with RFC 3339 UTC timestamps, then the assignment
-`html_url` — that last line is dropped entirely when Canvas gives no URL),
-`DTSTART` = `unlock_at` **only when `unlock_at` is strictly before `due_at`**
-(RFC 5545 §3.8.2.3 wants `DUE` strictly later, so equal timestamps are
-excluded too), and `DUE` = `due_at`, plus `URL`, `PRIORITY` and `STATUS`.
+non-empty, so a nameless course or assignment never leaves a dangling dash),
+a three-line `DESCRIPTION` (the same label, then
+`Disponible: <unlock_at | "sin fecha de apertura"> - Vence: <due_at>` with
+RFC 3339 UTC timestamps, then the assignment `html_url` — that last line is
+dropped entirely when Canvas gives no URL), `DTSTART` = `unlock_at` **only
+when `unlock_at` is strictly before `due_at`** (RFC 5545 §3.8.2.3 wants `DUE`
+strictly later, so equal timestamps are excluded too), and `DUE` = `due_at`,
+plus `URL`, `PRIORITY` and `STATUS`.
 
 **The link is in `DESCRIPTION` on purpose even though `URL` already carries
 it, and the due time is spelled out in the text even though `DUE` already
@@ -279,8 +281,16 @@ Keep the `DESCRIPTION` short, plain and stable — no HTML (in particular not
 `assignment.description`), no carriage returns, no trailing spaces. It is a
 bidirectional field downstream and feeds the sync bridge's shared signature; a
 blob Google might normalize turns into a sticky conflict that blocks
-publication. Only the `VTODO` is line-folded per RFC 5545 §3.1; the `windows`
-`VEVENT` renders byte-for-byte as before and is out of scope for that work.
+publication.
+
+Text values on the `VTODO` path have `\r\n` and lone `\r` normalized to `\n`
+before RFC 5545 §3.3.11 escaping — a surviving lone CR is read as a line
+terminator downstream and silently splits the property in two — and every line
+is folded to 75 octets per §3.1, always on a character boundary. Both are
+`VTODO`-only, and live in that path rather than in `escape_text`, which
+`render_vevent` shares: the `windows` `VEVENT` is neither normalized nor
+folded, keeps `SUMMARY` = the bare assignment title, and renders byte-for-byte
+as before.
 
 An assignment recorded in `state.json` but absent from Canvas's response is
 removed: both components' files are deleted and both state entries dropped, so
