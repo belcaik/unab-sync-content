@@ -128,7 +128,7 @@ mounted-first trap in `main.rs`.
 | `scan` | `--course-id` | Enumerate courses/modules/files. No writes. |
 | `sync` | `--course-id`, `--dry-run`, `--verbose` | Mirror Canvas content, announcements and Zoom recordings. |
 | `announcements` | `--course-id`, `--dry-run` | Announcements only: markdown bodies, extracted links and media, `index.json`. |
-| `calendar` | `--course-id`, `--dry-run` | Project assignment deadlines to `.ics` `VTODO` files under `calendar.caldir_root`. |
+| `calendar` | `--course-id`, `--dry-run` | Project assignment deadlines to `.ics` `VTODO` files under `calendar.caldir_root`: course-labelled `SUMMARY`, three-line `DESCRIPTION`, `DTSTART`/`DUE`. |
 | `recordings` | `--course-id`, `--dry-run` | Report Zoom links found across a course. Does not download. |
 | `zoom flow` | `--course-id`, `--since` | Capture a Zoom session and download its recordings. |
 | `status` | `--verbose` | Per-course file counts, storage, last sync, failed items. |
@@ -244,10 +244,43 @@ Radicale issue #101 in `docs/specs/calendar-sync-flow.md` for the bug shape a
 collision would reproduce. An assignment with no `due_at` produces neither
 component. An assignment with `due_at` but no `unlock_at`, or with
 `unlock_at` at or after `due_at` (inconsistent Canvas data), gets its `VTODO`
-and no `VEVENT`. State that gates whether a component is rewritten lives
+— without a `DTSTART`, though its description still reports the real
+`unlock_at` Canvas gave — and no `VEVENT`. State that gates whether a
+component is rewritten lives
 under two distinct `state.json` namespaces — `calendar:{assignment_id}` for
 the `VTODO`, `calendar-window:{assignment_id}` for the `VEVENT` — so writing
 one component never marks the other "unchanged".
+
+The deadline `VTODO` carries `SUMMARY` = `<Course.name> - <assignment name>`
+(the human course name from Canvas, never the sanitized directory or the
+course code; the two halves are joined with `" - "` only when both are
+non-empty), a three-line `DESCRIPTION` (the same label, then
+`Disponible: … - Vence: …` with RFC 3339 UTC timestamps, then the assignment
+`html_url` — that last line is dropped entirely when Canvas gives no URL),
+`DTSTART` = `unlock_at` **only when `unlock_at` is strictly before `due_at`**
+(RFC 5545 §3.8.2.3 wants `DUE` strictly later, so equal timestamps are
+excluded too), and `DUE` = `due_at`, plus `URL`, `PRIORITY` and `STATUS`.
+
+**The link is in `DESCRIPTION` on purpose even though `URL` already carries
+it, and the due time is spelled out in the text even though `DUE` already
+carries it. Neither is duplication to clean up.** Downstream, `caldir` never
+sends `URL` to Google Tasks, and `DESCRIPTION` is the only free text that
+arrives (as the task's `notes`); `DUE` reaches Google as a date only, computed
+in the syncing machine's local zone, so the time of day survives nowhere else.
+A separate start date and a deadline are **not writable** through the public
+Google Tasks API — one writable date field, `due`, date-only, documented as the
+*scheduled* date. That is a verified limitation of the destination, not a bug
+here; `docs/specs/calendar-sync-flow.md` (D13 and "Límite verificado: Google
+Tasks") carries the field matrix and the sources. Do not add fields, X-
+properties or configuration trying to work around it, and do not reach for an
+undocumented Google API.
+
+Keep the `DESCRIPTION` short, plain and stable — no HTML (in particular not
+`assignment.description`), no carriage returns, no trailing spaces. It is a
+bidirectional field downstream and feeds the sync bridge's shared signature; a
+blob Google might normalize turns into a sticky conflict that blocks
+publication. Only the `VTODO` is line-folded per RFC 5545 §3.1; the `windows`
+`VEVENT` renders byte-for-byte as before and is out of scope for that work.
 
 An assignment recorded in `state.json` but absent from Canvas's response is
 removed: both components' files are deleted and both state entries dropped, so
@@ -421,6 +454,13 @@ Documented so they are not rediscovered as surprises:
   **not** share this edge: a course whose assignment fetch fails is logged and
   skipped, the rest of the run continues, and the run reports exit code `13`
   if the failure was partial (spec ticket 11).
+* **The `URL` value is escaped as if it were `TEXT`.** `calendar.rs` runs
+  `escape_text` over the `html_url` for both components, but RFC 5545 §3.8.4.6
+  types `URL` as `URI`, which takes no backslash escaping — so a Canvas URL
+  containing a comma would be emitted wrong. No observed Canvas URL has one,
+  `caldir` preserves the value verbatim and never sends it to Google anyway,
+  and the function is shared with the frozen `windows` `VEVENT`. Known debt,
+  deliberately unfixed; fixing it means touching `VEVENT` bytes.
 * **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
   `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
