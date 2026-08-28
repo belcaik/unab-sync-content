@@ -249,6 +249,21 @@ under two distinct `state.json` namespaces — `calendar:{assignment_id}` for
 the `VTODO`, `calendar-window:{assignment_id}` for the `VEVENT` — so writing
 one component never marks the other "unchanged".
 
+The deadline `VTODO` carries `SUMMARY` = `<Course.name> - <assignment title>`
+— the human course name, never the sanitized directory or the course code —
+joining only the non-empty halves, so a nameless assignment or course never
+produces a dangling `" - "`. It also carries a three-line `DESCRIPTION`: that
+same label, `Disponible: <unlock_at | "sin fecha de apertura"> - Vence:
+<due_at>` with both instants in RFC 3339 UTC, and the assignment's `html_url`
+when Canvas gives one (the third line is omitted entirely otherwise). The link
+is repeated there on purpose: `caldir` never forwards the `URL` property to
+Google Tasks, and `DESCRIPTION` is the only free-text field that reaches the
+task's notes. Canvas's HTML `description` is deliberately kept out of it.
+Text values in the `VTODO` have `\r\n` and lone `\r` normalized to `\n`
+before RFC 5545 §3.3.11 escaping, and every line is folded to 75 octets per
+§3.1 on character boundaries. Both are `VTODO`-only: the `windows` `VEVENT` is
+neither normalized nor folded and keeps `SUMMARY` = the bare assignment title.
+
 An assignment recorded in `state.json` but absent from Canvas's response is
 removed: both components' files are deleted and both state entries dropped, so
 the calendar does not accumulate tasks the teacher has withdrawn. u_crawler
