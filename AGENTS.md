@@ -453,6 +453,32 @@ database.
 
 ---
 
+## Agent skills
+
+Per-repo configuration for the `mattpocock/skills` engineering skills
+(`research`, `to-spec`, `to-tickets`, `implement`, `tdd`, `triage`,
+`code-review`). Written by `setup-matt-pocock-skills`; edit the files under
+`docs/agents/` directly rather than re-running it.
+
+### Issue tracker
+
+GitHub Issues on `belcaik/unab-sync-content`, via the `gh` CLI, falling back to
+local markdown tickets under `.scratch/<feature>/issues/` when `gh` is not
+authenticated. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical role names, unchanged: `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and one `docs/adr/` at the repo root, created
+lazily. See `docs/agents/domain.md`.
+
+---
+
 ## Agent Operating Instructions
 
 * Prefer deleting complexity to rearranging it.
