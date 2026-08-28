@@ -19,7 +19,12 @@
 //! disagree between the two; [`deadline_description`] adds the availability
 //! window and the assignment link as plain text, because `caldir` forwards
 //! neither `URL` nor `DTSTART` to Google Tasks and `DESCRIPTION` is the only
-//! free-text field that survives the trip. Text values on this path go
+//! free-text field that survives the trip. It also carries `DTSTART` =
+//! `unlock_at`, but only when [`availability_start`] allows it — the same
+//! strictly-before-`due_at` predicate that decides whether a window `VEVENT`
+//! exists at all, so the two collections can never disagree about whether an
+//! assignment has a window (spec ID4, RFC 5545 §3.8.2.3). Text values on this
+//! path go
 //! through [`vtodo_text`] (CR normalization then RFC 5545 §3.3.11 escaping)
 //! and every line through [`fold_line`] (§3.1, 75 octets). Both apply to the
 //! `VTODO` only: [`render_vevent`] and the whole `windows` collection are out
@@ -282,6 +287,31 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or(due)
 }
 
+/// The instant an assignment becomes available, but only when Canvas's data
+/// describes a window coherent enough to represent: `unlock_at` present *and*
+/// **strictly** before `due_at`.
+///
+/// The inequality is strict because RFC 5545 §3.8.2.3 makes it so — the value
+/// of `DUE` "MUST be later in time than the value of the 'DTSTART' property".
+/// "Later in time than", not "no earlier than": an `unlock_at` equal to
+/// `due_at` breaks that MUST exactly as an inverted one does. §3.6.2 lists
+/// `dtstart` as OPTIONAL, so dropping the property is always legal, which
+/// makes `None` the branch that cannot turn inconsistent Canvas data into an
+/// invalid component.
+///
+/// One predicate, two callers, deliberately: [`render_vtodo`] asks it whether
+/// the deadline may carry a `DTSTART` (spec ID4) and [`plan`] asks it whether
+/// an availability-window `VEVENT` exists at all (spec D3). Sharing it is what
+/// keeps the two collections from ever disagreeing about whether an
+/// assignment has a window — the incoherent case yields a `VTODO` without
+/// `DTSTART` *and* no `VEVENT`, never one without the other.
+fn availability_start(
+    unlock_at: Option<DateTime<Utc>>,
+    due: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    unlock_at.filter(|unlock| *unlock < due)
+}
+
 /// Collapse every flavour of line ending Canvas can hand us (`\r\n`, lone
 /// `\r`) down to a bare `\n`, so the escaper downstream sees exactly one
 /// representation of "line break".
@@ -475,9 +505,18 @@ fn render_vtodo(
         "BEGIN:VTODO".to_string(),
         format!("UID:{uid}"),
         format!("DTSTAMP:{}", ics_datetime(dtstamp)),
-        format!("DUE:{}", ics_datetime(due)),
-        format!("PRIORITY:{}", priority_for(assignment)),
     ];
+    // `DTSTART` = `unlock_at`, and only when [`availability_start`] says the
+    // pair is legal (spec ID4, RFC 5545 §3.8.2.3). It is serialized with the
+    // very same [`ics_datetime`] as `DUE`, so both are `DATE-TIME` UTC with a
+    // `Z` — §3.8.2.3 requires the two value types to match as firmly as it
+    // requires the ordering. It sits ahead of `DUE`, the order §3.6.2's own
+    // `VTODO` example uses.
+    if let Some(unlock) = availability_start(assignment.unlock_at, due) {
+        lines.push(format!("DTSTART:{}", ics_datetime(unlock)));
+    }
+    lines.push(format!("DUE:{}", ics_datetime(due)));
+    lines.push(format!("PRIORITY:{}", priority_for(assignment)));
     if done {
         lines.push("STATUS:COMPLETED".to_string());
     }
@@ -575,7 +614,12 @@ fn render_vevent(
 /// No `unlock_at` at all produces the `VTODO` and no `VEVENT` — there is no
 /// window to represent. An `unlock_at` at or after `due_at` is treated as
 /// inconsistent Canvas data and also produces no `VEVENT`, rather than a
-/// zero- or negative-length event. An assignment with no `due_at` produces
+/// zero- or negative-length event. In both of those cases the `VTODO` it does
+/// produce carries no `DTSTART` either, since [`availability_start`] is the
+/// single predicate behind both decisions — though its `DESCRIPTION` still
+/// reports the real `unlock_at` Canvas gave (spec ID5): the property is
+/// omitted because the RFC forces it, not because the datum is disbelieved.
+/// An assignment with no `due_at` produces
 /// neither component: a window needs both ends, so it cannot exist without a
 /// due date either.
 ///
@@ -640,26 +684,27 @@ pub fn plan(
         // present and strictly before `due_at`. Absent `unlock_at` means
         // there is no window to represent; an `unlock_at` at or after `due_at`
         // is inconsistent Canvas data and is treated as "no window" rather
-        // than emitting a zero/negative-length event.
-        if let Some(unlock) = assignment.unlock_at {
-            if unlock < due {
-                let window_uid = window_uid(assignment.id);
-                let window_path = windows_dir.join(window_filename(assignment.id));
-                let window_content = render_vevent(&window_uid, assignment, unlock, due);
-                let window_hash = content_hash(&window_content);
-                let window_key = window_state_key(assignment.id);
-                let window_unchanged = prev
-                    .get(&window_key)
-                    .and_then(|item| item.content_hash.as_deref())
-                    == Some(window_hash.as_str());
-                if !window_unchanged {
-                    writes.push(PlannedWrite {
-                        path: window_path,
-                        content: window_content,
-                        assignment_id: assignment.id,
-                        state_key: window_key,
-                    });
-                }
+        // than emitting a zero/negative-length event. That is the very same
+        // [`availability_start`] the `VTODO` consults for its `DTSTART`, so
+        // the two collections cannot drift into disagreeing about whether
+        // this assignment has a window.
+        if let Some(unlock) = availability_start(assignment.unlock_at, due) {
+            let window_uid = window_uid(assignment.id);
+            let window_path = windows_dir.join(window_filename(assignment.id));
+            let window_content = render_vevent(&window_uid, assignment, unlock, due);
+            let window_hash = content_hash(&window_content);
+            let window_key = window_state_key(assignment.id);
+            let window_unchanged = prev
+                .get(&window_key)
+                .and_then(|item| item.content_hash.as_deref())
+                == Some(window_hash.as_str());
+            if !window_unchanged {
+                writes.push(PlannedWrite {
+                    path: window_path,
+                    content: window_content,
+                    assignment_id: assignment.id,
+                    state_key: window_key,
+                });
             }
         }
     }
@@ -1436,6 +1481,138 @@ mod tests {
         );
     }
 
+    // --- DTSTART on the deadline VTODO (ticket 14, spec ID4) ---
+    //
+    // RFC 5545 §3.8.2.3: `DUE` "MUST be later in time than the value of the
+    // 'DTSTART' property". Strictly later — so an `unlock_at` equal to
+    // `due_at` is as illegal a pairing as an inverted one, and both branches
+    // drop the property rather than the component.
+
+    #[test]
+    fn unlock_at_strictly_before_due_at_becomes_the_vtodo_dtstart() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        // Hand-written literals. Both are `DATE-TIME` UTC with the `Z`
+        // suffix, which is also what §3.8.2.3 demands of the pair: the two
+        // value types must match.
+        assert_eq!(
+            logical_line(&vtodo.content, "DTSTART:"),
+            "DTSTART:20260801T000000Z"
+        );
+        assert_eq!(logical_line(&vtodo.content, "DUE:"), "DUE:20260901T235900Z");
+    }
+
+    #[test]
+    fn a_missing_unlock_at_produces_no_dtstart_at_all() {
+        // Canvas said nothing about when this opens, so the component says
+        // nothing either — a fabricated `DTSTART` would be an assertion the
+        // data never supported (spec user story 7).
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        assert!(assignment.unlock_at.is_none());
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+    }
+
+    #[test]
+    fn an_unlock_at_equal_to_the_due_at_produces_no_dtstart_and_no_vevent() {
+        // §3.8.2.3 wants `DUE` *later* than `DTSTART`; equal timestamps are
+        // not later. The property goes, the component stays — and `plan`
+        // already refuses the zero-length window, so both collections agree.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = assignment.due_at;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(content.contains("BEGIN:VTODO"));
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
+    #[test]
+    fn an_unlock_at_after_the_due_at_produces_no_dtstart_and_no_vevent() {
+        // The inverted case, which the equal case is deliberately treated as
+        // an instance of.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z.
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(content.contains("BEGIN:VTODO"));
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
     #[test]
     fn a_fully_populated_assignment_renders_these_exact_vtodo_bytes() {
         // The whole component, hand-written. Nothing here is recomputed with
@@ -1472,6 +1649,10 @@ mod tests {
                 "BEGIN:VTODO\r\n",
                 "UID:u_crawler-todo-555@u-crawler.local\r\n",
                 "DTSTAMP:20260901T235900Z\r\n",
+                // `unlock_at` is strictly before `due_at` here, so the pair
+                // is legal (§3.8.2.3) and `DTSTART` appears — immediately
+                // ahead of `DUE`, in the same `DATE-TIME` UTC `Z` form.
+                "DTSTART:20260801T000000Z\r\n",
                 "DUE:20260901T235900Z\r\n",
                 "PRIORITY:9\r\n",
                 "SUMMARY:Intro to Testing - Essay Draft\r\n",
