@@ -2289,6 +2289,507 @@ mod tests {
         assert!(second.writes.is_empty());
     }
 
+    // --- identity, convergence and cross-field regression (ticket 15,
+    // spec ID8) ---
+    //
+    // Everything below goes through `plan` and asserts on the returned
+    // `Plan` and the `.ics` bytes it carries. Every expected value is a
+    // hand-written literal; none is recomputed with a helper under test.
+
+    /// The course used by the compatibility fixtures: a real-shaped Spanish
+    /// name, so the accented octet is inside the folded region rather than
+    /// only in a synthetic `"ñ".repeat(50)`.
+    fn fixture_course() -> Course {
+        Course {
+            id: 4210,
+            name: "Cálculo Diferencial".into(),
+            course_code: Some("MAT1101".into()),
+        }
+    }
+
+    /// The assignment used by the compatibility fixtures: course label, a
+    /// coherent availability window, a URL, and a graded, submittable
+    /// assignment so `PRIORITY:1` is exercised alongside the new fields.
+    fn fixture_assignment() -> Assignment {
+        Assignment {
+            id: 90210,
+            name: Some("Sumativa 5: Informe de laboratorio".into()),
+            description: None,
+            updated_at: Some("2026-09-01T18:30:00Z".into()),
+            due_at: Some(
+                DateTime::parse_from_rfc3339("2026-09-16T23:59:00Z")
+                    .unwrap()
+                    .into(),
+            ),
+            unlock_at: Some(
+                DateTime::parse_from_rfc3339("2026-09-09T14:00:00Z")
+                    .unwrap()
+                    .into(),
+            ),
+            lock_at: None,
+            points_possible: Some(30.0),
+            omit_from_final_grade: Some(false),
+            html_url: Some("https://canvas.example.edu/courses/4210/assignments/90210".into()),
+            assignment_group_id: None,
+            submission_types: Some(vec!["online_upload".into()]),
+            published: None,
+        }
+    }
+
+    /// The deadline `VTODO` of a plan, or a panic naming what was there
+    /// instead. Reading, never composing.
+    fn only_vtodo(got: &Plan) -> &PlannedWrite {
+        got.writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("a vtodo write")
+    }
+
+    #[test]
+    fn the_compatibility_fixtures_render_these_exact_bytes() {
+        // These are the bytes committed under
+        // `.scratch/calendar-rich-vtodo/fixtures/` and handed to caldir and
+        // vassago as evidence (see that directory's README). Pinned here so
+        // the fixtures cannot silently drift away from what the planner
+        // actually emits. Hand-written in full, fold points included: the
+        // 75-octet cuts were derived from RFC 5545 §3.1 by hand, not from
+        // `fold_line`'s output.
+        let root = Path::new("/caldir");
+
+        let with_window = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = only_vtodo(&with_window);
+        assert_eq!(
+            vtodo.path,
+            Path::new("/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics")
+        );
+        assert_eq!(
+            vtodo.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-90210@u-crawler.local\r\n",
+                "DTSTAMP:20260901T183000Z\r\n",
+                "DTSTART:20260909T140000Z\r\n",
+                "DUE:20260916T235900Z\r\n",
+                "PRIORITY:1\r\n",
+                "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\nDisp",
+                "\r\n",
+                r" onible: 2026-09-09T14:00:00Z - Vence: 2026-09-16T23:59:00Z\nhttps://canvas",
+                "\r\n",
+                " .example.edu/courses/4210/assignments/90210\r\n",
+                "URL:https://canvas.example.edu/courses/4210/assignments/90210\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+
+        let mut no_unlock = fixture_assignment();
+        no_unlock.unlock_at = None;
+        let without_window = plan(
+            root,
+            &fixture_course(),
+            &[no_unlock],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(without_window.writes.len(), 1, "no window component");
+        assert_eq!(
+            without_window.writes[0].content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-90210@u-crawler.local\r\n",
+                "DTSTAMP:20260901T183000Z\r\n",
+                // No `DTSTART`: Canvas gave no `unlock_at`, so there is no
+                // window to assert (spec ID4).
+                "DUE:20260916T235900Z\r\n",
+                "PRIORITY:1\r\n",
+                "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\nDisp",
+                "\r\n",
+                r" onible: sin fecha de apertura - Vence: 2026-09-16T23:59:00Z\nhttps://canva",
+                "\r\n",
+                " s.example.edu/courses/4210/assignments/90210\r\n",
+                "URL:https://canvas.example.edu/courses/4210/assignments/90210\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn a_course_rename_rewrites_the_same_file_under_the_same_uid() {
+        // `SUMMARY` and `DESCRIPTION` now depend on `Course.name` (spec ID1),
+        // so a course rename is newly a content change. It must still be a
+        // rewrite of the same component, not a new object: same filename,
+        // same UID, same state key, and nothing planned for deletion.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let before = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let prev = state_with_hash(assignment.id, &before.writes[0].content);
+
+        let renamed_course = Course {
+            id: 1,
+            name: "Intro to Testing (Section B)".into(),
+            course_code: Some("TST101".into()),
+        };
+        let after = plan(
+            root,
+            &renamed_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &prev,
+        );
+
+        assert_eq!(after.writes.len(), 1);
+        assert_eq!(
+            after.writes[0].path.file_name(),
+            before.writes[0].path.file_name()
+        );
+        assert_eq!(after.writes[0].state_key, "calendar:555");
+        assert!(after.writes[0]
+            .content
+            .contains("UID:u_crawler-todo-555@u-crawler.local"));
+        assert_eq!(
+            logical_line(&after.writes[0].content, "SUMMARY:"),
+            "SUMMARY:Intro to Testing (Section B) - Essay Draft"
+        );
+        assert!(after.deletes.is_empty());
+    }
+
+    #[test]
+    fn a_course_rename_moves_the_course_directory_and_that_predates_this_change() {
+        // Honest pin of a real limitation rather than a claim it does not
+        // exist. The *file* is stable, but the directory above it is
+        // `fsutil::course_dir`, derived from the course's sanitized name —
+        // shared with `download_root` and with the frozen `windows`
+        // collection, and unchanged by this ticket. Renaming a course in
+        // Canvas therefore leaves the old course directory behind; the
+        // deletion pass in `plan` reconciles assignments, not directories.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let before = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let renamed_course = Course {
+            id: 1,
+            name: "Intro to Testing (Section B)".into(),
+            course_code: Some("TST101".into()),
+        };
+        let after = plan(
+            root,
+            &renamed_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(
+            before.writes[0].path,
+            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+        );
+        assert_eq!(
+            after.writes[0].path,
+            Path::new("/caldir/Intro_to_Testing_Section_B_TST101/deadlines/assignment-555.ics")
+        );
+    }
+
+    #[test]
+    fn an_unlock_at_change_rewrites_both_components_in_place() {
+        // `unlock_at` now feeds the `VTODO` (`DTSTART` and the availability
+        // line) as well as the `VEVENT` it always fed. Moving it must rewrite
+        // both existing files, not mint new ones.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let before = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(before.writes.len(), 2);
+        let mut prev = State::default();
+        record_writes(&mut prev, &before.writes);
+
+        let mut moved = fixture_assignment();
+        moved.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-10T08:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let after = plan(root, &fixture_course(), &[moved], &[], fixed_now(), &prev);
+
+        assert_eq!(after.writes.len(), 2);
+        let mut before_paths: Vec<_> = before.writes.iter().map(|w| w.path.clone()).collect();
+        let mut after_paths: Vec<_> = after.writes.iter().map(|w| w.path.clone()).collect();
+        before_paths.sort();
+        after_paths.sort();
+        assert_eq!(before_paths, after_paths);
+        assert!(after.deletes.is_empty());
+
+        let vtodo = only_vtodo(&after);
+        assert!(vtodo
+            .content
+            .contains("UID:u_crawler-todo-90210@u-crawler.local"));
+        assert!(vtodo.content.contains("DTSTART:20260910T080000Z\r\n"));
+        assert_eq!(
+            logical_line(&vtodo.content, "DESCRIPTION:"),
+            concat!(
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio",
+                r"\nDisponible: 2026-09-10T08:00:00Z - Vence: 2026-09-16T23:59:00Z",
+                r"\nhttps://canvas.example.edu/courses/4210/assignments/90210",
+            )
+        );
+
+        let vevent = after
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VEVENT"))
+            .expect("a vevent write");
+        assert!(vevent
+            .content
+            .contains("UID:u_crawler-window-90210@u-crawler.local"));
+        assert!(vevent.content.contains("DTSTART:20260910T080000Z\r\n"));
+    }
+
+    #[test]
+    fn gaining_an_unlock_at_adds_a_dtstart_and_a_window_without_moving_the_deadline() {
+        let root = Path::new("/caldir");
+        let mut without = fixture_assignment();
+        without.unlock_at = None;
+        let before = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&without),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(before.writes.len(), 1);
+        assert!(!before.writes[0].content.contains("DTSTART:"));
+        let mut prev = State::default();
+        record_writes(&mut prev, &before.writes);
+
+        let after = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &prev,
+        );
+
+        // The deadline is rewritten in place (it gained a `DTSTART`), and the
+        // window appears for the first time.
+        assert_eq!(after.writes.len(), 2);
+        assert_eq!(only_vtodo(&after).path, before.writes[0].path);
+        assert!(only_vtodo(&after)
+            .content
+            .contains("DTSTART:20260909T140000Z\r\n"));
+        assert!(after.deletes.is_empty());
+    }
+
+    #[test]
+    fn one_recorded_run_converges_for_every_component_of_a_rich_assignment() {
+        // The guarantee of this ticket (spec ID8, user story 15): with an
+        // empty state, a fully-populated assignment costs exactly one write
+        // per component; recording those writes with the module's own
+        // `record_writes` and planning again against that state costs
+        // nothing at all — no writes and, just as importantly, no deletes.
+        //
+        // Deliberately the *rich* shape: graded submittable assignment
+        // (`PRIORITY:1`), a submitted submission (`STATUS:COMPLETED`), a
+        // coherent window (`DTSTART` plus a `VEVENT`), and the new
+        // `SUMMARY`/`DESCRIPTION`. If any of those made the render depend on
+        // something other than Canvas data, the second plan would not be
+        // empty.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let submissions = vec![submission_submitted(assignment.id)];
+
+        let first = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(first.writes.len(), 2, "one write per component");
+        assert_eq!(
+            first
+                .writes
+                .iter()
+                .map(|w| w.state_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["calendar:90210", "calendar-window:90210"]
+        );
+        assert!(only_vtodo(&first).content.contains("STATUS:COMPLETED\r\n"));
+
+        let mut state = State::default();
+        record_writes(&mut state, &first.writes);
+
+        let second = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &submissions,
+            fixed_now(),
+            &state,
+        );
+        assert_eq!(second, Plan::default(), "second run must plan nothing");
+
+        // And a third, from the same state, for the same reason: nothing
+        // about the projection drifts on its own between runs.
+        let third = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &state,
+        );
+        assert_eq!(third, Plan::default());
+    }
+
+    #[test]
+    fn a_completed_rich_assignment_still_renders_its_status_and_priority() {
+        // Cross-check that the properties ticket 12 and 14 inserted did not
+        // displace the ones tickets 07 and 09 own: `PRIORITY` and `STATUS`
+        // still sit between `DUE` and `SUMMARY`, in that order.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let submissions = vec![submission_submitted(assignment.id)];
+        let got = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert!(only_vtodo(&got).content.contains(concat!(
+            "DUE:20260916T235900Z\r\n",
+            "PRIORITY:1\r\n",
+            "STATUS:COMPLETED\r\n",
+            "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+        )));
+    }
+
+    #[test]
+    fn a_rich_assignment_deleted_from_canvas_still_reconciles_both_components() {
+        // Deletion reconciliation (spec D5, ticket 10) reads only state keys
+        // and assignment ids, so the new properties cannot reach it — pinned
+        // anyway, because "cannot reach it" is exactly the kind of claim that
+        // stops being true quietly.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let first = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let mut state = State::default();
+        record_writes(&mut state, &first.writes);
+
+        let got = plan(root, &fixture_course(), &[], &[], fixed_now(), &state);
+
+        assert!(got.writes.is_empty());
+        let mut deletes: Vec<_> = got
+            .deletes
+            .iter()
+            .map(|d| (d.path.clone(), d.state_key.clone()))
+            .collect();
+        deletes.sort();
+        assert_eq!(
+            deletes,
+            vec![
+                (
+                    PathBuf::from(
+                        "/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics"
+                    ),
+                    "calendar:90210".to_string()
+                ),
+                (
+                    PathBuf::from(
+                        "/caldir/Calculo_Diferencial_MAT1101/windows/assignment-90210.ics"
+                    ),
+                    "calendar-window:90210".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_of_a_rich_course_still_plans_nothing_at_all() {
+        // `plan_for_course`'s gate (spec ticket 11) is upstream of every
+        // property this feature added, and stays that way: a failed fetch is
+        // `None`, never an empty plan that would read as "delete everything".
+        let root = Path::new("/caldir");
+        let mut state = State::default();
+        let first = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        record_writes(&mut state, &first.writes);
+
+        assert!(plan_for_course(
+            root,
+            &fixture_course(),
+            Err(()),
+            Ok(vec![]),
+            fixed_now(),
+            &state
+        )
+        .is_none());
+        assert!(plan_for_course(
+            root,
+            &fixture_course(),
+            Ok(vec![]),
+            Err(()),
+            fixed_now(),
+            &state
+        )
+        .is_none());
+    }
+
     // --- submission/completed status (ticket 09, spec D7) ---
     //
     // The three states the ticket names, asserted through the Plan's
