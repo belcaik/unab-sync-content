@@ -32,12 +32,12 @@ drives the public API: `CalendarItem::from_single_ics_str` → inspect →
 is pinned to `=0.17.10`, exactly what caldir's own `Cargo.lock` resolves, so the
 probe exercises the codec caldir ships.
 
-Probe source: `/home/belcaik/.cache/u_crawler-compat-probe/src/main.rs` (outside
+Probe source: `~/.cache/u_crawler-compat-probe/src/main.rs` (outside
 both repos; not committed here).
 
 ```
-cd /home/belcaik/.cache/u_crawler-compat-probe
-CARGO_TARGET_DIR=/home/belcaik/.cache/u_crawler-compat-targets/probe cargo run --quiet -- \
+cd ~/.cache/u_crawler-compat-probe
+CARGO_TARGET_DIR=~/.cache/u_crawler-compat-targets/probe cargo run --quiet -- \
   <repo>/.scratch/calendar-rich-vtodo/fixtures/deadline-full.ics \
   <repo>/.scratch/calendar-rich-vtodo/fixtures/deadline-no-unlock.ics
 ```
@@ -98,7 +98,7 @@ caldir's own VTODO codec suite, unmodified clone:
 
 ```
 cd <caldir clone>
-CARGO_TARGET_DIR=/home/belcaik/.cache/u_crawler-compat-targets/caldir cargo test -p caldir-core todo
+CARGO_TARGET_DIR=~/.cache/u_crawler-compat-targets/caldir cargo test -p caldir-core todo
 → test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 614 filtered out
 ```
 
@@ -128,7 +128,7 @@ fixture was driven through the real scripts.
 ### The new shape through the real scripts
 
 A temporary `CALENDAR_ROOT` **outside** the clone
-(`/home/belcaik/.cache/vassago-demo.*`) held
+(`~/.cache/vassago-demo.*`) held
 `202615_Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics` =
 `deadline-full.ics`, plus an empty `unab/` standing in for the Google Tasks
 mirror directory that `caldir` provisions. Then, from the clone:

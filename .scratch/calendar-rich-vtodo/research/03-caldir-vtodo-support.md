@@ -1,7 +1,7 @@
 # caldir `vtodo-support`: how a VTODO is parsed, modelled, serialized and projected to Google Tasks
 
 **Source of truth:** read-only clone at
-`/tmp/claude-1000/-home-belcaik-Dev-unab-sync-content/0c205e29-1023-4b26-a55a-e7a544127f53/scratchpad/deps/caldir`,
+`<scratch>/deps/caldir`,
 branch `vtodo-support`, HEAD `02ee000 feat(google): G1-01 request the calendar.calendars scope`.
 All line numbers below are from that checkout. No file in the clone was modified.
 
@@ -722,7 +722,7 @@ four are first-class; none may be normalized away or given a synthesized value."
 > `DTSTART` decides whether the demo case is anchored or undated ... **Verified state at 902/0:** the
 > fixture in `docs/vtodo/reproduction.md:14-33` is explicitly *"representative of"* u_crawler output,
 > not captured from it — it carries `DUE` and **no** `LAST-MODIFIED` and **no** `DTSTART`.
-> `find /home/belcaik/Dev/u_crawler -name '*.ics'` returns **nothing** ...
+> `find ~/Dev/u_crawler -name '*.ics'` returns **nothing** ...
 
 So caldir's own record is that u_crawler does **not** currently emit `DTSTART`. Adding it is new
 territory for the fixtures, though not for the code — the codec handles it and the policy classifies
@@ -900,7 +900,7 @@ share of the VTODO/DUE logic is zone-sensitive. Reproduce a CI failure with e.g.
 ## Sources
 
 All paths relative to the read-only clone at
-`/tmp/claude-1000/-home-belcaik-Dev-unab-sync-content/0c205e29-1023-4b26-a55a-e7a544127f53/scratchpad/deps/caldir`
+`<scratch>/deps/caldir`
 (branch `vtodo-support`, HEAD `02ee000`).
 
 **Model & codec**

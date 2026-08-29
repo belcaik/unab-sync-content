@@ -2,9 +2,9 @@
 
 Research date: 2026-08-28.
 Primary sources: read-only clone at
-`/tmp/claude-1000/-home-belcaik-Dev-unab-sync-content/0c205e29-1023-4b26-a55a-e7a544127f53/scratchpad/deps/vassago`
+`<scratch>/deps/vassago`
 (referred to below as `<vassago>`; nothing in it was modified — `git status` was
-clean before and after) and `/home/belcaik/Dev/unab-sync-content` on branch
+clean before and after) and `<repo>` on branch
 `feat/calendar-rich-vtodo` (which currently differs from `main` only in
 `AGENTS.md` and `docs/agents/*` — no source changes yet).
 
@@ -366,9 +366,9 @@ empty before and after).
 ### Exact command
 
 ```sh
-cd /tmp/claude-1000/-home-belcaik-Dev-unab-sync-content/0c205e29-1023-4b26-a55a-e7a544127f53/scratchpad/deps/vassago \
+cd <scratch>/deps/vassago \
   && PYTHONDONTWRITEBYTECODE=1 \
-     PYTHONPYCACHEPREFIX=/tmp/claude-1000/-home-belcaik-Dev-unab-sync-content/0c205e29-1023-4b26-a55a-e7a544127f53/scratchpad/pyc \
+     PYTHONPYCACHEPREFIX=<scratch>/pyc \
      python3 -m unittest discover -s tests -v -p 'test_merge_ucrawler.py'
 ```
 
@@ -717,19 +717,19 @@ vassago (read-only clone; unmodified):
 - `<vassago>/AGENTS.md` — Pipeline, Directory layout, Hard rules
 - `<vassago>/CLAUDE.md`
 
-u_crawler (`/home/belcaik/Dev/unab-sync-content`, branch
+u_crawler (`<repo>`, branch
 `feat/calendar-rich-vtodo`, read-only):
 
-- `/home/belcaik/Dev/unab-sync-content/src/calendar.rs` — `:1-29` (module doc),
+- `<repo>/src/calendar.rs` — `:1-29` (module doc),
   `:43-85`, `:91-97`, `:115-142`, `:152-172`, `:177-181`, `:185-195`,
   `:207-232`, `:245-254`, `:256-270`, `:294-319`, `:326-353`, `:355-512`,
   `:514-540`, `:699-800`, `:836-851`, `:853-887`, tests at `:952-1003`,
   `:1222-1229`, `:1493-1533`
-- `/home/belcaik/Dev/unab-sync-content/src/canvas.rs` — `:217-240`
-- `/home/belcaik/Dev/unab-sync-content/src/state.rs` — `:8-23`, `:25-72`
-- `/home/belcaik/Dev/unab-sync-content/src/config.rs` — `:55-79`, `:205`
-- `/home/belcaik/Dev/unab-sync-content/docs/specs/calendar-sync-flow.md` —
+- `<repo>/src/canvas.rs` — `:217-240`
+- `<repo>/src/state.rs` — `:8-23`, `:25-72`
+- `<repo>/src/config.rs` — `:55-79`, `:205`
+- `<repo>/docs/specs/calendar-sync-flow.md` —
   D3 (`:82-89`), D5 (`:99-112`), D6 (`:114-124`), D7 (`:126-130`), D9 (`:136-138`),
   D10 (`:140-151`), Testing Decisions (`:167-188`), spike findings (`:203-226`)
-- `/home/belcaik/Dev/unab-sync-content/AGENTS.md` — `:31-32` (exclusive
+- `<repo>/AGENTS.md` — `:31-32` (exclusive
   ownership of `calendar.caldir_root`), `:131`, `:182`, `:225-255`
