@@ -1,0 +1,15 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//u_crawler//calendar-sync//EN
+BEGIN:VTODO
+UID:u_crawler-todo-90210@u-crawler.local
+DTSTAMP:20260901T183000Z
+DUE:20260916T235900Z
+PRIORITY:1
+SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio
+DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\nDisp
+ onible: sin fecha de apertura - Vence: 2026-09-16T23:59:00Z\nhttps://canva
+ s.example.edu/courses/4210/assignments/90210
+URL:https://canvas.example.edu/courses/4210/assignments/90210
+END:VTODO
+END:VCALENDAR

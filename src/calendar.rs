@@ -12,6 +12,25 @@
 //! 08), marked `STATUS:COMPLETED` when the caller's own submission for that
 //! assignment is submitted or graded (spec D7, ticket 09).
 //!
+//! The deadline `VTODO` is written for a human to read in an aggregated task
+//! list (`docs/specs/calendar-sync-flow.md`, D3 for the component's shape and
+//! D13 for how far each field actually travels): its `SUMMARY` and the first
+//! line of its `DESCRIPTION` share one formatter,
+//! [`deadline_label_raw`], so the course name and assignment title can never
+//! disagree between the two; [`deadline_description_escaped`] adds the
+//! availability window and the assignment link as plain text, because `caldir` forwards
+//! neither `URL` nor `DTSTART` to Google Tasks and `DESCRIPTION` is the only
+//! free-text field that survives the trip. It also carries `DTSTART` =
+//! `unlock_at`, but only when [`availability_start`] allows it — the same
+//! strictly-before-`due_at` predicate that decides whether a window `VEVENT`
+//! exists at all, so the two collections can never disagree about whether an
+//! assignment has a window (spec ID4, RFC 5545 §3.8.2.3). Text values on this
+//! path go
+//! through [`vtodo_text`] (CR normalization then RFC 5545 §3.3.11 escaping)
+//! and every line through [`fold_line`] (§3.1, 75 octets). Both apply to the
+//! `VTODO` only: [`render_vevent`] and the whole `windows` collection are out
+//! of scope and emit exactly the bytes they always have.
+//!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
 //! disk with [`fsutil::atomic_write`]. Per spec "Fuera del alcance de los
@@ -31,7 +50,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sha1::{Digest, Sha1};
 
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
@@ -269,6 +288,201 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or(due)
 }
 
+/// The instant an assignment becomes available, but only when Canvas's data
+/// describes a window coherent enough to represent: `unlock_at` present *and*
+/// **strictly** before `due_at`.
+///
+/// The inequality is strict because RFC 5545 §3.8.2.3 makes it so — the value
+/// of `DUE` "MUST be later in time than the value of the 'DTSTART' property".
+/// "Later in time than", not "no earlier than": an `unlock_at` equal to
+/// `due_at` breaks that MUST exactly as an inverted one does. §3.6.2 lists
+/// `dtstart` as OPTIONAL, so dropping the property is always legal, which
+/// makes `None` the branch that cannot turn inconsistent Canvas data into an
+/// invalid component.
+///
+/// One predicate, two callers, deliberately: [`render_vtodo`] asks it whether
+/// the deadline may carry a `DTSTART` (spec ID4) and [`plan`] asks it whether
+/// an availability-window `VEVENT` exists at all (spec D3). Sharing it is what
+/// keeps the two collections from ever disagreeing about whether an
+/// assignment has a window — the incoherent case yields a `VTODO` without
+/// `DTSTART` *and* no `VEVENT`, never one without the other.
+fn availability_start(
+    unlock_at: Option<DateTime<Utc>>,
+    due: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    unlock_at.filter(|unlock| *unlock < due)
+}
+
+/// Collapse every flavour of line ending Canvas can hand us (`\r\n`, lone
+/// `\r`) down to a bare `\n`, so the escaper downstream sees exactly one
+/// representation of "line break".
+///
+/// This lives here and **not** inside [`escape_text`] on purpose. `escape_text`
+/// is shared with [`render_vevent`], whose bytes this ticket must not move;
+/// widening it would change the `windows` collection too. The `VTODO` text
+/// path is the only place that needs the normalization, so it is the only
+/// place that gets it.
+///
+/// Why it is needed at all: a lone `\r` survives [`escape_text`] untouched and
+/// reaches the published file verbatim. vassago's `unfold`
+/// (`merge-ucrawler.py:21`) treats a lone `\r` as a line terminator, so that
+/// stray octet silently splits one property into two on the way through the
+/// bridge. RFC 5545 §3.1 excludes CR from `VALUE-CHAR` as well
+/// (`CONTROL = %x00-08 / %x0A-1F / %x7F`), so emitting one was never
+/// conformant to begin with.
+fn normalize_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Prepare a Canvas-sourced string for use as an RFC 5545 TEXT value in the
+/// `VTODO`: normalize line endings first ([`normalize_newlines`]), then apply
+/// the §3.3.11 escaping ([`escape_text`]). Order matters — normalizing after
+/// escaping would leave the `\r` behind the `\n` that was already turned into
+/// a `\n` escape.
+fn vtodo_text(s: &str) -> String {
+    escape_text(&normalize_newlines(s))
+}
+
+/// Format an instant for the *human-readable* body of the `DESCRIPTION`:
+/// RFC 3339, UTC, whole seconds — `2026-09-09T14:00:00Z` (spec ID3).
+///
+/// Deliberately not [`ics_datetime`]'s `20260909T140000Z`: that form is for
+/// property values a machine reads, this one is read by a student inside a
+/// task's notes. It is UTC rather than a local zone because the project has
+/// no presentation timezone and this change does not invent one (spec D9,
+/// and AGENTS.md's ban on inert configuration). It also earns its keep: the
+/// `DUE` that reaches Google Tasks is reduced to a bare day, so this line is
+/// the only place the exact hour survives the pipeline.
+fn rfc3339_utc(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// **Returns an already-escaped property value — never pass the result through
+/// [`vtodo_text`] again, or every `\` and `,` in it would be escaped twice.**
+/// Each logical line is escaped internally, on its way in.
+///
+/// Build the `DESCRIPTION` value of a deadline `VTODO` (spec ID2): three
+/// logical lines, joined by the RFC 5545 §3.3.11 `\n` escape (a backslash and
+/// an `n`, two octets in the file — not a real line break).
+///
+/// 1. the [`deadline_label_raw`], the same text `SUMMARY` carries;
+/// 2. `Disponible: <unlock_at> - Vence: <due_at>`, where a genuinely absent
+///    `unlock_at` reads `sin fecha de apertura` rather than a fabricated
+///    date;
+/// 3. the assignment's `html_url` — **omitted entirely** when Canvas did not
+///    give one, rather than emitted empty or padded.
+///
+/// The URL is repeated here even though the component already carries a
+/// `URL` property, and that is deliberate rather than redundant: `caldir`
+/// never forwards `URL` to Google Tasks (`to_google.rs:17-45`), so
+/// `DESCRIPTION` — which it maps to the task's `notes` — is the only route by
+/// which the link reaches the place the student reads.
+///
+/// `assignment.description` (Canvas's HTML body) is deliberately absent. It is
+/// exactly the large HTML-derived blob that makes vassago's `shared_signature`
+/// diverge when Google normalizes `notes`, producing a sticky `CONFLICT` that
+/// blocks publication. Short, plain and stable is the mitigation.
+///
+/// Line 2 always exists — this is only ever called for an assignment that has
+/// a `due_at` — so the value can never come out empty and there is no
+/// "omit the whole property" case to handle.
+fn deadline_description_escaped(
+    course: &Course,
+    assignment: &Assignment,
+    due: DateTime<Utc>,
+) -> String {
+    let available = match assignment.unlock_at {
+        Some(unlock) => rfc3339_utc(unlock),
+        None => "sin fecha de apertura".to_string(),
+    };
+    let mut logical_lines = vec![
+        vtodo_text(&deadline_label_raw(course, assignment)),
+        vtodo_text(&format!(
+            "Disponible: {available} - Vence: {}",
+            rfc3339_utc(due)
+        )),
+    ];
+    if let Some(url) = &assignment.html_url {
+        logical_lines.push(vtodo_text(url));
+    }
+    logical_lines.join("\\n")
+}
+
+/// The RFC 5545 §3.1 ceiling for a content line: "Lines of text SHOULD NOT be
+/// longer than 75 octets, excluding the line break." Octets, not characters.
+const MAX_LINE_OCTETS: usize = 75;
+
+/// Fold one content line per RFC 5545 §3.1: split it into chunks of at most
+/// [`MAX_LINE_OCTETS`] octets joined by `CRLF` plus a single SPACE, which the
+/// reader's mandatory unfolding step removes again.
+///
+/// The continuation's leading SPACE counts against the 75, so a continuation
+/// carries at most 74 octets of value. Exactly one SPACE is inserted and no
+/// more: §3.1's own example shows a second space surviving unfolding as part
+/// of the value, which for a URL would be corruption.
+///
+/// Splits only on character boundaries. §3.1's note calls a fold made inside
+/// a UTF-8 multi-octet sequence "improperly folded"; with Spanish course
+/// names (`á`, `ñ`, `¿`, em dashes) a naive octet cut would hit one routinely.
+/// The longest UTF-8 sequence is 4 octets and the smallest budget here is 74,
+/// so backing up to a boundary always leaves progress to make and the loop
+/// always terminates.
+fn fold_line(line: &str) -> String {
+    if line.len() <= MAX_LINE_OCTETS {
+        return line.to_string();
+    }
+    let mut folded = String::with_capacity(line.len() + line.len() / MAX_LINE_OCTETS * 3);
+    let mut start = 0;
+    // The first line spends nothing on a continuation SPACE; every later one
+    // spends exactly one octet on it.
+    let mut budget = MAX_LINE_OCTETS;
+    while line.len() - start > budget {
+        let mut end = start + budget;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        folded.push_str(&line[start..end]);
+        folded.push_str("\r\n ");
+        start = end;
+        budget = MAX_LINE_OCTETS - 1;
+    }
+    folded.push_str(&line[start..]);
+    folded
+}
+
+/// **Returns raw, unescaped text — the caller MUST run it through
+/// [`vtodo_text`] before it becomes a property value.** The `_raw` suffix is
+/// the whole point of the name: its sibling
+/// [`deadline_description_escaped`] escapes internally, this one does not,
+/// and the two sit one line apart in [`render_vtodo`].
+///
+/// The human-readable label for a deadline: `<course name> - <assignment
+/// title>` (spec ID1).
+///
+/// The course name is [`Course::name`] — the human name Canvas shows — and
+/// deliberately neither [`fsutil::course_dir`]'s output (sanitized and
+/// transliterated to ASCII) nor `course_code`. A student reading a list that
+/// aggregates every course needs the name they recognize, not a path
+/// component.
+///
+/// Only non-empty parts are joined, so a nameless assignment yields the bare
+/// course name rather than `"Course - "`, and a nameless course yields the
+/// bare title rather than `" - Title"`. A decorative dangling dash would be
+/// noise the data never justified.
+///
+/// One function, two call sites: `SUMMARY` and the first logical line of
+/// `DESCRIPTION` both render this, so the two can never drift apart.
+fn deadline_label_raw(course: &Course, assignment: &Assignment) -> String {
+    [
+        course.name.as_str(),
+        assignment.name.as_deref().unwrap_or(""),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" - ")
+}
+
 /// Render a single assignment deadline as a complete `.ics` file: one
 /// `VCALENDAR` wrapping one `VTODO`.
 ///
@@ -291,7 +505,13 @@ fn dtstamp_for(assignment: &Assignment, due: DateTime<Utc>) -> DateTime<Utc> {
 /// comparison (spec D5) needs: for a given assignment/submission pair the
 /// rendered content is a pure function of that data, so an unrelated field
 /// changing produces a diff exactly where the data changed and nowhere else.
-fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>, done: bool) -> String {
+fn render_vtodo(
+    uid: &str,
+    course: &Course,
+    assignment: &Assignment,
+    due: DateTime<Utc>,
+    done: bool,
+) -> String {
     let dtstamp = dtstamp_for(assignment, due);
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
@@ -300,22 +520,47 @@ fn render_vtodo(uid: &str, assignment: &Assignment, due: DateTime<Utc>, done: bo
         "BEGIN:VTODO".to_string(),
         format!("UID:{uid}"),
         format!("DTSTAMP:{}", ics_datetime(dtstamp)),
-        format!("DUE:{}", ics_datetime(due)),
-        format!("PRIORITY:{}", priority_for(assignment)),
     ];
+    // `DTSTART` = `unlock_at`, and only when [`availability_start`] says the
+    // pair is legal (spec ID4, RFC 5545 §3.8.2.3). It is serialized with the
+    // very same [`ics_datetime`] as `DUE`, so both are `DATE-TIME` UTC with a
+    // `Z` — §3.8.2.3 requires the two value types to match as firmly as it
+    // requires the ordering. It sits ahead of `DUE`, the order §3.6.2's own
+    // `VTODO` example uses.
+    if let Some(unlock) = availability_start(assignment.unlock_at, due) {
+        lines.push(format!("DTSTART:{}", ics_datetime(unlock)));
+    }
+    lines.push(format!("DUE:{}", ics_datetime(due)));
+    lines.push(format!("PRIORITY:{}", priority_for(assignment)));
     if done {
         lines.push("STATUS:COMPLETED".to_string());
     }
+    // The two neighbours escape at different depths, and the `_raw` /
+    // `_escaped` suffixes are the only thing that says so: the label comes out
+    // raw and is escaped here, the description escapes each of its logical
+    // lines itself and must not be escaped a second time.
     lines.push(format!(
         "SUMMARY:{}",
-        escape_text(assignment.name.as_deref().unwrap_or(""))
+        vtodo_text(&deadline_label_raw(course, assignment))
+    ));
+    lines.push(format!(
+        "DESCRIPTION:{}",
+        deadline_description_escaped(course, assignment, due)
     ));
     if let Some(url) = &assignment.html_url {
         lines.push(format!("URL:{}", escape_text(url)));
     }
     lines.push("END:VTODO".to_string());
     lines.push("END:VCALENDAR".to_string());
-    lines.join("\r\n") + "\r\n"
+    // Folding is applied here and nowhere else (spec ID7): `render_vevent`
+    // must keep emitting the same bytes it always has, so the `windows`
+    // collection stays untouched by this ticket.
+    lines
+        .iter()
+        .map(|line| fold_line(line))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
 }
 
 /// Render a single assignment's availability window as a complete `.ics`
@@ -388,7 +633,12 @@ fn render_vevent(
 /// No `unlock_at` at all produces the `VTODO` and no `VEVENT` — there is no
 /// window to represent. An `unlock_at` at or after `due_at` is treated as
 /// inconsistent Canvas data and also produces no `VEVENT`, rather than a
-/// zero- or negative-length event. An assignment with no `due_at` produces
+/// zero- or negative-length event. In both of those cases the `VTODO` it does
+/// produce carries no `DTSTART` either, since [`availability_start`] is the
+/// single predicate behind both decisions — though its `DESCRIPTION` still
+/// reports the real `unlock_at` Canvas gave (spec ID5): the property is
+/// omitted because the RFC forces it, not because the datum is disbelieved.
+/// An assignment with no `due_at` produces
 /// neither component: a window needs both ends, so it cannot exist without a
 /// due date either.
 ///
@@ -435,7 +685,7 @@ pub fn plan(
 
         let uid = deadline_uid(assignment.id);
         let path = deadlines_dir.join(deadline_filename(assignment.id));
-        let content = render_vtodo(&uid, assignment, due, done);
+        let content = render_vtodo(&uid, course, assignment, due, done);
         let hash = content_hash(&content);
         let key = calendar_state_key(assignment.id);
         let unchanged =
@@ -453,26 +703,27 @@ pub fn plan(
         // present and strictly before `due_at`. Absent `unlock_at` means
         // there is no window to represent; an `unlock_at` at or after `due_at`
         // is inconsistent Canvas data and is treated as "no window" rather
-        // than emitting a zero/negative-length event.
-        if let Some(unlock) = assignment.unlock_at {
-            if unlock < due {
-                let window_uid = window_uid(assignment.id);
-                let window_path = windows_dir.join(window_filename(assignment.id));
-                let window_content = render_vevent(&window_uid, assignment, unlock, due);
-                let window_hash = content_hash(&window_content);
-                let window_key = window_state_key(assignment.id);
-                let window_unchanged = prev
-                    .get(&window_key)
-                    .and_then(|item| item.content_hash.as_deref())
-                    == Some(window_hash.as_str());
-                if !window_unchanged {
-                    writes.push(PlannedWrite {
-                        path: window_path,
-                        content: window_content,
-                        assignment_id: assignment.id,
-                        state_key: window_key,
-                    });
-                }
+        // than emitting a zero/negative-length event. That is the very same
+        // [`availability_start`] the `VTODO` consults for its `DTSTART`, so
+        // the two collections cannot drift into disagreeing about whether
+        // this assignment has a window.
+        if let Some(unlock) = availability_start(assignment.unlock_at, due) {
+            let window_uid = window_uid(assignment.id);
+            let window_path = windows_dir.join(window_filename(assignment.id));
+            let window_content = render_vevent(&window_uid, assignment, unlock, due);
+            let window_hash = content_hash(&window_content);
+            let window_key = window_state_key(assignment.id);
+            let window_unchanged = prev
+                .get(&window_key)
+                .and_then(|item| item.content_hash.as_deref())
+                == Some(window_hash.as_str());
+            if !window_unchanged {
+                writes.push(PlannedWrite {
+                    path: window_path,
+                    content: window_content,
+                    assignment_id: assignment.id,
+                    state_key: window_key,
+                });
             }
         }
     }
@@ -995,11 +1246,534 @@ mod tests {
             .content
             .contains("UID:u_crawler-todo-555@u-crawler.local"));
         assert!(write.content.contains("DUE:20260901T235900Z"));
-        assert!(write.content.contains("SUMMARY:Essay Draft"));
+        // Hand-written literal: `<course human name> - <assignment title>`
+        // (spec ID1). The course name is `Course.name`, not the sanitized
+        // directory `Intro_to_Testing_TST101` and not the course code.
+        assert!(write
+            .content
+            .contains("SUMMARY:Intro to Testing - Essay Draft"));
         assert!(write
             .content
             .contains("URL:https://canvas.example.edu/courses/1/assignments/555"));
         assert!(write.content.contains("END:VTODO"));
+    }
+
+    /// Undo RFC 5545 §3.1 line folding, so a test can assert against one
+    /// logical content line. This is the *inverse* of what the renderer
+    /// does, not a copy of it: it never composes an expected value, it only
+    /// makes the produced value readable. Every expected string in these
+    /// tests is still a hand-written literal.
+    fn unfold(content: &str) -> Vec<String> {
+        let mut logical: Vec<String> = Vec::new();
+        for raw in content.split("\r\n") {
+            match raw.strip_prefix(' ') {
+                Some(rest) => match logical.last_mut() {
+                    Some(last) => last.push_str(rest),
+                    None => logical.push(rest.to_string()),
+                },
+                None => logical.push(raw.to_string()),
+            }
+        }
+        logical
+    }
+
+    /// The single logical content line of `content` starting with `prefix`.
+    fn logical_line(content: &str, prefix: &str) -> String {
+        let matches: Vec<String> = unfold(content)
+            .into_iter()
+            .filter(|line| line.starts_with(prefix))
+            .collect();
+        assert_eq!(matches.len(), 1, "expected exactly one {prefix} line");
+        matches.into_iter().next().expect("one match")
+    }
+
+    #[test]
+    fn the_vtodo_carries_a_three_line_description() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        // Hand-written literal (spec ID2/ID3): label, availability line with
+        // RFC 3339 UTC instants, then the assignment URL. `\n` here is the
+        // RFC 5545 §3.3.11 escape, two characters in the file.
+        assert_eq!(
+            logical_line(&vtodo.content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-08-01T00:00:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn a_missing_unlock_at_says_so_instead_of_inventing_a_date() {
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        assert!(assignment.unlock_at.is_none());
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn an_unlock_at_at_or_after_the_due_at_is_still_reported_verbatim() {
+        // Spec ID5: the availability line reports what Canvas said. Only a
+        // genuinely absent `unlock_at` reads "sin fecha de apertura" — an
+        // inconsistent one is not silently rewritten into it. (Whether such
+        // an `unlock_at` earns a `DTSTART` is ticket #14's question, not
+        // this line's.)
+        let root = Path::new("/caldir");
+        let mut same_instant = assignment_with_due_date();
+        same_instant.unlock_at = same_instant.due_at;
+        let got = plan(
+            root,
+            &course(),
+            &[same_instant],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-01T23:59:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+
+        let mut after = assignment_with_due_date();
+        after.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[after],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-15T00:00:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+    }
+
+    #[test]
+    fn a_missing_html_url_drops_the_third_description_line_entirely() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.html_url = None;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // Two logical lines, no trailing separator and no filler text.
+        assert_eq!(
+            logical_line(&got.writes[0].content, "DESCRIPTION:"),
+            "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z"
+        );
+        assert!(!got.writes[0].content.contains("URL:"));
+    }
+
+    #[test]
+    fn special_characters_are_escaped_and_carriage_returns_normalized_away() {
+        // RFC 5545 §3.3.11: `\`, `;` and `,` are escaped, a line break
+        // becomes `\n`, and `:` is left alone. Spec ID6: `\r\n` and lone `\r`
+        // collapse to `\n` *before* escaping, since vassago's `unfold` treats
+        // a surviving lone `\r` as a line terminator and splits the property.
+        let root = Path::new("/caldir");
+        let messy_course = Course {
+            id: 1,
+            name: r"Cálculo, Álgebra; Nivel\Avanzado".into(),
+            course_code: Some("MAT101".into()),
+        };
+        let mut assignment = assignment_with_due_date();
+        assignment.name = Some("Tarea 1\r\nParte 2\rParte 3".into());
+
+        let got = plan(
+            root,
+            &messy_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let content = &got.writes[0].content;
+
+        assert_eq!(
+            logical_line(content, "SUMMARY:"),
+            r"SUMMARY:Cálculo\, Álgebra\; Nivel\\Avanzado - Tarea 1\nParte 2\nParte 3"
+        );
+        assert_eq!(
+            logical_line(content, "DESCRIPTION:"),
+            r"DESCRIPTION:Cálculo\, Álgebra\; Nivel\\Avanzado - Tarea 1\nParte 2\nParte 3\nDisponible: sin fecha de apertura - Vence: 2026-09-01T23:59:00Z\nhttps://canvas.example.edu/courses/1/assignments/555"
+        );
+
+        // No stray CR survives inside any content line: the only carriage
+        // returns left in the file are the CRLF line terminators themselves.
+        for line in content.split("\r\n") {
+            assert!(!line.contains('\r'), "stray CR in {line:?}");
+        }
+    }
+
+    #[test]
+    fn long_vtodo_lines_are_folded_at_75_octets_on_character_boundaries() {
+        // RFC 5545 §3.1: "Lines of text SHOULD NOT be longer than 75 octets,
+        // excluding the line break", and a fold is CRLF plus one SPACE. The
+        // §3.1 note calls a fold inside a multi-octet UTF-8 sequence
+        // "improperly folded", which matters the moment a course is named in
+        // Spanish.
+        let root = Path::new("/caldir");
+        // Each 'ñ' is two octets, so a naive 75-octet cut would land inside
+        // one: "SUMMARY:" is 8 octets, leaving 67 for the value, and 67 is
+        // odd. The last whole character that fits is the 33rd.
+        let long_name = "ñ".repeat(50);
+        let long_course = Course {
+            id: 1,
+            name: long_name.clone(),
+            course_code: Some("MAT101".into()),
+        };
+        let mut assignment = assignment_with_due_date();
+        assignment.name = None;
+
+        let got = plan(
+            root,
+            &long_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let content = &got.writes[0].content;
+
+        for line in content.split("\r\n") {
+            assert!(
+                line.len() <= 75,
+                "line of {} octets exceeds the RFC 5545 §3.1 limit: {line:?}",
+                line.len()
+            );
+        }
+
+        // 33 characters of value on the first line (8 + 66 = 74 octets), the
+        // remaining 17 on a continuation opened by exactly one SPACE.
+        let expected_fold = format!("SUMMARY:{}\r\n {}\r\n", "ñ".repeat(33), "ñ".repeat(17));
+        assert!(
+            content.contains(&expected_fold),
+            "expected fold not found in {content:?}"
+        );
+
+        // Unfolding restores the value byte for byte — nothing was lost or
+        // duplicated at the seam.
+        assert_eq!(
+            logical_line(content, "SUMMARY:"),
+            format!("SUMMARY:{long_name}")
+        );
+    }
+
+    // --- DTSTART on the deadline VTODO (ticket 14, spec ID4) ---
+    //
+    // RFC 5545 §3.8.2.3: `DUE` "MUST be later in time than the value of the
+    // 'DTSTART' property". Strictly later — so an `unlock_at` equal to
+    // `due_at` is as illegal a pairing as an inverted one, and both branches
+    // drop the property rather than the component.
+
+    #[test]
+    fn unlock_at_strictly_before_due_at_becomes_the_vtodo_dtstart() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        // Hand-written literals. Both are `DATE-TIME` UTC with the `Z`
+        // suffix, which is also what §3.8.2.3 demands of the pair: the two
+        // value types must match.
+        assert_eq!(
+            logical_line(&vtodo.content, "DTSTART:"),
+            "DTSTART:20260801T000000Z"
+        );
+        assert_eq!(logical_line(&vtodo.content, "DUE:"), "DUE:20260901T235900Z");
+    }
+
+    #[test]
+    fn a_missing_unlock_at_produces_no_dtstart_at_all() {
+        // Canvas said nothing about when this opens, so the component says
+        // nothing either — a fabricated `DTSTART` would be an assertion the
+        // data never supported (spec user story 7).
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        assert!(assignment.unlock_at.is_none());
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+    }
+
+    #[test]
+    fn an_unlock_at_equal_to_the_due_at_produces_no_dtstart_and_no_vevent() {
+        // §3.8.2.3 wants `DUE` *later* than `DTSTART`; equal timestamps are
+        // not later. The property goes, the component stays — and `plan`
+        // already refuses the zero-length window, so both collections agree.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = assignment.due_at;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(content.contains("BEGIN:VTODO"));
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
+    #[test]
+    fn an_unlock_at_after_the_due_at_produces_no_dtstart_and_no_vevent() {
+        // The inverted case, which the equal case is deliberately treated as
+        // an instance of.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z.
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-15T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(got.writes.len(), 1);
+        let content = &got.writes[0].content;
+        assert!(content.contains("BEGIN:VTODO"));
+        assert!(
+            !content.contains("DTSTART"),
+            "no DTSTART expected in {content:?}"
+        );
+        assert_eq!(logical_line(content, "DUE:"), "DUE:20260901T235900Z");
+        assert!(!got
+            .writes
+            .iter()
+            .any(|w| w.content.contains("BEGIN:VEVENT")));
+    }
+
+    #[test]
+    fn a_fully_populated_assignment_renders_these_exact_vtodo_bytes() {
+        // The whole component, hand-written. Nothing here is recomputed with
+        // the renderer's own helpers, so a change to any of them — label,
+        // escaping, date format, fold points, property order — has to be
+        // restated here deliberately.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("vtodo present");
+
+        assert_eq!(
+            vtodo.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-555@u-crawler.local\r\n",
+                "DTSTAMP:20260901T235900Z\r\n",
+                // `unlock_at` is strictly before `due_at` here, so the pair
+                // is legal (§3.8.2.3) and `DTSTART` appears — immediately
+                // ahead of `DUE`, in the same `DATE-TIME` UTC `Z` form.
+                "DTSTART:20260801T000000Z\r\n",
+                "DUE:20260901T235900Z\r\n",
+                "PRIORITY:9\r\n",
+                "SUMMARY:Intro to Testing - Essay Draft\r\n",
+                r"DESCRIPTION:Intro to Testing - Essay Draft\nDisponible: 2026-08-01T00:00:00",
+                "\r\n",
+                r" Z - Vence: 2026-09-01T23:59:00Z\nhttps://canvas.example.edu/courses/1/assi",
+                "\r\n",
+                " gnments/555\r\n",
+                "URL:https://canvas.example.edu/courses/1/assignments/555\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn the_window_vevent_bytes_are_unchanged_by_this_ticket() {
+        // Scope contract (spec ID7/ID9): `windows` is out of scope, so its
+        // component must be byte-identical to what it was before the `VTODO`
+        // grew a label, a DESCRIPTION and line folding. Pinned in full, not
+        // probed with `contains`, so any drift shows up here.
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vevent = got
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VEVENT"))
+            .expect("vevent present");
+
+        assert_eq!(
+            vevent.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VEVENT\r\n",
+                "UID:u_crawler-window-555@u-crawler.local\r\n",
+                "DTSTAMP:20260901T235900Z\r\n",
+                "DTSTART:20260801T000000Z\r\n",
+                "DTEND:20260901T235900Z\r\n",
+                // Bare assignment title: no course prefix, because the label
+                // is a VTODO concern only.
+                "SUMMARY:Essay Draft\r\n",
+                "URL:https://canvas.example.edu/courses/1/assignments/555\r\n",
+                "END:VEVENT\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    #[test]
+    fn an_assignment_without_a_title_summarises_as_the_bare_course_name() {
+        let root = Path::new("/caldir");
+        let mut assignment = assignment_with_due_date();
+        assignment.name = None;
+        let got = plan(
+            root,
+            &course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // No dangling " - " with nothing after it (spec ID1).
+        assert!(got.writes[0]
+            .content
+            .contains("SUMMARY:Intro to Testing\r\n"));
+    }
+
+    #[test]
+    fn a_course_without_a_name_summarises_as_the_bare_assignment_title() {
+        let root = Path::new("/caldir");
+        let nameless = Course {
+            id: 1,
+            name: String::new(),
+            course_code: Some("TST101".into()),
+        };
+        let got = plan(
+            root,
+            &nameless,
+            &[assignment_with_due_date()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        // No leading " - " (spec ID1).
+        assert!(got.writes[0].content.contains("SUMMARY:Essay Draft\r\n"));
     }
 
     #[test]
@@ -1485,7 +2259,9 @@ mod tests {
         assert!(got.writes[0]
             .content
             .contains("UID:u_crawler-todo-555@u-crawler.local"));
-        assert!(got.writes[0].content.contains("SUMMARY:Essay Final"));
+        assert!(got.writes[0]
+            .content
+            .contains("SUMMARY:Intro to Testing - Essay Final"));
         assert!(got.deletes.is_empty());
     }
 
@@ -1530,6 +2306,572 @@ mod tests {
         let second = plan(root, &course(), &[assignment], &[], fixed_now(), &state);
 
         assert!(second.writes.is_empty());
+    }
+
+    // --- identity, convergence and cross-field regression (ticket 15,
+    // spec ID8) ---
+    //
+    // Everything below goes through `plan` and asserts on the returned
+    // `Plan` and the `.ics` bytes it carries. Every expected value is a
+    // hand-written literal; none is recomputed with a helper under test.
+
+    /// The course used by the compatibility fixtures: a real-shaped Spanish
+    /// name, so the accented octet is inside the folded region rather than
+    /// only in a synthetic `"ñ".repeat(50)`.
+    fn fixture_course() -> Course {
+        Course {
+            id: 4210,
+            name: "Cálculo Diferencial".into(),
+            course_code: Some("MAT1101".into()),
+        }
+    }
+
+    /// The assignment used by the compatibility fixtures: course label, a
+    /// coherent availability window, a URL, and a graded, submittable
+    /// assignment so `PRIORITY:1` is exercised alongside the new fields.
+    fn fixture_assignment() -> Assignment {
+        Assignment {
+            id: 90210,
+            name: Some("Sumativa 5: Informe de laboratorio".into()),
+            description: None,
+            updated_at: Some("2026-09-01T18:30:00Z".into()),
+            due_at: Some(
+                DateTime::parse_from_rfc3339("2026-09-16T23:59:00Z")
+                    .unwrap()
+                    .into(),
+            ),
+            unlock_at: Some(
+                DateTime::parse_from_rfc3339("2026-09-09T14:00:00Z")
+                    .unwrap()
+                    .into(),
+            ),
+            lock_at: None,
+            points_possible: Some(30.0),
+            omit_from_final_grade: Some(false),
+            html_url: Some("https://canvas.example.edu/courses/4210/assignments/90210".into()),
+            assignment_group_id: None,
+            submission_types: Some(vec!["online_upload".into()]),
+            published: None,
+        }
+    }
+
+    /// The deadline `VTODO` of a plan, or a panic naming what was there
+    /// instead. Reading, never composing.
+    fn only_vtodo(got: &Plan) -> &PlannedWrite {
+        got.writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VTODO"))
+            .expect("a vtodo write")
+    }
+
+    #[test]
+    fn the_compatibility_fixtures_render_these_exact_bytes() {
+        // The independent expectation for the bytes committed under
+        // `.scratch/calendar-rich-vtodo/fixtures/` and handed to caldir and
+        // vassago as evidence (see that directory's README). Hand-written in
+        // full, fold points included: the 75-octet cuts were derived from RFC
+        // 5545 §3.1 by hand, not from `fold_line`'s output — which is exactly
+        // why this literal must stay even though
+        // `the_committed_fixture_files_still_match_what_the_planner_emits`
+        // now reads those files off disk. That test binds the files to the
+        // renderer; this one says what the bytes were always meant to be.
+        let root = Path::new("/caldir");
+
+        let with_window = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let vtodo = only_vtodo(&with_window);
+        assert_eq!(
+            vtodo.path,
+            Path::new("/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics")
+        );
+        assert_eq!(
+            vtodo.content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-90210@u-crawler.local\r\n",
+                "DTSTAMP:20260901T183000Z\r\n",
+                "DTSTART:20260909T140000Z\r\n",
+                "DUE:20260916T235900Z\r\n",
+                "PRIORITY:1\r\n",
+                "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\nDisp",
+                "\r\n",
+                r" onible: 2026-09-09T14:00:00Z - Vence: 2026-09-16T23:59:00Z\nhttps://canvas",
+                "\r\n",
+                " .example.edu/courses/4210/assignments/90210\r\n",
+                "URL:https://canvas.example.edu/courses/4210/assignments/90210\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+
+        let mut no_unlock = fixture_assignment();
+        no_unlock.unlock_at = None;
+        let without_window = plan(
+            root,
+            &fixture_course(),
+            &[no_unlock],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(without_window.writes.len(), 1, "no window component");
+        assert_eq!(
+            without_window.writes[0].content,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "PRODID:-//u_crawler//calendar-sync//EN\r\n",
+                "BEGIN:VTODO\r\n",
+                "UID:u_crawler-todo-90210@u-crawler.local\r\n",
+                "DTSTAMP:20260901T183000Z\r\n",
+                // No `DTSTART`: Canvas gave no `unlock_at`, so there is no
+                // window to assert (spec ID4).
+                "DUE:20260916T235900Z\r\n",
+                "PRIORITY:1\r\n",
+                "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\nDisp",
+                "\r\n",
+                r" onible: sin fecha de apertura - Vence: 2026-09-16T23:59:00Z\nhttps://canva",
+                "\r\n",
+                " s.example.edu/courses/4210/assignments/90210\r\n",
+                "URL:https://canvas.example.edu/courses/4210/assignments/90210\r\n",
+                "END:VTODO\r\n",
+                "END:VCALENDAR\r\n",
+            )
+        );
+    }
+
+    /// The two `.ics` files committed under
+    /// `.scratch/calendar-rich-vtodo/fixtures/`, resolved from
+    /// `CARGO_MANIFEST_DIR` so the test does not care what the process
+    /// working directory is.
+    fn fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".scratch/calendar-rich-vtodo/fixtures")
+            .join(name)
+    }
+
+    /// The bytes of a committed fixture, or a panic naming the path. Never a
+    /// skip: a fixture that has gone missing is the exact drift this test
+    /// exists to catch, so its absence must be as loud as a mismatch.
+    fn read_fixture(name: &str) -> String {
+        let path = fixture_path(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("committed fixture {} is unreadable: {e}", path.display()))
+    }
+
+    #[test]
+    fn the_committed_fixture_files_still_match_what_the_planner_emits() {
+        // The companion of
+        // `the_compatibility_fixtures_render_these_exact_bytes`, and
+        // deliberately not a replacement for it. That test hand-writes the
+        // expectation, which is what makes it an *independent* statement of
+        // the intended bytes; this one reads the files off disk, which is
+        // what makes it a *drift guard* for the artefacts actually handed to
+        // caldir and vassago in `compat-report.md`. Neither subsumes the
+        // other: without the literal there is no independent expectation,
+        // without the file read a fixture could rot unnoticed.
+        let root = Path::new("/caldir");
+
+        let with_window = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            only_vtodo(&with_window).content,
+            read_fixture("deadline-full.ics"),
+            "deadline-full.ics has drifted from the planner's output"
+        );
+
+        let mut no_unlock = fixture_assignment();
+        no_unlock.unlock_at = None;
+        let without_window = plan(
+            root,
+            &fixture_course(),
+            &[no_unlock],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            only_vtodo(&without_window).content,
+            read_fixture("deadline-no-unlock.ics"),
+            "deadline-no-unlock.ics has drifted from the planner's output"
+        );
+    }
+
+    #[test]
+    fn a_course_rename_rewrites_the_same_file_under_the_same_uid() {
+        // `SUMMARY` and `DESCRIPTION` now depend on `Course.name` (spec ID1),
+        // so a course rename is newly a content change. It must still be a
+        // rewrite of the same component, not a new object: same filename,
+        // same UID, same state key, and nothing planned for deletion.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let before = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let prev = state_with_hash(assignment.id, &before.writes[0].content);
+
+        let renamed_course = Course {
+            id: 1,
+            name: "Intro to Testing (Section B)".into(),
+            course_code: Some("TST101".into()),
+        };
+        let after = plan(
+            root,
+            &renamed_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &prev,
+        );
+
+        assert_eq!(after.writes.len(), 1);
+        assert_eq!(
+            after.writes[0].path.file_name(),
+            before.writes[0].path.file_name()
+        );
+        assert_eq!(after.writes[0].state_key, "calendar:555");
+        assert!(after.writes[0]
+            .content
+            .contains("UID:u_crawler-todo-555@u-crawler.local"));
+        assert_eq!(
+            logical_line(&after.writes[0].content, "SUMMARY:"),
+            "SUMMARY:Intro to Testing (Section B) - Essay Draft"
+        );
+        assert!(after.deletes.is_empty());
+    }
+
+    #[test]
+    fn a_course_rename_moves_the_course_directory_and_that_predates_this_change() {
+        // Honest pin of a real limitation rather than a claim it does not
+        // exist. The *file* is stable, but the directory above it is
+        // `fsutil::course_dir`, derived from the course's sanitized name —
+        // shared with `download_root` and with the frozen `windows`
+        // collection, and unchanged by this ticket. Renaming a course in
+        // Canvas therefore leaves the old course directory behind; the
+        // deletion pass in `plan` reconciles assignments, not directories.
+        let root = Path::new("/caldir");
+        let assignment = assignment_with_due_date();
+        let before = plan(
+            root,
+            &course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let renamed_course = Course {
+            id: 1,
+            name: "Intro to Testing (Section B)".into(),
+            course_code: Some("TST101".into()),
+        };
+        let after = plan(
+            root,
+            &renamed_course,
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert_eq!(
+            before.writes[0].path,
+            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+        );
+        assert_eq!(
+            after.writes[0].path,
+            Path::new("/caldir/Intro_to_Testing_Section_B_TST101/deadlines/assignment-555.ics")
+        );
+    }
+
+    #[test]
+    fn an_unlock_at_change_rewrites_both_components_in_place() {
+        // `unlock_at` now feeds the `VTODO` (`DTSTART` and the availability
+        // line) as well as the `VEVENT` it always fed. Moving it must rewrite
+        // both existing files, not mint new ones.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let before = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(before.writes.len(), 2);
+        let mut prev = State::default();
+        record_writes(&mut prev, &before.writes);
+
+        let mut moved = fixture_assignment();
+        moved.unlock_at = Some(
+            DateTime::parse_from_rfc3339("2026-09-10T08:00:00Z")
+                .unwrap()
+                .into(),
+        );
+        let after = plan(root, &fixture_course(), &[moved], &[], fixed_now(), &prev);
+
+        assert_eq!(after.writes.len(), 2);
+        let mut before_paths: Vec<_> = before.writes.iter().map(|w| w.path.clone()).collect();
+        let mut after_paths: Vec<_> = after.writes.iter().map(|w| w.path.clone()).collect();
+        before_paths.sort();
+        after_paths.sort();
+        assert_eq!(before_paths, after_paths);
+        assert!(after.deletes.is_empty());
+
+        let vtodo = only_vtodo(&after);
+        assert!(vtodo
+            .content
+            .contains("UID:u_crawler-todo-90210@u-crawler.local"));
+        assert!(vtodo.content.contains("DTSTART:20260910T080000Z\r\n"));
+        assert_eq!(
+            logical_line(&vtodo.content, "DESCRIPTION:"),
+            concat!(
+                r"DESCRIPTION:Cálculo Diferencial - Sumativa 5: Informe de laboratorio",
+                r"\nDisponible: 2026-09-10T08:00:00Z - Vence: 2026-09-16T23:59:00Z",
+                r"\nhttps://canvas.example.edu/courses/4210/assignments/90210",
+            )
+        );
+
+        let vevent = after
+            .writes
+            .iter()
+            .find(|w| w.content.contains("BEGIN:VEVENT"))
+            .expect("a vevent write");
+        assert!(vevent
+            .content
+            .contains("UID:u_crawler-window-90210@u-crawler.local"));
+        assert!(vevent.content.contains("DTSTART:20260910T080000Z\r\n"));
+    }
+
+    #[test]
+    fn gaining_an_unlock_at_adds_a_dtstart_and_a_window_without_moving_the_deadline() {
+        let root = Path::new("/caldir");
+        let mut without = fixture_assignment();
+        without.unlock_at = None;
+        let before = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&without),
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(before.writes.len(), 1);
+        assert!(!before.writes[0].content.contains("DTSTART:"));
+        let mut prev = State::default();
+        record_writes(&mut prev, &before.writes);
+
+        let after = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &prev,
+        );
+
+        // The deadline is rewritten in place (it gained a `DTSTART`), and the
+        // window appears for the first time.
+        assert_eq!(after.writes.len(), 2);
+        assert_eq!(only_vtodo(&after).path, before.writes[0].path);
+        assert!(only_vtodo(&after)
+            .content
+            .contains("DTSTART:20260909T140000Z\r\n"));
+        assert!(after.deletes.is_empty());
+    }
+
+    #[test]
+    fn one_recorded_run_converges_for_every_component_of_a_rich_assignment() {
+        // The guarantee of this ticket (spec ID8, user story 15): with an
+        // empty state, a fully-populated assignment costs exactly one write
+        // per component; recording those writes with the module's own
+        // `record_writes` and planning again against that state costs
+        // nothing at all — no writes and, just as importantly, no deletes.
+        //
+        // Deliberately the *rich* shape: graded submittable assignment
+        // (`PRIORITY:1`), a submitted submission (`STATUS:COMPLETED`), a
+        // coherent window (`DTSTART` plus a `VEVENT`), and the new
+        // `SUMMARY`/`DESCRIPTION`. If any of those made the render depend on
+        // something other than Canvas data, the second plan would not be
+        // empty.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let submissions = vec![submission_submitted(assignment.id)];
+
+        let first = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(first.writes.len(), 2, "one write per component");
+        assert_eq!(
+            first
+                .writes
+                .iter()
+                .map(|w| w.state_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["calendar:90210", "calendar-window:90210"]
+        );
+        assert!(only_vtodo(&first).content.contains("STATUS:COMPLETED\r\n"));
+
+        let mut state = State::default();
+        record_writes(&mut state, &first.writes);
+
+        let second = plan(
+            root,
+            &fixture_course(),
+            std::slice::from_ref(&assignment),
+            &submissions,
+            fixed_now(),
+            &state,
+        );
+        assert_eq!(second, Plan::default(), "second run must plan nothing");
+
+        // And a third, from the same state, for the same reason: nothing
+        // about the projection drifts on its own between runs.
+        let third = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &state,
+        );
+        assert_eq!(third, Plan::default());
+    }
+
+    #[test]
+    fn a_completed_rich_assignment_still_renders_its_status_and_priority() {
+        // Cross-check that the properties ticket 12 and 14 inserted did not
+        // displace the ones tickets 07 and 09 own: `PRIORITY` and `STATUS`
+        // still sit between `DUE` and `SUMMARY`, in that order.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let submissions = vec![submission_submitted(assignment.id)];
+        let got = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &submissions,
+            fixed_now(),
+            &State::default(),
+        );
+
+        assert!(only_vtodo(&got).content.contains(concat!(
+            "DUE:20260916T235900Z\r\n",
+            "PRIORITY:1\r\n",
+            "STATUS:COMPLETED\r\n",
+            "SUMMARY:Cálculo Diferencial - Sumativa 5: Informe de laboratorio\r\n",
+        )));
+    }
+
+    #[test]
+    fn a_rich_assignment_deleted_from_canvas_still_reconciles_both_components() {
+        // Deletion reconciliation (spec D5, ticket 10) reads only state keys
+        // and assignment ids, so the new properties cannot reach it — pinned
+        // anyway, because "cannot reach it" is exactly the kind of claim that
+        // stops being true quietly.
+        let root = Path::new("/caldir");
+        let assignment = fixture_assignment();
+        let first = plan(
+            root,
+            &fixture_course(),
+            &[assignment],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        let mut state = State::default();
+        record_writes(&mut state, &first.writes);
+
+        let got = plan(root, &fixture_course(), &[], &[], fixed_now(), &state);
+
+        assert!(got.writes.is_empty());
+        let mut deletes: Vec<_> = got
+            .deletes
+            .iter()
+            .map(|d| (d.path.clone(), d.state_key.clone()))
+            .collect();
+        deletes.sort();
+        assert_eq!(
+            deletes,
+            vec![
+                (
+                    PathBuf::from(
+                        "/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics"
+                    ),
+                    "calendar:90210".to_string()
+                ),
+                (
+                    PathBuf::from(
+                        "/caldir/Calculo_Diferencial_MAT1101/windows/assignment-90210.ics"
+                    ),
+                    "calendar-window:90210".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_of_a_rich_course_still_plans_nothing_at_all() {
+        // `plan_for_course`'s gate (spec ticket 11) is upstream of every
+        // property this feature added, and stays that way: a failed fetch is
+        // `None`, never an empty plan that would read as "delete everything".
+        let root = Path::new("/caldir");
+        let mut state = State::default();
+        let first = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        record_writes(&mut state, &first.writes);
+
+        assert!(plan_for_course(
+            root,
+            &fixture_course(),
+            Err(()),
+            Ok(vec![]),
+            fixed_now(),
+            &state
+        )
+        .is_none());
+        assert!(plan_for_course(
+            root,
+            &fixture_course(),
+            Ok(vec![]),
+            Err(()),
+            fixed_now(),
+            &state
+        )
+        .is_none());
     }
 
     // --- submission/completed status (ticket 09, spec D7) ---
@@ -1915,6 +3257,7 @@ mod tests {
         let assignment = assignment_with_due_date(); // id 555
         let content = render_vtodo(
             &deadline_uid(assignment.id),
+            &course(),
             &assignment,
             assignment.due_at.unwrap(),
             false,
