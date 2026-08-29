@@ -54,7 +54,7 @@ capas, y cada tramo está verificado contra su fuente primaria:
 | Capa | Qué permite | Evidencia |
 |---|---|---|
 | RFC 5545 | `DTSTART` y `DUE` juntos en un `VTODO`, con tipos de valor iguales y `DUE` **estrictamente** posterior | §3.6.2 (`todoprop`), §3.8.2.3 |
-| caldir@`vtodo-support` | parsea `DTSTART` a `Todo.start`, lo re-serializa byte a byte, y **nunca lo envía a Google** | `to_google.rs:17-45`, `policy.rs:485`, test `dtstart_survives_the_push_and_is_never_folded_into_due` |
+| caldir@`vtodo-support` | parsea `DTSTART` a `Todo.start`, lo re-serializa byte a byte, y **nunca lo envía a Google** | `to_google.rs:17-45`, `policy.rs:480`, test `dtstart_survives_the_push_and_is_never_folded_into_due` |
 | Google Tasks API v1 | **un** campo de fecha escribible, `due`, solo día; documentado como fecha *programada* y explícitamente *"It doesn't represent the deadline of the task"* | Discovery Document rev. `20260825` |
 | Google Tasks UI | sí muestra "Start date and time" y "Deadline" como conceptos separados | `support.google.com/tasks/answer/9901136` |
 

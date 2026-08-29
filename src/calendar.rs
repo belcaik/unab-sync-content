@@ -13,11 +13,12 @@
 //! assignment is submitted or graded (spec D7, ticket 09).
 //!
 //! The deadline `VTODO` is written for a human to read in an aggregated task
-//! list (`.scratch/calendar-rich-vtodo/spec.md`, ID1-ID3, ID6-ID7): its
-//! `SUMMARY` and the first line of its `DESCRIPTION` share one formatter,
-//! [`deadline_label`], so the course name and assignment title can never
-//! disagree between the two; [`deadline_description`] adds the availability
-//! window and the assignment link as plain text, because `caldir` forwards
+//! list (`docs/specs/calendar-sync-flow.md`, D3 for the component's shape and
+//! D13 for how far each field actually travels): its `SUMMARY` and the first
+//! line of its `DESCRIPTION` share one formatter,
+//! [`deadline_label_raw`], so the course name and assignment title can never
+//! disagree between the two; [`deadline_description_escaped`] adds the
+//! availability window and the assignment link as plain text, because `caldir` forwards
 //! neither `URL` nor `DTSTART` to Google Tasks and `DESCRIPTION` is the only
 //! free-text field that survives the trip. It also carries `DTSTART` =
 //! `unlock_at`, but only when [`availability_start`] allows it — the same
@@ -356,11 +357,15 @@ fn rfc3339_utc(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// **Returns an already-escaped property value — never pass the result through
+/// [`vtodo_text`] again, or every `\` and `,` in it would be escaped twice.**
+/// Each logical line is escaped internally, on its way in.
+///
 /// Build the `DESCRIPTION` value of a deadline `VTODO` (spec ID2): three
 /// logical lines, joined by the RFC 5545 §3.3.11 `\n` escape (a backslash and
 /// an `n`, two octets in the file — not a real line break).
 ///
-/// 1. the [`deadline_label`], the same text `SUMMARY` carries;
+/// 1. the [`deadline_label_raw`], the same text `SUMMARY` carries;
 /// 2. `Disponible: <unlock_at> - Vence: <due_at>`, where a genuinely absent
 ///    `unlock_at` reads `sin fecha de apertura` rather than a fabricated
 ///    date;
@@ -381,13 +386,17 @@ fn rfc3339_utc(dt: DateTime<Utc>) -> String {
 /// Line 2 always exists — this is only ever called for an assignment that has
 /// a `due_at` — so the value can never come out empty and there is no
 /// "omit the whole property" case to handle.
-fn deadline_description(course: &Course, assignment: &Assignment, due: DateTime<Utc>) -> String {
+fn deadline_description_escaped(
+    course: &Course,
+    assignment: &Assignment,
+    due: DateTime<Utc>,
+) -> String {
     let available = match assignment.unlock_at {
         Some(unlock) => rfc3339_utc(unlock),
         None => "sin fecha de apertura".to_string(),
     };
     let mut logical_lines = vec![
-        vtodo_text(&deadline_label(course, assignment)),
+        vtodo_text(&deadline_label_raw(course, assignment)),
         vtodo_text(&format!(
             "Disponible: {available} - Vence: {}",
             rfc3339_utc(due)
@@ -441,6 +450,12 @@ fn fold_line(line: &str) -> String {
     folded
 }
 
+/// **Returns raw, unescaped text — the caller MUST run it through
+/// [`vtodo_text`] before it becomes a property value.** The `_raw` suffix is
+/// the whole point of the name: its sibling
+/// [`deadline_description_escaped`] escapes internally, this one does not,
+/// and the two sit one line apart in [`render_vtodo`].
+///
 /// The human-readable label for a deadline: `<course name> - <assignment
 /// title>` (spec ID1).
 ///
@@ -457,7 +472,7 @@ fn fold_line(line: &str) -> String {
 ///
 /// One function, two call sites: `SUMMARY` and the first logical line of
 /// `DESCRIPTION` both render this, so the two can never drift apart.
-fn deadline_label(course: &Course, assignment: &Assignment) -> String {
+fn deadline_label_raw(course: &Course, assignment: &Assignment) -> String {
     [
         course.name.as_str(),
         assignment.name.as_deref().unwrap_or(""),
@@ -520,13 +535,17 @@ fn render_vtodo(
     if done {
         lines.push("STATUS:COMPLETED".to_string());
     }
+    // The two neighbours escape at different depths, and the `_raw` /
+    // `_escaped` suffixes are the only thing that says so: the label comes out
+    // raw and is escaped here, the description escapes each of its logical
+    // lines itself and must not be escaped a second time.
     lines.push(format!(
         "SUMMARY:{}",
-        vtodo_text(&deadline_label(course, assignment))
+        vtodo_text(&deadline_label_raw(course, assignment))
     ));
     lines.push(format!(
         "DESCRIPTION:{}",
-        deadline_description(course, assignment, due)
+        deadline_description_escaped(course, assignment, due)
     ));
     if let Some(url) = &assignment.html_url {
         lines.push(format!("URL:{}", escape_text(url)));
@@ -2347,13 +2366,15 @@ mod tests {
 
     #[test]
     fn the_compatibility_fixtures_render_these_exact_bytes() {
-        // These are the bytes committed under
+        // The independent expectation for the bytes committed under
         // `.scratch/calendar-rich-vtodo/fixtures/` and handed to caldir and
-        // vassago as evidence (see that directory's README). Pinned here so
-        // the fixtures cannot silently drift away from what the planner
-        // actually emits. Hand-written in full, fold points included: the
-        // 75-octet cuts were derived from RFC 5545 §3.1 by hand, not from
-        // `fold_line`'s output.
+        // vassago as evidence (see that directory's README). Hand-written in
+        // full, fold points included: the 75-octet cuts were derived from RFC
+        // 5545 §3.1 by hand, not from `fold_line`'s output — which is exactly
+        // why this literal must stay even though
+        // `the_committed_fixture_files_still_match_what_the_planner_emits`
+        // now reads those files off disk. That test binds the files to the
+        // renderer; this one says what the bytes were always meant to be.
         let root = Path::new("/caldir");
 
         let with_window = plan(
@@ -2427,6 +2448,69 @@ mod tests {
                 "END:VTODO\r\n",
                 "END:VCALENDAR\r\n",
             )
+        );
+    }
+
+    /// The two `.ics` files committed under
+    /// `.scratch/calendar-rich-vtodo/fixtures/`, resolved from
+    /// `CARGO_MANIFEST_DIR` so the test does not care what the process
+    /// working directory is.
+    fn fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".scratch/calendar-rich-vtodo/fixtures")
+            .join(name)
+    }
+
+    /// The bytes of a committed fixture, or a panic naming the path. Never a
+    /// skip: a fixture that has gone missing is the exact drift this test
+    /// exists to catch, so its absence must be as loud as a mismatch.
+    fn read_fixture(name: &str) -> String {
+        let path = fixture_path(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("committed fixture {} is unreadable: {e}", path.display()))
+    }
+
+    #[test]
+    fn the_committed_fixture_files_still_match_what_the_planner_emits() {
+        // The companion of
+        // `the_compatibility_fixtures_render_these_exact_bytes`, and
+        // deliberately not a replacement for it. That test hand-writes the
+        // expectation, which is what makes it an *independent* statement of
+        // the intended bytes; this one reads the files off disk, which is
+        // what makes it a *drift guard* for the artefacts actually handed to
+        // caldir and vassago in `compat-report.md`. Neither subsumes the
+        // other: without the literal there is no independent expectation,
+        // without the file read a fixture could rot unnoticed.
+        let root = Path::new("/caldir");
+
+        let with_window = plan(
+            root,
+            &fixture_course(),
+            &[fixture_assignment()],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            only_vtodo(&with_window).content,
+            read_fixture("deadline-full.ics"),
+            "deadline-full.ics has drifted from the planner's output"
+        );
+
+        let mut no_unlock = fixture_assignment();
+        no_unlock.unlock_at = None;
+        let without_window = plan(
+            root,
+            &fixture_course(),
+            &[no_unlock],
+            &[],
+            fixed_now(),
+            &State::default(),
+        );
+        assert_eq!(
+            only_vtodo(&without_window).content,
+            read_fixture("deadline-no-unlock.ics"),
+            "deadline-no-unlock.ics has drifted from the planner's output"
         );
     }
 

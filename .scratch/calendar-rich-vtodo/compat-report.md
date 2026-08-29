@@ -8,11 +8,40 @@ by hand against read-only clones; the commands and their output are quoted
 verbatim so the claims can be re-checked. Where a hop could not be verified it
 is marked as such rather than glossed over.
 
+## Both clones are unmodified (ticket #15 acceptance criterion)
+
+Run after all of the work below, on 2026-08-28. `git status --short` prints one
+line per changed, staged or untracked-but-not-ignored path, so **an empty
+output is the whole claim**: nothing changed, nothing left behind. Neither
+clone has a `target/` directory at all, so there is not even an ignored build
+artefact to discount.
+
+```
+$ cd <caldir clone> && git status --short
+$ git rev-parse HEAD
+02ee0007d16d2b4caed78100a14d0e348ce8c6ba
+```
+
+```
+$ cd <vassago clone> && git status --short
+$ git rev-parse HEAD
+2f3f0f4673cf64433706dc071b34c2be4b0feee0
+```
+
+Both `git status --short` invocations exited `0` with **no output at all** (the
+blank between the command and the next prompt above is the literal result, not
+an elision). The two HEADs are the ones this report cites throughout:
+`02ee000` for caldir's `vtodo-support`, `2f3f0f4` for vassago. Every probe was
+therefore run either from a throwaway crate outside both repos or with a
+`CALENDAR_ROOT` outside the clone, as described per hop below.
+
 ## What was fed in
 
 The two fixtures under `fixtures/` (see that directory's `README.md`), produced
 by `calendar::plan` and pinned byte-for-byte by
-`calendar::tests::the_compatibility_fixtures_render_these_exact_bytes`:
+`calendar::tests::the_compatibility_fixtures_render_these_exact_bytes` (a
+hand-written literal) and re-read off disk and re-checked against the
+planner by `calendar::tests::the_committed_fixture_files_still_match_what_the_planner_emits`:
 
 - `deadline-full.ics` — `DTSTART` present (`unlock_at` strictly before `due_at`)
 - `deadline-no-unlock.ics` — no `unlock_at`, therefore no `DTSTART`

@@ -21,10 +21,20 @@ by design — no submission was supplied, and §3.8.1.11 already reads an absent
 They were written out by a throwaway `#[test]` calling `plan` with exactly the
 inputs above; the test was then deleted. Nothing hand-typed them.
 
-What stops them going stale is
-`calendar::tests::the_compatibility_fixtures_render_these_exact_bytes`, which
-pins the *same* bytes as a hand-written literal in `src/calendar.rs`. If the
-renderer changes, that test fails and these files must be regenerated in the
-same commit.
+What stops them going stale is a **pair** of tests in `src/calendar.rs`, and it
+takes both:
+
+- `calendar::tests::the_committed_fixture_files_still_match_what_the_planner_emits`
+  reads *these files* off disk (resolved from `CARGO_MANIFEST_DIR`, so the
+  working directory is irrelevant) and asserts `plan`'s output equals them
+  byte for byte. A missing file is a loud failure, never a skip. This is the
+  drift guard.
+- `calendar::tests::the_compatibility_fixtures_render_these_exact_bytes` pins
+  the *same* bytes as a hand-written literal, fold points included. This is
+  the independent expectation: it would still catch a renderer change even if
+  the fixtures were regenerated to match it.
+
+If the renderer changes, both tests fail and these files must be regenerated in
+the same commit.
 
 Do not edit these files by hand.

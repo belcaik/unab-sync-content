@@ -103,6 +103,8 @@ Un assignment sin `due_at` no genera componentes: no hay nada que ubicar en el t
 
 Solo el `VTODO` se pliega según RFC 5545 §3.1 (líneas de ≤75 octetos, continuación con CRLF + espacio, sin partir un carácter UTF-8). El `VEVENT` de `windows` conserva sus bytes exactos: no está en el alcance de este enriquecimiento.
 
+El registro de decisiones numeradas `ID1`–`ID9` del enriquecimiento del `VTODO` —las que citan los comentarios `spec IDn` de `src/calendar.rs`— vive con las notas de trabajo de la feature, en `.scratch/calendar-rich-vtodo/spec.md`. **Este documento es el contrato**; ese archivo es el registro de diseño de respaldo, igual que `research/`.
+
 ### D4 — Layout: ramo × semántica, en el árbol de caldir
 
 u_crawler escribe **directo** en el árbol de caldir, y es **dueño exclusivo** de los directorios que crea. Ningún otro proceso escribe ahí; se documenta como invariante en `AGENTS.md`.
@@ -277,7 +279,7 @@ Esto **no es un bug de este repositorio ni algo pendiente de arreglar acá**, y 
 | Capa | Qué permite | Evidencia |
 |---|---|---|
 | RFC 5545 | `DTSTART` y `DUE` juntos en un `VTODO`, con el mismo tipo de valor y `DUE` **estrictamente** posterior | §3.6.2 (`todoprop`), §3.8.2.3 |
-| `caldir@vtodo-support` | parsea `DTSTART` a `Todo.start` y lo re-serializa byte a byte, pero **nunca lo envía a Google** | `to_google.rs:17-45`, `policy.rs:485`, test `dtstart_survives_the_push_and_is_never_folded_into_due` |
+| `caldir@vtodo-support` | parsea `DTSTART` a `Todo.start` y lo re-serializa byte a byte, pero **nunca lo envía a Google** | `to_google.rs:17-45`, `policy.rs:480`, test `dtstart_survives_the_push_and_is_never_folded_into_due` |
 | `vassago` | `DTSTART` es `RICH_FIELDS`: se copia al espejo de Google, nunca se normaliza ni se lee de vuelta | `bridge-vtodo.py:39-63`, `:327-372` |
 | API pública Google Tasks v1 | **un** campo de fecha escribible, `due`, solo día, documentado como fecha *programada* y explícitamente *"It doesn't represent the deadline of the task"* | Discovery Document rev. `20260825`; referencia REST, última actualización 2026-02-24 UTC |
 | UI de Google Tasks / Calendar | sí muestra **"Start date and time"** y **"Deadline"** como campos separados | `support.google.com/tasks/answer/9901136`, `support.google.com/tasks/answer/7675838` |
