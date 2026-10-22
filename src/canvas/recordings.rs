@@ -1,16 +1,17 @@
 use crate::canvas::course::select_courses;
 use crate::canvas::links::extract_zoom_urls;
 use crate::canvas::{CanvasClient, Module};
-use crate::core::http::build_http_client;
+use crate::core::config::Config;
 use crate::status;
 use crate::ui::progress::{progress_bar, spinner};
 use tracing::info;
 
-pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
-    let cfg = crate::core::config::Config::load_or_init()?;
-
-    let canvas = CanvasClient::from_config().await?;
-    let _http = build_http_client(&cfg);
+pub async fn run_discovery(
+    cfg: &Config,
+    filter_course_id: Option<u64>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let canvas = CanvasClient::new(cfg).await?;
     let courses = canvas.list_courses().await?;
     let courses = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 

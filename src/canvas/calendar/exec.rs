@@ -138,11 +138,10 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// deletes are reported (see the `deletes` field logged below) and nothing
 /// is removed, on disk or in `state`, exactly like writes.
 pub async fn run_calendar(
+    cfg: &Config,
     filter_course_id: Option<u64>,
     dry_run: bool,
 ) -> anyhow::Result<RunOutcome> {
-    let cfg = Config::load_or_init()?;
-
     if !cfg.calendar.enabled {
         status!("Calendar sync is disabled (calendar.enabled = false).");
         return Ok(RunOutcome::Success);
@@ -150,7 +149,7 @@ pub async fn run_calendar(
 
     let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
     let download_root = PathBuf::from(&cfg.download_root);
-    let canvas = CanvasClient::from_config().await?;
+    let canvas = CanvasClient::new(cfg).await?;
 
     let courses = canvas.list_courses().await?;
     let selected = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);

@@ -1,13 +1,10 @@
-use crate::canvas::course::{course_dir, select_courses};
 use crate::canvas::download::{download_if_needed, Dest};
-use crate::canvas::{Assignment, CanvasClient, Module};
-use crate::core::config::Config;
+use crate::canvas::{Assignment, CanvasClient, Course, Module};
 use crate::core::fsutil::{
     atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
-use crate::core::http::{build_http_client, HttpCtx};
+use crate::core::http::HttpCtx;
 use crate::core::state::{ItemState, State};
-use crate::status;
 use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use regex::Regex;
@@ -17,162 +14,58 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::{info, warn};
 
-pub async fn run_sync(
-    filter_course_id: Option<u64>,
+/// Mirrors one course's modules: pages, assignments, and every file they link
+/// to. The per-course orchestration around it (course directory, `state.json`,
+/// and the other flows) lives in [`crate::app::run_sync`].
+pub async fn sync_course(
+    canvas: &CanvasClient,
+    course_dir: &Path,
+    course: &Course,
+    state: &mut State,
     dry_run: bool,
     verbose: bool,
-) -> anyhow::Result<()> {
-    let cfg = Config::load_or_init()?;
-
-    let http = build_http_client(&cfg);
-    let httpctx = HttpCtx::new(&cfg, http);
-    let canvas = CanvasClient::from_config().await?;
-
-    let courses = canvas.list_courses().await?;
-    let selected_courses = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
-    if selected_courses.is_empty() {
-        if let Some(cid) = filter_course_id {
-            tracing::warn!(
-                course_id = cid,
-                "course not found in active list; nothing to sync"
-            );
-        }
-        return Ok(());
-    }
-
-    let course_progress = progress_bar(selected_courses.len() as u64, "Syncing courses");
-
+) -> anyhow::Result<SyncCounts> {
+    let modules_spinner = spinner(&format!("Loading modules for {}", course.name));
+    let modules = canvas.list_modules_with_items(course.id).await?;
+    modules_spinner.finish_and_clear();
+    // Preload assignments to avoid per-item fetch; map by id
+    let assignments_spinner = spinner(&format!("Loading assignments for {}", course.name));
+    let assignments_list = canvas.list_assignments(course.id).await.unwrap_or_default();
+    assignments_spinner.finish_and_clear();
+    let assignments: std::collections::HashMap<u64, Assignment> =
+        assignments_list.into_iter().map(|a| (a.id, a)).collect();
+    let course_sync = CourseSync {
+        canvas,
+        httpctx: &canvas.http,
+        course_dir,
+        course_id: course.id,
+        dry_run,
+        verbose,
+    };
+    let module_progress =
+        progress_bar(modules.len() as u64, &format!("Modules in {}", course.name));
     let mut totals = SyncCounts::default();
-    for c in selected_courses {
-        course_progress.inc(1);
-        course_progress.set_message(format!("Syncing course {}", c.id));
-        let course_dir = course_dir(Path::new(&cfg.download_root), &c);
-        if !dry_run {
-            ensure_dir(&course_dir).await?;
-        }
-        info!(course_id = c.id, path = %course_dir.display(), "sync course");
-
-        // Load course state
-        let state_path = course_dir.join("state.json");
-        let mut state = State::load(&state_path).await;
-
-        let modules_spinner = spinner(&format!("Loading modules for {}", c.name));
-        let modules = canvas.list_modules_with_items(c.id).await?;
-        modules_spinner.finish_and_clear();
-        // Preload assignments to avoid per-item fetch; map by id
-        let assignments_spinner = spinner(&format!("Loading assignments for {}", c.name));
-        let assignments_list = canvas.list_assignments(c.id).await.unwrap_or_default();
-        assignments_spinner.finish_and_clear();
-        let assignments: std::collections::HashMap<u64, Assignment> =
-            assignments_list.into_iter().map(|a| (a.id, a)).collect();
-        let course_sync = CourseSync {
-            canvas: &canvas,
-            httpctx: &httpctx,
-            course_dir: &course_dir,
-            course_id: c.id,
-            dry_run,
-            verbose,
-        };
-        let module_progress = progress_bar(modules.len() as u64, &format!("Modules in {}", c.name));
-        for m in modules {
-            module_progress.inc(1);
-            module_progress.set_message(format!("Course {} module {}", c.id, m.id));
-            let counts = course_sync
-                .sync_module(&m, &assignments, &mut state)
-                .await?;
-            totals += counts;
-            if dry_run && (counts.pages > 0 || counts.files > 0) {
-                module_progress.println(format!(
-                    "DRY-RUN module {} -> pages: {}, files: {}",
-                    m.id, counts.pages, counts.files
-                ));
-            }
-        }
-        module_progress.finish_and_clear();
-
-        // Sync announcements for this course
-        if cfg.announcements.enabled {
-            match crate::canvas::announcements::AnnouncementSync::new(
-                &cfg,
-                &canvas,
-                &httpctx,
-                c.id,
-                &course_dir,
-                dry_run,
-                verbose,
-            )
-            .run(&c.name, &mut state)
-            .await
-            {
-                Ok(s) => {
-                    if dry_run && s.announcements > 0 {
-                        status!(
-                            "DRY-RUN announcements for course {}: {} (links: {}, media: {})",
-                            c.id,
-                            s.announcements,
-                            s.links,
-                            s.media
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(course_id = c.id, error = %e, "announcements failed for course");
-                }
-            }
-        }
-
-        // Sync Zoom recordings for this course.
-        //
-        // The Zoom flow launches a browser, performs an interactive SSO and downloads
-        // video, so it must not run under --dry-run, and it must honour zoom.enabled.
-        // It is only compiled in when the `zoom` feature is enabled (see AGENTS.md).
-        #[cfg(feature = "zoom")]
-        {
-            if !cfg.zoom.enabled {
-                info!(course_id = c.id, "zoom disabled in config; skipping");
-            } else if dry_run {
-                status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
-            } else {
-                status!("Starting Zoom sync for course {}...", c.id);
-                match crate::zoom::zoom_flow(c.id, None).await {
-                    Ok(()) => {
-                        status!("✓ Zoom sync completed for course {}", c.id);
-                    }
-                    Err(e) => {
-                        warn!(course_id = c.id, error = %e, "zoom flow failed for course");
-                        // Continue with other courses even if Zoom fails
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "zoom"))]
-        {
-            info!(
-                course_id = c.id,
-                "zoom feature not compiled into this build; skipping"
-            );
-        }
-
-        if !dry_run {
-            state.save(&state_path).await?;
+    for m in modules {
+        module_progress.inc(1);
+        module_progress.set_message(format!("Course {} module {}", course.id, m.id));
+        let counts = course_sync.sync_module(&m, &assignments, state).await?;
+        totals += counts;
+        if dry_run && (counts.pages > 0 || counts.files > 0) {
+            module_progress.println(format!(
+                "DRY-RUN module {} -> pages: {}, files: {}",
+                m.id, counts.pages, counts.files
+            ));
         }
     }
-    course_progress.finish_and_clear();
-    if dry_run {
-        status!(
-            "DRY-RUN summary: pages to write: {}, files to download: {}",
-            totals.pages,
-            totals.files
-        );
-    }
-    Ok(())
+    module_progress.finish_and_clear();
+    Ok(totals)
 }
 
 /// Number of items a module sync wrote, or would write under `--dry-run`.
 #[derive(Debug, Default, Clone, Copy)]
-struct SyncCounts {
-    pages: usize,
-    files: usize,
+pub struct SyncCounts {
+    pub pages: usize,
+    pub files: usize,
 }
 
 impl std::ops::AddAssign for SyncCounts {

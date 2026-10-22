@@ -1,9 +1,9 @@
+use u_crawler::app;
 use u_crawler::canvas;
 use u_crawler::canvas::announcements;
 use u_crawler::canvas::calendar;
 use u_crawler::canvas::recordings;
 use u_crawler::canvas::status::{self, StatusReport};
-use u_crawler::canvas::sync;
 use u_crawler::core::config;
 use u_crawler::core::logger;
 use u_crawler::ui::progress;
@@ -170,18 +170,29 @@ async fn main() -> ExitCode {
             course_id,
             dry_run,
             verbose,
-        } => exit_on(
-            sync::run_sync(course_id, dry_run, verbose).await,
-            "sync failed",
-            12,
-        ),
-        Commands::Announcements { course_id, dry_run } => exit_on(
-            announcements::run_discovery(course_id, dry_run).await,
-            "announcements failed",
-            12,
-        ),
+        } => {
+            let result: anyhow::Result<()> = async {
+                let cfg = Config::load_or_init()?;
+                app::run_sync(&cfg, course_id, dry_run, verbose).await
+            }
+            .await;
+            exit_on(result, "sync failed", 12)
+        }
+        Commands::Announcements { course_id, dry_run } => {
+            let result: anyhow::Result<()> = async {
+                let cfg = Config::load_or_init()?;
+                announcements::run_discovery(&cfg, course_id, dry_run).await
+            }
+            .await;
+            exit_on(result, "announcements failed", 12)
+        }
         Commands::Calendar { course_id, dry_run } => {
-            match calendar::run_calendar(course_id, dry_run).await {
+            let result: anyhow::Result<calendar::RunOutcome> = async {
+                let cfg = Config::load_or_init()?;
+                calendar::run_calendar(&cfg, course_id, dry_run).await
+            }
+            .await;
+            match result {
                 Ok(calendar::RunOutcome::Success) => ExitCode::SUCCESS,
                 Ok(calendar::RunOutcome::PartialFailure) => {
                     eprintln!("warning: some courses failed to sync; see the log for details");
@@ -190,18 +201,24 @@ async fn main() -> ExitCode {
                 Err(e) => exit_on(Err(e), "calendar sync failed", 12),
             }
         }
-        Commands::Recordings { course_id, dry_run } => exit_on(
-            recordings::run_discovery(course_id, dry_run).await,
-            "recordings discovery failed",
-            12,
-        ),
+        Commands::Recordings { course_id, dry_run } => {
+            let result: anyhow::Result<()> = async {
+                let cfg = Config::load_or_init()?;
+                recordings::run_discovery(&cfg, course_id, dry_run).await
+            }
+            .await;
+            exit_on(result, "recordings discovery failed", 12)
+        }
         #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
-            ZoomCommands::Flow { course_id, since } => exit_on(
-                zoom::zoom_flow(course_id, since).await,
-                "zoom flow failed",
-                12,
-            ),
+            ZoomCommands::Flow { course_id, since } => {
+                let result: anyhow::Result<()> = async {
+                    let cfg = Config::load_or_init()?;
+                    zoom::zoom_flow(&cfg, course_id, since).await
+                }
+                .await;
+                exit_on(result, "zoom flow failed", 12)
+            }
         },
         #[cfg(not(feature = "zoom"))]
         Commands::Zoom { .. } => {
@@ -272,7 +289,8 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> anyhow::Result<()> {
 
 async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
     use canvas::CanvasClient;
-    let client = CanvasClient::from_config().await?;
+    let cfg = Config::load_or_init()?;
+    let client = CanvasClient::new(&cfg).await?;
 
     if let Some(cid) = course_id {
         let modules = client.list_modules_with_items(cid).await?;

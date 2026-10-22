@@ -4,7 +4,7 @@ use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::core::config::Config;
 use crate::core::fsutil::{atomic_write, ensure_dir, sanitize_component};
-use crate::core::http::{build_http_client, HttpCtx};
+use crate::core::http::HttpCtx;
 use crate::core::state::{ItemState, State};
 use crate::status;
 use crate::ui::progress::{progress_bar, spinner};
@@ -26,11 +26,12 @@ pub struct AnnouncementRecord {
     pub zoom_links: Vec<String>,
 }
 
-pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
-    let cfg = Config::load_or_init()?;
-    let http = build_http_client(&cfg);
-    let httpctx = HttpCtx::new(&cfg, http);
-    let canvas = CanvasClient::from_config().await?;
+pub async fn run_discovery(
+    cfg: &Config,
+    filter_course_id: Option<u64>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let canvas = CanvasClient::new(cfg).await?;
 
     let courses = canvas.list_courses().await?;
     let selected = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
@@ -53,9 +54,9 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
         let mut state = State::load(&state_path).await;
 
         let summary = AnnouncementSync::new(
-            &cfg,
+            cfg,
             &canvas,
-            &httpctx,
+            &canvas.http,
             course.id,
             &course_dir,
             dry_run,
