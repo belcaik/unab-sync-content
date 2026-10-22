@@ -18,7 +18,7 @@ recordings that session can reach.
 * **Idempotent & resumable:** `Range` requests, `.part` files, ETag validation,
   atomic rename on finalize. A `200` in reply to a `Range` request means the
   server ignored it, and the partial file must be truncated rather than
-  appended to — `canvas/download.rs` handles this; anything reimplementing it must.
+  appended to — `core/transfer.rs` owns this; nothing reimplements it.
 * **Deterministic structure:** stable, sanitized, ASCII-transliterated paths.
 * **`--dry-run` writes nothing and launches nothing.** It must not start a
   browser, perform SSO, or download.
@@ -51,7 +51,6 @@ recordings that session can reach.
   see "Building without Zoom" below.
 * **Errors:** `thiserror` for typed module errors, `anyhow` for orchestration
 * **UX:** `indicatif`
-* **Process:** `tokio::process` (for `ffmpeg`)
 
 ---
 
@@ -183,7 +182,6 @@ caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns ex
 
 [zoom]
 enabled = true
-ffmpeg_path = "ffmpeg"
 user_agent = "Mozilla/5.0 ..."
 external_tool_id = 187       # the Canvas external tool id for Zoom
 ```
@@ -313,11 +311,11 @@ cron, where nobody would notice until the data was gone.
 src/
   main.rs           # CLI parsing, command dispatch, all user-facing printing
   lib.rs            # module docs and the layer map
-  ffmpeg.rs         # ffmpeg invocation
   core/
     mod.rs          # folder docs
     config.rs       # load/validate/expand config
     http.rs         # the one client: rate limiting, 429/5xx retry, Link parsing
+    transfer.rs     # the one transfer: .part, Range resume, atomic rename
     state.rs        # per-course State, ItemState, record_error
     fsutil.rs       # sanitization, atomic write/rename
     logger.rs       # log file setup, falls back to stderr
@@ -329,7 +327,7 @@ src/
     models.rs       # Canvas wire types (Course, Module, Assignment, ...)
     client.rs       # Canvas REST client (get_json / list_paginated)
     course.rs       # course_dir: the per-course on-disk directory name
-    download.rs     # the one downloader: ETag, .part, Range resume, atomic rename
+    download.rs     # Canvas files: ETag + state on top of core::transfer
     links.rs        # HTML -> links, media refs, zoom URLs
     sync.rs         # CourseSync / ModuleCtx: the main sync flow
     announcements.rs  # AnnouncementSync
@@ -343,13 +341,16 @@ src/
     headless.rs     # browser driving and CDP interception
     sso.rs          # Canvas -> Microsoft -> Zoom login, free functions over a Page
     app_conf.rs     # pure parser for Zoom's window.appConf blob
-    download.rs     # HTTP fallback when ffmpeg cannot fetch a recording
+    download.rs     # media client + replay request headers for recording downloads
 ```
 
 Rules that hold today and should keep holding:
 
 * **All HTTP goes through `HttpCtx`.** It is the only place rate limiting and
   retries live. A raw `reqwest::Client::send()` outside `core/http.rs` is a bug.
+* **All file transfers go through `core::transfer::fetch_resumable`.** The
+  caller picks the `.part` naming; the resume policy (append on `206`,
+  truncate on `200`) is not reimplemented.
 * **All Canvas file downloads go through `canvas::download::download_if_needed`,**
   under one state-key namespace (`file:{id}`), so a file reachable from both a
   module and an announcement is fetched once.
@@ -385,10 +386,10 @@ Rules that hold today and should keep holding:
    identifiers, and the cookies are harvested and stored.
 3. `api.rs` lists meetings and their recording files.
 4. `headless.rs` visits each play URL, captures the short-lived asset request
-   headers, and downloads via `ffmpeg` (stream copy), falling back to a plain
-   HTTP download when ffmpeg fails.
-
-`ffmpeg` must be present; `zoom.ffmpeg_path` points at it.
+   headers, and downloads over plain HTTP through `core::transfer` — resumable
+   off the `.mp4.part` sidecar, on the flow's one media `HttpCtx`, which is
+   built without a total request timeout so a large recording is not killed
+   mid-stream.
 
 ---
 

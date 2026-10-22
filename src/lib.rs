@@ -4,12 +4,13 @@
 //!
 //! - [`core`] is the shared plumbing: [`core::config`] loads and validates the
 //!   user's `config.toml`, [`core::http`] owns the one HTTP client with its
-//!   rate limiting and retries, [`core::state`] records per-course what has
-//!   been fetched and what failed, [`core::fsutil`] sanitizes paths and writes
-//!   atomically, and [`core::logger`] sets up the log file.
+//!   rate limiting and retries, [`core::transfer`] owns the one resumable
+//!   download, [`core::state`] records per-course what has been fetched and
+//!   what failed, [`core::fsutil`] sanitizes paths and writes atomically, and
+//!   [`core::logger`] sets up the log file.
 //! - [`canvas::client`] and [`zoom::api`] are the two REST clients.
-//! - [`canvas::download`] is the only downloader: one ETag/resume/atomic-rename
-//!   policy.
+//! - [`canvas::download`] adds the ETag/state policy for Canvas files on top
+//!   of [`core::transfer`].
 //! - [`canvas::sync`], [`canvas::announcements`], [`canvas::calendar`] and
 //!   [`canvas::recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -19,8 +20,6 @@
 pub mod canvas;
 /// Cross-cutting plumbing: config, HTTP, state, filesystem and logging.
 pub mod core;
-/// Invocation of `ffmpeg`, used to fetch Zoom's streamed recordings.
-pub mod ffmpeg;
 /// User-facing terminal output.
 pub mod ui;
 /// Zoom recordings: session capture, listing and download.

@@ -1,4 +1,5 @@
 use crate::core::config::Config;
+use crate::core::http::HttpCtx;
 use crate::zoom::app_conf;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ZoomCookie, ZoomRecordingFile};
@@ -19,6 +20,11 @@ pub struct ZoomHeadless<'a> {
     config: &'a Config,
     db: &'a ZoomDb,
     course_id: u64,
+    /// The one media-download context for the flow: paced and retried like
+    /// every request in the crate, but built from
+    /// [`crate::zoom::download::build_media_client`] so a large recording is
+    /// not killed by a total request timeout.
+    media_http: HttpCtx,
 }
 
 /// What the CDP interception tasks have captured so far.
@@ -64,11 +70,12 @@ async fn harvest_cookies(page: &Page, domains: &[&str]) -> anyhow::Result<Vec<Zo
 }
 
 impl<'a> ZoomHeadless<'a> {
-    pub fn new(config: &'a Config, db: &'a ZoomDb, course_id: u64) -> Self {
+    pub fn new(config: &'a Config, db: &'a ZoomDb, course_id: u64, media_http: HttpCtx) -> Self {
         Self {
             config,
             db,
             course_id,
+            media_http,
         }
     }
 
@@ -347,15 +354,12 @@ impl<'a> ZoomHeadless<'a> {
         files: Vec<ZoomRecordingFile>,
     ) -> anyhow::Result<()> {
         use crate::core::fsutil::sanitize_filename_preserve_ext;
-        use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
         use crate::zoom::models::ReplayHeader;
         use std::collections::HashMap;
         use std::path::PathBuf;
 
         let cfg = self.config;
         let course_id = self.course_id;
-
-        ensure_ffmpeg_available(&cfg.zoom.ffmpeg_path).await?;
 
         let base = PathBuf::from(&cfg.download_root)
             .join("Zoom")
@@ -464,7 +468,7 @@ impl<'a> ZoomHeadless<'a> {
                     event = events.next() => {
                         if let Some(event) = event {
                             let url = event.request.url.clone();
-                            if self.is_replay_asset(&url) {
+                            if is_replay_asset(&url) {
                                 // Capture ALL headers without filtering (including cookie, host, etc.)
                                 let headers_val = serde_json::to_value(event.request.headers.clone())
                                     .unwrap_or(serde_json::Value::Null);
@@ -515,37 +519,32 @@ impl<'a> ZoomHeadless<'a> {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let headers = crate::zoom::download::build_ffmpeg_headers(
-                cfg,
+            let headers = crate::zoom::download::replay_request_headers(
                 &asset,
-                &file.play_url,
                 &zoom_cookies,
                 &asset.download_url,
             );
 
             info!("⬇ Downloading to: {}", dest.display());
-            match download_via_ffmpeg(&cfg.zoom.ffmpeg_path, &headers, &asset.download_url, &dest)
-                .await
+            let part = dest.with_extension("mp4.part");
+            match crate::core::transfer::fetch_resumable(
+                &self.media_http,
+                &asset.download_url,
+                headers,
+                &part,
+                &dest,
+            )
+            .await
             {
-                Ok(()) => warn!("✓ Downloaded successfully!"),
-                Err(FfmpegError::Process { .. }) => {
-                    warn!("ffmpeg failed, trying HTTP fallback");
-                    if let Err(e) = crate::zoom::download::http_download(
-                        cfg,
-                        &headers,
-                        &asset.download_url,
-                        &dest,
-                    )
-                    .await
-                    {
-                        warn!("✗ HTTP download also failed: {:?}", e);
-                    } else {
-                        info!("✓ Downloaded via HTTP!");
-                    }
-                }
-                Err(e) => {
-                    warn!("✗ Download error: {:?}", e);
-                }
+                Ok(()) => info!(
+                    url = super::redact_url(&asset.download_url),
+                    "✓ Downloaded successfully"
+                ),
+                Err(e) => warn!(
+                    url = super::redact_url(&asset.download_url),
+                    error = %e,
+                    "✗ Download failed"
+                ),
             }
         }
 
@@ -558,22 +557,19 @@ impl<'a> ZoomHeadless<'a> {
         );
         Ok(())
     }
+}
 
-    fn is_replay_asset(&self, url: &str) -> bool {
-        if let Ok(parsed) = Url::parse(url) {
-            let host_ok = parsed
-                .host_str()
-                .map(|host| host.ends_with("zoom.us") || host.contains("cloudfront.net"))
-                .unwrap_or(false);
-            let path = parsed.path().to_ascii_lowercase();
-            host_ok
-                && (path.ends_with(".mp4")
-                    || path.contains(".mp4?")
-                    || path.ends_with(".m3u8")
-                    || path.contains("playlist.m3u8"))
-        } else {
-            false
-        }
+/// Whether `url` is the recording asset itself, served from a Zoom media
+/// host. Only `.mp4` counts: an `.m3u8` is a playlist, not a recording.
+fn is_replay_asset(url: &str) -> bool {
+    if let Ok(parsed) = Url::parse(url) {
+        let host_ok = parsed
+            .host_str()
+            .map(|host| host.ends_with("zoom.us") || host.contains("cloudfront.net"))
+            .unwrap_or(false);
+        host_ok && parsed.path().to_ascii_lowercase().ends_with(".mp4")
+    } else {
+        false
     }
 }
 
@@ -593,4 +589,33 @@ fn scan_existing_recordings(
         }
     }
     Ok(existing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_replay_asset;
+
+    #[test]
+    fn a_zoom_hosted_mp4_is_a_replay_asset() {
+        assert!(is_replay_asset(
+            "https://ssrweb.zoom.us/rec/download/abc.mp4?access_token=t"
+        ));
+    }
+
+    #[test]
+    fn a_cloudfront_hosted_mp4_is_a_replay_asset() {
+        assert!(is_replay_asset("https://d123.cloudfront.net/abc.mp4"));
+    }
+
+    #[test]
+    fn a_playlist_is_not_a_replay_asset() {
+        assert!(!is_replay_asset(
+            "https://ssrweb.zoom.us/rec/download/playlist.m3u8"
+        ));
+    }
+
+    #[test]
+    fn an_mp4_on_an_unrelated_host_is_not_a_replay_asset() {
+        assert!(!is_replay_asset("https://example.com/abc.mp4"));
+    }
 }

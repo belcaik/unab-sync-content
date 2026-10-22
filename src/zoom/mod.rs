@@ -7,6 +7,7 @@ pub mod models;
 pub mod sso;
 
 use crate::core::config::ConfigPaths;
+use crate::core::http::HttpCtx;
 use crate::status;
 use crate::ui::progress::progress_bar;
 use api::ZoomClient;
@@ -30,8 +31,12 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
 
     status!("Starting Zoom flow for course {}", course_id);
 
+    // One media context for the whole flow: paced and retried by HttpCtx, but
+    // built without a total request timeout so a large recording can stream.
+    let media_http = HttpCtx::new(&cfg, download::build_media_client()?);
+
     // 1. Reuse the stored session if it is complete and still accepted.
-    let headless = ZoomHeadless::new(&cfg, &db, course_id);
+    let headless = ZoomHeadless::new(&cfg, &db, course_id, media_http);
     let stored = db.load_session(course_id)?;
 
     info!(
