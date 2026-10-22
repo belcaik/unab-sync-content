@@ -6,7 +6,7 @@ pub mod headless;
 pub mod models;
 pub mod sso;
 
-use crate::core::config::ConfigPaths;
+use crate::core::config::{Config, ConfigPaths};
 use crate::core::http::HttpCtx;
 use crate::status;
 use crate::ui::progress::progress_bar;
@@ -24,8 +24,7 @@ pub(crate) fn redact_url(url: &str) -> &str {
     url.split_once('?').map_or(url, |(base, _)| base)
 }
 
-pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
-    let cfg = crate::core::config::Config::load_or_init()?;
+pub async fn zoom_flow(cfg: &Config, course_id: u64, since: Option<String>) -> anyhow::Result<()> {
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
@@ -33,10 +32,10 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
 
     // One media context for the whole flow: paced and retried by HttpCtx, but
     // built without a total request timeout so a large recording can stream.
-    let media_http = HttpCtx::new(&cfg, download::build_media_client()?);
+    let media_http = HttpCtx::new(cfg, download::build_media_client()?);
 
     // 1. Reuse the stored session if it is complete and still accepted.
-    let headless = ZoomHeadless::new(&cfg, &db, course_id, media_http);
+    let headless = ZoomHeadless::new(cfg, &db, course_id, media_http);
     let stored = db.load_session(course_id)?;
 
     info!(
@@ -48,7 +47,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     let mut valid_session = false;
     if stored.is_some() {
         status!("Found existing credentials in DB. Validating...");
-        match ZoomClient::new(&cfg, &db, course_id).await {
+        match ZoomClient::new(cfg, &db, course_id).await {
             Ok(client) if client.validate_cookies().await => {
                 status!("Cookies are valid. Skipping headless capture.");
                 valid_session = true;
@@ -75,7 +74,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     status!("Starting listing and download for course {}", course_id);
 
     // 2. List recordings using captured credentials
-    let client = ZoomClient::new(&cfg, &db, course_id).await?;
+    let client = ZoomClient::new(cfg, &db, course_id).await?;
 
     let listing = client.list_recordings(since.as_deref()).await?;
     db.save_meetings(course_id, &listing)?;

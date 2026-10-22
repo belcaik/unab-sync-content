@@ -39,12 +39,14 @@ pub struct CanvasClient {
 }
 
 impl CanvasClient {
-    pub async fn from_config() -> Result<Self, CanvasError> {
-        let cfg = Config::load_or_init()?;
-        let http = HttpCtx::new(&cfg, build_http_client(&cfg));
+    /// Builds a client from an already-loaded config. The caller loads the
+    /// config once per command and passes it down, so the rate limiter inside
+    /// `http` is the only one the command creates.
+    pub async fn new(cfg: &Config) -> Result<Self, CanvasError> {
+        let http = HttpCtx::new(cfg, build_http_client(cfg));
         let base = Url::parse(&cfg.canvas.base_url)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid base_url"))?;
-        let token = resolve_token(&cfg).await.ok_or(CanvasError::MissingToken)?;
+        let token = resolve_token(cfg).await.ok_or(CanvasError::MissingToken)?;
         Ok(CanvasClient { base, http, token })
     }
 

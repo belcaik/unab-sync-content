@@ -135,6 +135,10 @@ mounted-first trap in `main.rs`.
 `sync` honours `[announcements].enabled` and `[zoom].enabled`; either can be
 turned off without touching the command line.
 
+Every command picks its courses with the same function
+(`canvas::course::select_courses`): an explicit `--course-id` wins, ignored or
+not; without it, `canvas.ignored_courses` are dropped.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -310,6 +314,7 @@ cron, where nobody would notice until the data was gone.
 ```
 src/
   main.rs           # CLI parsing, command dispatch, all user-facing printing
+  app.rs            # top-level orchestrator: one config load, the per-course loop, each flow in turn
   lib.rs            # module docs and the layer map
   core/
     mod.rs          # folder docs
@@ -326,10 +331,10 @@ src/
     mod.rs          # re-exports: client::CanvasClient, models::*
     models.rs       # Canvas wire types (Course, Module, Assignment, ...)
     client.rs       # Canvas REST client (get_json / list_paginated)
-    course.rs       # course_dir: the per-course on-disk directory name
+    course.rs       # course_dir: the per-course on-disk directory name; select_courses: the one course-selection rule
     download.rs     # Canvas files: ETag + state on top of core::transfer
     links.rs        # HTML -> links, media refs, zoom URLs
-    sync.rs         # CourseSync / ModuleCtx: the main sync flow
+    sync.rs         # sync_course (CourseSync / ModuleCtx): one course's modules, pages, assignments and files
     status.rs       # status report: aggregates per-course state.json into StatusReport
     announcements.rs  # AnnouncementSync
     calendar/       # calendar-sync: pure deadline planner (plan.rs) + its I/O executor (exec.rs)
@@ -473,7 +478,7 @@ docker run --rm -v "$PWD":/app -w /app \
 Documented so they are not rediscovered as surprises:
 
 * **`sync` aborts on a page fetch failure.** `CourseSync::sync_module` uses `?`
-  on `canvas.get_page`, and `run_sync` uses `?` on `sync_module`. A single
+  on `canvas.get_page`, and `app::run_sync` uses `?` on `sync_course`. A single
   unreadable page therefore kills the whole run, including courses not yet
   reached — while an unreadable *file* is merely recorded via
   `State::record_error` and skipped. The file behaviour is the intended one;
@@ -488,8 +493,6 @@ Documented so they are not rediscovered as surprises:
   `caldir` preserves the value verbatim and never sends it to Google anyway,
   and the function is shared with the frozen `windows` `VEVENT`. Known debt,
   deliberately unfixed; fixing it means touching `VEVENT` bytes.
-* **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
-  `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
   course listing which prints each entry.
 

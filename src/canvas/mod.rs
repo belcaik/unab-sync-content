@@ -21,7 +21,7 @@ pub mod models;
 pub mod recordings;
 /// Aggregation behind the `status` command: the download root as data.
 pub mod status;
-/// The main sync: courses, modules, pages, assignments and their files.
+/// The module sync: one course's modules, pages, assignments and their files.
 pub mod sync;
 
 pub use client::CanvasClient;

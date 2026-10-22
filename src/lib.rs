@@ -12,10 +12,13 @@
 //! - [`canvas::download`] adds the ETag/state policy for Canvas files on top
 //!   of [`core::transfer`].
 //! - [`canvas::sync`], [`canvas::announcements`], [`canvas::calendar`] and
-//!   [`canvas::recordings`] are the feature flows.
+//!   [`canvas::recordings`] are the feature flows; [`app`] orchestrates them
+//!   per course, so Canvas code does not depend on Zoom.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
 //!   Nothing outside `main` writes to stdout directly.
 
+/// The top-level orchestrator: one config load, one course loop, each flow in turn.
+pub mod app;
 /// Everything that speaks Canvas: client, wire types and the feature flows.
 pub mod canvas;
 /// Cross-cutting plumbing: config, HTTP, state, filesystem and logging.

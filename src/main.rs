@@ -1,9 +1,9 @@
+use u_crawler::app;
 use u_crawler::canvas;
 use u_crawler::canvas::announcements;
 use u_crawler::canvas::calendar;
 use u_crawler::canvas::recordings;
 use u_crawler::canvas::status::{self, StatusReport};
-use u_crawler::canvas::sync;
 use u_crawler::core::config;
 use u_crawler::core::logger;
 use u_crawler::ui::progress;
@@ -132,26 +132,21 @@ struct CanvasAuthArgs {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // Initialise logging from config before executing the command; fall back to
-    // defaults when the config is missing or invalid.
-    {
-        match config::Config::load_or_init() {
-            Ok(cfg) => logger::init_logging(Some(&cfg)),
-            Err(config::ConfigError::MissingConfigFile(path)) => {
-                eprintln!(
-                    "u_crawler: created example config at {}. Please edit it.",
-                    path
-                );
-                // We exit immediately so the user notices they need to edit the config.
-                // This applies to all commands (since clap parsed args already).
-                std::process::exit(10);
-            }
-            Err(_) => {
-                // Other errors (e.g. validation) will be caught later by specific commands
-                // or we just fall back to default logging.
-                logger::init_logging(None);
-            }
+    // Load the config once: it initialises logging, and every command that
+    // needs it reuses this load. A missing file was just created from the
+    // template, so exit and let the user edit it; any other error is reported
+    // by the command that needs the config.
+    let loaded = Config::load_or_init();
+    match &loaded {
+        Ok(cfg) => logger::init_logging(Some(cfg)),
+        Err(config::ConfigError::MissingConfigFile(path)) => {
+            eprintln!(
+                "u_crawler: created example config at {}. Please edit it.",
+                path
+            );
+            std::process::exit(10);
         }
+        Err(_) => logger::init_logging(None),
     }
 
     match cli.command {
@@ -170,18 +165,26 @@ async fn main() -> ExitCode {
             course_id,
             dry_run,
             verbose,
-        } => exit_on(
-            sync::run_sync(course_id, dry_run, verbose).await,
-            "sync failed",
-            12,
-        ),
-        Commands::Announcements { course_id, dry_run } => exit_on(
-            announcements::run_discovery(course_id, dry_run).await,
-            "announcements failed",
-            12,
-        ),
+        } => {
+            let result = with_config(loaded, |cfg| async move {
+                app::run_sync(&cfg, course_id, dry_run, verbose).await
+            })
+            .await;
+            exit_on(result, "sync failed", 12)
+        }
+        Commands::Announcements { course_id, dry_run } => {
+            let result = with_config(loaded, |cfg| async move {
+                announcements::run_discovery(&cfg, course_id, dry_run).await
+            })
+            .await;
+            exit_on(result, "announcements failed", 12)
+        }
         Commands::Calendar { course_id, dry_run } => {
-            match calendar::run_calendar(course_id, dry_run).await {
+            let result = with_config(loaded, |cfg| async move {
+                calendar::run_calendar(&cfg, course_id, dry_run).await
+            })
+            .await;
+            match result {
                 Ok(calendar::RunOutcome::Success) => ExitCode::SUCCESS,
                 Ok(calendar::RunOutcome::PartialFailure) => {
                     eprintln!("warning: some courses failed to sync; see the log for details");
@@ -190,18 +193,22 @@ async fn main() -> ExitCode {
                 Err(e) => exit_on(Err(e), "calendar sync failed", 12),
             }
         }
-        Commands::Recordings { course_id, dry_run } => exit_on(
-            recordings::run_discovery(course_id, dry_run).await,
-            "recordings discovery failed",
-            12,
-        ),
+        Commands::Recordings { course_id, dry_run } => {
+            let result = with_config(loaded, |cfg| async move {
+                recordings::run_discovery(&cfg, course_id, dry_run).await
+            })
+            .await;
+            exit_on(result, "recordings discovery failed", 12)
+        }
         #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
-            ZoomCommands::Flow { course_id, since } => exit_on(
-                zoom::zoom_flow(course_id, since).await,
-                "zoom flow failed",
-                12,
-            ),
+            ZoomCommands::Flow { course_id, since } => {
+                let result = with_config(loaded, |cfg| async move {
+                    zoom::zoom_flow(&cfg, course_id, since).await
+                })
+                .await;
+                exit_on(result, "zoom flow failed", 12)
+            }
         },
         #[cfg(not(feature = "zoom"))]
         Commands::Zoom { .. } => {
@@ -214,6 +221,18 @@ async fn main() -> ExitCode {
         }
         Commands::Status { verbose } => exit_on(handle_status(verbose).await, "status failed", 12),
     }
+}
+
+/// Runs `f` with the config loaded at startup, or returns its load error.
+async fn with_config<T, F, Fut>(
+    loaded: Result<Config, config::ConfigError>,
+    f: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(Config) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    f(loaded?).await
 }
 
 fn exit_on(result: anyhow::Result<()>, what: &str, code: u8) -> ExitCode {
@@ -272,7 +291,8 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> anyhow::Result<()> {
 
 async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
     use canvas::CanvasClient;
-    let client = CanvasClient::from_config().await?;
+    let cfg = Config::load_or_init()?;
+    let client = CanvasClient::new(&cfg).await?;
 
     if let Some(cid) = course_id {
         let modules = client.list_modules_with_items(cid).await?;

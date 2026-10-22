@@ -266,7 +266,7 @@ pub(super) struct FetchFailed;
 /// fetch failed, so a network blip can never be mistaken for "Canvas says
 /// this course now has zero assignments" and wipe every calendar file for
 /// it. `run_calendar` is the only caller; extracted here (alongside
-/// [`select_active_courses`](super::exec::select_active_courses) and [`conclude`](super::exec::conclude)) so the guarantee is a
+/// [`conclude`](super::exec::conclude)) so the guarantee is a
 /// testable predicate rather than something only visible by reading
 /// `run_calendar`'s control flow.
 pub(super) fn plan_for_course(
