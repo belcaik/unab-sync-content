@@ -4,8 +4,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sha1::{Digest, Sha1};
-
 use super::ics::availability_start;
 use super::identity::{
     calendar_state_key, component_filename, deadline_filename, deadline_uid, window_filename,
@@ -17,16 +15,7 @@ use super::vtodo::{is_submission_done, render_vtodo};
 use super::{Plan, PlannedDelete, PlannedWrite};
 use crate::canvas::course::course_dir;
 use crate::canvas::{Assignment, Course, Submission};
-use crate::core::state::State;
-
-/// Hash rendered content the same way `canvas/sync.rs` hashes markdown before
-/// deciding whether to skip a write: SHA-1, hex-encoded. Not cryptographic —
-/// just a cheap, stable fingerprint of "did the projected component change".
-pub(super) fn content_hash(content: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(content.as_bytes());
-    hex::encode(hasher.finalize())
-}
+use crate::core::state::{content_hash, State};
 
 /// Index submissions by assignment id for O(1) lookup while planning. Not a
 /// `HashMap<u64, Submission>` in the public API — this is planning-internal
@@ -179,7 +168,7 @@ fn plan_component(
     state_key: String,
     prev: &State,
 ) {
-    let hash = content_hash(&content);
+    let hash = content_hash(content.as_bytes());
     let unchanged = prev
         .get(&state_key)
         .and_then(|item| item.content_hash.as_deref())
@@ -283,7 +272,7 @@ pub(super) fn plan_for_course(
 
 #[cfg(test)]
 mod tests {
-    use super::{content_hash, plan, plan_for_course, FetchFailed};
+    use super::{plan, plan_for_course, FetchFailed};
     use crate::canvas::calendar::exec::record_writes;
     use crate::canvas::calendar::identity::{calendar_state_key, deadline_uid, window_state_key};
     use crate::canvas::calendar::test_support::{
@@ -294,7 +283,7 @@ mod tests {
     use crate::canvas::calendar::vtodo::render_vtodo;
     use crate::canvas::calendar::{Plan, PlannedDelete};
     use crate::canvas::{Assignment, Course, Submission};
-    use crate::core::state::{ItemState, State};
+    use crate::core::state::{content_hash, ItemState, State};
     use chrono::DateTime;
     use std::path::{Path, PathBuf};
 
@@ -598,7 +587,7 @@ mod tests {
                     etag: None,
                     updated_at: None,
                     size: None,
-                    content_hash: Some(content_hash(&write.content)),
+                    content_hash: Some(content_hash(write.content.as_bytes())),
                     last_error: None,
                     error_count: None,
                 },

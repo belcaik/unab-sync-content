@@ -3,13 +3,13 @@
 
 use std::path::{Path, PathBuf};
 
-use super::plan::{content_hash, plan_for_course, FetchFailed};
+use super::plan::{plan_for_course, FetchFailed};
 use super::{Plan, PlannedDelete, PlannedWrite};
 use crate::canvas::course::{course_dir, select_courses};
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::core::config::Config;
 use crate::core::fsutil;
-use crate::core::state::{ItemState, State};
+use crate::core::state::{content_hash, ItemState, State};
 use crate::status;
 
 /// The outcome of syncing one course's assignments (spec ticket 11): either
@@ -318,7 +318,7 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
 /// the caller does that, and only outside `--dry-run`.
 pub(super) fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
     for write in writes {
-        let hash = content_hash(&write.content);
+        let hash = content_hash(write.content.as_bytes());
         state.set(
             write.state_key.clone(),
             ItemState {

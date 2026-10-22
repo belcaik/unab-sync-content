@@ -4,11 +4,10 @@ use crate::core::fsutil::{
     atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
 use crate::core::http::HttpCtx;
-use crate::core::state::{ItemState, State};
+use crate::core::state::{content_hash, ItemState, State};
 use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use regex::Regex;
-use sha1::{Digest, Sha1};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -165,7 +164,7 @@ impl ModuleCtx<'_> {
         what: &str,
     ) -> anyhow::Result<usize> {
         let (course_id, module_id) = (self.course_id, self.module_id);
-        let hash = sha1_hex(md.as_bytes());
+        let hash = content_hash(md.as_bytes());
 
         if state.get(&key).and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
             if !self.dry_run && self.verbose {
@@ -325,12 +324,6 @@ impl CourseSync<'_> {
         }
         Ok(counts)
     }
-}
-
-fn sha1_hex(data: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
 }
 
 /// Matches `/files/12345` or `/api/v1/files/12345` in an absolute or relative URL.
