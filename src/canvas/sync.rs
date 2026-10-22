@@ -1,4 +1,6 @@
-use crate::canvas::download::{download_if_needed, Dest};
+use crate::canvas::download::{
+    download_or_record, fetch_or_record, preferred_name, Dest,
+};
 use crate::canvas::links::canvas_file_ids;
 use crate::canvas::{Assignment, CanvasClient, Course, Module};
 use crate::core::fsutil::{
@@ -12,7 +14,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Mirrors one course's modules: pages, assignments, and every file they link
 /// to. The per-course orchestration around it (course directory, `state.json`,
@@ -105,24 +107,14 @@ impl ModuleCtx<'_> {
         let (course_id, module_id) = (self.course_id, self.module_id);
         let key = crate::canvas::download::state_key(file_id);
 
-        let f = match self.canvas.get_file(file_id).await {
-            Ok(f) => f,
-            Err(e) => {
-                warn!(course_id, module_id, file_id, error = %e, "unable to fetch file metadata");
-                state.record_error(key, &e);
-                return Ok(0);
-            }
+        let Some(f) = fetch_or_record(self.canvas, file_id, state).await else {
+            return Ok(0);
         };
 
-        let name = f
-            .display_name
-            .clone()
-            .or_else(|| f.filename.clone())
-            .unwrap_or_else(|| format!("file_{file_id}"));
         let dest = self
             .module_dir
             .join("Attachments")
-            .join(sanitize_filename_preserve_ext(&name));
+            .join(sanitize_filename_preserve_ext(&preferred_name(&f)));
         let ext = dest
             .extension()
             .and_then(|s| s.to_str())
@@ -140,16 +132,12 @@ impl ModuleCtx<'_> {
         if let Some(parent) = dest.parent() {
             ensure_dir(parent).await?;
         }
-        match download_if_needed(self.httpctx, &f, Dest::Exact(&dest), state).await {
-            Ok(_) => {
+        match download_or_record(self.httpctx, &f, Dest::Exact(&dest), state).await {
+            Some(_) => {
                 info!(course_id, module_id, file_id, path = %dest.display(), file_ext = ext, "downloaded file");
                 Ok(1)
             }
-            Err(e) => {
-                warn!(course_id, module_id, file_id, error = %e, "download failed");
-                state.record_error(key, &e);
-                Ok(0)
-            }
+            None => Ok(0),
         }
     }
 

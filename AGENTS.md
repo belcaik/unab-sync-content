@@ -332,7 +332,7 @@ src/
     models.rs       # Canvas wire types (Course, Module, Assignment, ...)
     client.rs       # Canvas REST client (get_json / list_paginated)
     course.rs       # course_dir: the per-course on-disk directory name; state_path: its state.json; select_courses: the one course-selection rule
-    download.rs     # Canvas files: ETag + state on top of core::transfer
+    download.rs     # Canvas files: ETag + state on top of core::transfer; fetch_or_record / download_or_record / fetch_and_download turn failures into recorded state, not propagated errors
     links.rs        # HTML -> links, media refs, zoom URLs, Canvas file ids
     sync.rs         # sync_course (CourseSync / ModuleCtx): one course's modules, pages, assignments and files
     status.rs       # status report: aggregates per-course state.json into StatusReport

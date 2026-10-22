@@ -1,5 +1,7 @@
 use crate::canvas::course::{course_dir, select_courses, state_path};
-use crate::canvas::download::{download_if_needed, Dest};
+use crate::canvas::download::{
+    download_or_record, fetch_and_download, preferred_name, Dest,
+};
 use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::core::config::Config;
@@ -154,27 +156,21 @@ impl<'a> AnnouncementSync<'a> {
 
     /// Downloads one Canvas-hosted file, returning its course-relative path.
     ///
-    /// A failure is logged and yields `None`: one missing attachment must not
-    /// abandon the announcement it came from.
+    /// A failure is recorded and yields `None` (see
+    /// [`download_or_record`]): one missing attachment must not abandon the
+    /// announcement it came from.
     async fn fetch_media(&self, file: &FileObj, state: &mut State) -> Option<String> {
-        match download_if_needed(
+        download_or_record(
             self.httpctx,
             file,
             Dest::InDir {
                 dir: &self.media_dir,
-                name: &media_name(file),
+                name: &preferred_name(file),
             },
             state,
         )
         .await
-        {
-            Ok(path) => Self::relative_media_path(&path),
-            Err(e) => {
-                warn!(course_id = self.course_id, file_id = file.id, error = %e, "media download failed");
-                state.record_error(crate::canvas::download::state_key(file.id), &e);
-                None
-            }
-        }
+        .and_then(|path| Self::relative_media_path(&path))
     }
 
     /// Resolves the media referenced in an announcement body, downloading the
@@ -187,13 +183,9 @@ impl<'a> AnnouncementSync<'a> {
         let mut out = Vec::with_capacity(refs.len());
         for mut m in refs {
             if let (true, Some(fid)) = (self.downloads_media(), m.file_id) {
-                match self.canvas.get_file(fid).await {
-                    Ok(f) => m.local_path = self.fetch_media(&f, state).await,
-                    Err(e) => {
-                        warn!(course_id = self.course_id, file_id = fid, error = %e, "media metadata fetch failed");
-                        state.record_error(crate::canvas::download::state_key(fid), &e);
-                    }
-                }
+                m.local_path = fetch_and_download(self.canvas, fid, &self.media_dir, state)
+                    .await
+                    .and_then(|path| Self::relative_media_path(&path));
             }
             out.push(m);
         }
@@ -389,15 +381,4 @@ impl<'a> AnnouncementSync<'a> {
         }
         Ok(totals)
     }
-}
-
-/// The preferred on-disk name for an announcement's media file.
-///
-/// The extension may be absent here; the downloader derives one from the
-/// response `Content-Type` when it is.
-fn media_name(f: &FileObj) -> String {
-    f.display_name
-        .clone()
-        .or_else(|| f.filename.clone())
-        .unwrap_or_else(|| format!("file_{}", f.id))
 }
