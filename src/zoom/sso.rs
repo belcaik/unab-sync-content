@@ -9,7 +9,7 @@
 //! touches the recordings database or the course being synced.
 
 use crate::core::config::Config;
-use chromiumoxide::Page;
+use chromiumoxide::{Element, Page};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -116,78 +116,109 @@ pub async fn handle_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drives the Microsoft side of the flow: remembered-account picker, manual
+/// credential entry, and the "stay signed in" interstitial.
 async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     // First, check for remembered account tiles (account picker)
     sleep(Duration::from_secs(2)).await;
+    click_remembered_account(page, creds).await?;
 
+    // Fallback: manual credential entry
+    enter_credentials(page, creds).await?;
+
+    dismiss_stay_signed_in_prompt(page).await?;
+
+    // Wait for final redirects back to Canvas/Zoom
+    sleep(Duration::from_secs(5)).await;
+
+    let final_url = page.url().await?.unwrap_or_default();
+    info!("Post-SSO URL: {}", super::redact_url(&final_url));
+    Ok(())
+}
+
+/// Clicks the matching tile of Microsoft's remembered-account picker, if one
+/// is showing. Does nothing when the flow already presents an email input.
+async fn click_remembered_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     let email_input_present = page.find_element("input[type='email']").await.is_ok()
         || page.find_element("input[name='loginfmt']").await.is_ok();
 
-    // Look for account tiles - the clickable element is .table[role="button"] inside .tile-container.
     // Only attempt this flow if we do not already see the email input.
-    if !email_input_present {
-        if let Ok(tiles) = page.find_elements(".table[role='button']").await {
-            if !tiles.is_empty() {
-                let mut matching_tile_idx = None;
-                let mut first_email_tile_idx = None;
-                let mut use_other_tile_idx = None;
+    if email_input_present {
+        return Ok(());
+    }
 
-                let normalized_email = creds.email.as_ref().map(|email| email.to_lowercase());
+    let Ok(tiles) = page.find_elements(".table[role='button']").await else {
+        return Ok(());
+    };
 
-                for (idx, tile) in tiles.iter().enumerate() {
-                    let text = tile.inner_text().await?.unwrap_or_default();
-                    let lowered = text.to_lowercase();
+    if let Some(idx) = pick_account_tile(&tiles, creds).await? {
+        info!("Found remembered account tile, clicking...");
+        if let Err(e) = tiles[idx].click().await {
+            warn!("Warning: Failed to click account tile: {:?}", e);
+        } else {
+            sleep(Duration::from_secs(3)).await;
+        }
+    }
 
-                    if lowered.contains("sign-in options")
-                        || lowered.contains("other ways to sign in")
-                        || lowered.contains("otros metodos")
-                        || lowered.contains("otras formas")
-                    {
-                        continue;
-                    }
+    Ok(())
+}
 
-                    if lowered.contains("use another account")
-                        || lowered.contains("usar otra cuenta")
-                        || lowered.contains("otra cuenta")
-                    {
-                        if use_other_tile_idx.is_none() {
-                            use_other_tile_idx = Some(idx);
-                        }
-                        continue;
-                    }
+/// Chooses which remembered-account tile to click: the one matching the
+/// configured email, else "use another account", else the first email tile.
+///
+/// The clickable element is `.table[role="button"]` inside `.tile-container`.
+async fn pick_account_tile(tiles: &[Element], creds: &SsoCreds) -> anyhow::Result<Option<usize>> {
+    let mut matching_tile_idx = None;
+    let mut first_email_tile_idx = None;
+    let mut use_other_tile_idx = None;
 
-                    if lowered.contains('@') {
-                        if first_email_tile_idx.is_none() {
-                            first_email_tile_idx = Some(idx);
-                        }
-                        if let Some(email) = &normalized_email {
-                            if lowered.contains(email) {
-                                matching_tile_idx = Some(idx);
-                                break;
-                            }
-                        }
-                    }
-                }
+    let normalized_email = creds.email.as_ref().map(|email| email.to_lowercase());
 
-                let selected_idx = match (matching_tile_idx, normalized_email.as_ref()) {
-                    (Some(idx), _) => Some(idx),
-                    (None, Some(_)) => use_other_tile_idx.or(first_email_tile_idx),
-                    (None, None) => first_email_tile_idx,
-                };
+    for (idx, tile) in tiles.iter().enumerate() {
+        let text = tile.inner_text().await?.unwrap_or_default();
+        let lowered = text.to_lowercase();
 
-                if let Some(idx) = selected_idx {
-                    info!("Found remembered account tile, clicking...");
-                    if let Err(e) = tiles[idx].click().await {
-                        warn!("Warning: Failed to click account tile: {:?}", e);
-                    } else {
-                        sleep(Duration::from_secs(3)).await;
-                    }
+        if lowered.contains("sign-in options")
+            || lowered.contains("other ways to sign in")
+            || lowered.contains("otros metodos")
+            || lowered.contains("otras formas")
+        {
+            continue;
+        }
+
+        if lowered.contains("use another account")
+            || lowered.contains("usar otra cuenta")
+            || lowered.contains("otra cuenta")
+        {
+            if use_other_tile_idx.is_none() {
+                use_other_tile_idx = Some(idx);
+            }
+            continue;
+        }
+
+        if lowered.contains('@') {
+            if first_email_tile_idx.is_none() {
+                first_email_tile_idx = Some(idx);
+            }
+            if let Some(email) = &normalized_email {
+                if lowered.contains(email) {
+                    matching_tile_idx = Some(idx);
+                    break;
                 }
             }
         }
     }
 
-    // Fallback: manual credential entry
+    Ok(match (matching_tile_idx, normalized_email.as_ref()) {
+        (Some(idx), _) => Some(idx),
+        (None, Some(_)) => use_other_tile_idx.or(first_email_tile_idx),
+        (None, None) => first_email_tile_idx,
+    })
+}
+
+/// Types whichever of the configured credentials the flow is asking for. A
+/// missing credential skips its step with a warning.
+async fn enter_credentials(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
     match &creds.email {
         Some(email) => {
             info!("Attempting to enter email...");
@@ -204,8 +235,16 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
         None => warn!("sso_password not set; skipping password entry"),
     }
 
-    // "Stay signed in?" prompt - poll for it since the page may still be loading after password submission.
-    // Microsoft shows this as "Stay signed in?" (English) or "¿Mantener la sesión iniciada?" (Spanish).
+    Ok(())
+}
+
+/// Polls for Microsoft's "Stay signed in?" prompt and accepts it.
+///
+/// Microsoft shows it as "Stay signed in?" (English) or "¿Mantener la sesión
+/// iniciada?" (Spanish), and it may still be loading after the password
+/// submission, hence the poll; leaving the Microsoft login domain also ends
+/// the wait.
+async fn dismiss_stay_signed_in_prompt(page: &Page) -> anyhow::Result<()> {
     let kmsi_start = Instant::now();
     while kmsi_start.elapsed() < Duration::from_secs(15) {
         let url = page.url().await?.unwrap_or_default();
@@ -239,11 +278,6 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
         sleep(Duration::from_millis(500)).await;
     }
 
-    // Wait for final redirects back to Canvas/Zoom
-    sleep(Duration::from_secs(5)).await;
-
-    let final_url = page.url().await?.unwrap_or_default();
-    info!("Post-SSO URL: {}", super::redact_url(&final_url));
     Ok(())
 }
 
@@ -256,33 +290,25 @@ async fn is_zoom_login_page(page: &Page) -> anyhow::Result<bool> {
         || html.contains("Sign in with Microsoft"))
 }
 
-pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
-    // Step 1: Wait for page to settle after navigation
-    sleep(Duration::from_secs(3)).await;
-
+/// Whether the current page is the Zoom recording player rather than a login
+/// screen: a `/rec/play` URL without any login elements.
+async fn zoom_player_loaded(page: &Page) -> anyhow::Result<bool> {
     let url = page.url().await?.unwrap_or_default();
-
-    // Step 2: Check if already authenticated (player loaded)
     if url.contains("zoom.us/rec/play") {
         // Additional check: look for player elements, not login elements
         if let Ok(html) = page.content().await {
             if !html.contains("zm-login-methods__item") && !html.contains("Sign in with Microsoft")
             {
-                info!("Zoom player already loaded, no authentication needed");
-                return Ok(());
+                return Ok(true);
             }
         }
     }
+    Ok(false)
+}
 
-    // Step 3: Detect Zoom login screen
-    if !is_zoom_login_page(page).await.unwrap_or(false) {
-        info!("No Zoom login detected, assuming already authenticated");
-        return Ok(());
-    }
-
-    info!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
-
-    // Step 4: Click "Sign in with Microsoft" on Zoom
+/// Clicks Zoom's "Sign in with Microsoft" control, retrying for up to 10 s
+/// while the login page finishes rendering.
+async fn click_microsoft_sign_in(page: &Page) -> anyhow::Result<()> {
     let start = Instant::now();
     let mut clicked = false;
 
@@ -332,12 +358,15 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
         ));
     }
 
-    // Step 5: Wait for redirect to Microsoft
+    Ok(())
+}
+
+/// Waits up to 30 s for the browser to be redirected to the Microsoft login.
+async fn wait_for_microsoft_redirect(page: &Page) -> anyhow::Result<()> {
     info!("Clicked Microsoft sign-in button, waiting for redirect...");
     sleep(Duration::from_secs(3)).await;
 
     let start = Instant::now();
-    let mut on_microsoft = false;
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("login.microsoftonline.com") {
@@ -345,44 +374,63 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
                 "Redirected to Microsoft login: {}",
                 super::redact_url(&current_url)
             );
-            on_microsoft = true;
-            break;
+            return Ok(());
         }
         sleep(Duration::from_millis(500)).await;
     }
 
-    if !on_microsoft {
-        return Err(anyhow::anyhow!(
-            "Timeout waiting for redirect to Microsoft login"
-        ));
-    }
+    Err(anyhow::anyhow!(
+        "Timeout waiting for redirect to Microsoft login"
+    ))
+}
 
-    // Step 6: Handle Microsoft authentication (account picker or credentials)
-    handle_ms_account(page, creds).await?;
-    info!("Microsoft authentication complete, waiting for Zoom player...");
-
-    // Step 7: Wait for return to Zoom
+/// Waits up to 30 s for the browser to come back from Microsoft to a Zoom
+/// page that is not the sign-in screen, then lets the player initialize.
+async fn wait_for_zoom_return(page: &Page) -> anyhow::Result<()> {
     let start = Instant::now();
-    let mut back_on_zoom = false;
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("zoom.us") && !current_url.contains("signin") {
             info!("Back on Zoom page: {}", super::redact_url(&current_url));
-            back_on_zoom = true;
-            break;
+            // Give the player time to initialize
+            sleep(Duration::from_secs(2)).await;
+            info!("Zoom player should now be loaded");
+            return Ok(());
         }
         sleep(Duration::from_millis(1000)).await;
     }
 
-    if !back_on_zoom {
-        return Err(anyhow::anyhow!(
-            "Timeout waiting to return to Zoom after Microsoft authentication"
-        ));
+    Err(anyhow::anyhow!(
+        "Timeout waiting to return to Zoom after Microsoft authentication"
+    ))
+}
+
+pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> {
+    // Wait for page to settle after navigation
+    sleep(Duration::from_secs(3)).await;
+
+    // Check if already authenticated (player loaded)
+    if zoom_player_loaded(page).await? {
+        info!("Zoom player already loaded, no authentication needed");
+        return Ok(());
     }
 
-    // Give the player time to initialize
-    sleep(Duration::from_secs(2)).await;
-    info!("Zoom player should now be loaded");
+    // Detect Zoom login screen
+    if !is_zoom_login_page(page).await.unwrap_or(false) {
+        info!("No Zoom login detected, assuming already authenticated");
+        return Ok(());
+    }
 
-    Ok(())
+    info!("Zoom play_url: detected login screen, initiating Microsoft SSO...");
+
+    // Click "Sign in with Microsoft" on Zoom, then follow the redirect
+    click_microsoft_sign_in(page).await?;
+    wait_for_microsoft_redirect(page).await?;
+
+    // Handle Microsoft authentication (account picker or credentials)
+    handle_ms_account(page, creds).await?;
+    info!("Microsoft authentication complete, waiting for Zoom player...");
+
+    // Wait for return to Zoom
+    wait_for_zoom_return(page).await
 }
