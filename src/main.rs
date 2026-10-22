@@ -159,7 +159,13 @@ async fn main() -> ExitCode {
         Commands::Auth(AuthCommands::Canvas(args)) => {
             exit_on(handle_auth_canvas(args).await, "auth canvas failed", 11)
         }
-        Commands::Scan { course_id } => exit_on(handle_scan(course_id).await, "scan failed", 12),
+        Commands::Scan { course_id } => {
+            let result = handle_scan(course_id).await;
+            if result.is_err() {
+                tracing::error!(course_id = ?course_id, "scan failed for course filter");
+            }
+            exit_on(result, "scan failed", 12)
+        }
         Commands::Sync {
             course_id,
             dry_run,
