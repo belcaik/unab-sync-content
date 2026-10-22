@@ -3,13 +3,13 @@
 
 use std::path::{Path, PathBuf};
 
-use super::plan::{content_hash, plan_for_course, FetchFailed};
+use super::plan::{plan_for_course, FetchFailed};
 use super::{Plan, PlannedDelete, PlannedWrite};
-use crate::canvas::course::{course_dir, select_courses};
+use crate::canvas::course::{course_dir, select_courses, state_path};
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::core::config::Config;
 use crate::core::fsutil;
-use crate::core::state::{ItemState, State};
+use crate::core::state::{content_hash, ItemState, State};
 use crate::status;
 
 /// The outcome of syncing one course's assignments (spec ticket 11): either
@@ -202,7 +202,7 @@ async fn sync_course(
         Err(FetchFailed)
     };
 
-    let state_path = course_dir(download_root, course).join("state.json");
+    let state_path = state_path(&course_dir(download_root, course));
     let mut state = State::load(&state_path).await;
 
     // Ticket 10's safety requirement: a fetch failure must never reach
@@ -300,12 +300,8 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
         tracing::info!(course_id, path = %write.path.display(), "wrote calendar file");
     }
     for delete in &course_plan.deletes {
-        match tokio::fs::remove_file(&delete.path).await {
-            Ok(()) => {
-                tracing::info!(course_id, path = %delete.path.display(), "removed calendar file")
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        if fsutil::remove_file_if_exists(&delete.path).await? {
+            tracing::info!(course_id, path = %delete.path.display(), "removed calendar file")
         }
     }
     Ok(())
@@ -318,17 +314,10 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
 /// the caller does that, and only outside `--dry-run`.
 pub(super) fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
     for write in writes {
-        let hash = content_hash(&write.content);
+        let hash = content_hash(write.content.as_bytes());
         state.set(
             write.state_key.clone(),
-            ItemState {
-                etag: None,
-                updated_at: None,
-                size: Some(write.content.len() as u64),
-                content_hash: Some(hash),
-                last_error: None,
-                error_count: None,
-            },
+            ItemState::with_hash(hash, write.content.len() as u64, None),
         );
     }
 }

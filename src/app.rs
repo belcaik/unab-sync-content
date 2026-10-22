@@ -3,7 +3,7 @@
 //! on Zoom.
 
 use crate::canvas::announcements::AnnouncementSync;
-use crate::canvas::course::{course_dir, select_courses};
+use crate::canvas::course::{course_dir, select_courses, state_path};
 use crate::canvas::sync::{sync_course, SyncCounts};
 use crate::canvas::CanvasClient;
 use crate::core::config::Config;
@@ -12,7 +12,7 @@ use crate::core::state::State;
 use crate::status;
 use crate::ui::progress::progress_bar;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
 
 /// Runs the `sync` command: for every selected course, sync its modules, then
 /// its announcements (when enabled), then its Zoom recordings (when enabled
@@ -50,24 +50,20 @@ pub async fn run_sync(
         info!(course_id = c.id, path = %course_dir.display(), "sync course");
 
         // Load course state
-        let state_path = course_dir.join("state.json");
+        let state_path = state_path(&course_dir);
         let mut state = State::load(&state_path).await;
 
-        totals += sync_course(&canvas, &course_dir, &c, &mut state, dry_run, verbose).await?;
+        // Every event a flow logs for this course carries its id.
+        let course_span = info_span!("course", course_id = c.id);
+        totals += sync_course(&canvas, &course_dir, &c, &mut state, dry_run, verbose)
+            .instrument(course_span.clone())
+            .await?;
 
         // Sync announcements for this course
         if cfg.announcements.enabled {
-            match AnnouncementSync::new(
-                cfg,
-                &canvas,
-                &canvas.http,
-                c.id,
-                &course_dir,
-                dry_run,
-                verbose,
-            )
-            .run(&c.name, &mut state)
-            .await
+            match AnnouncementSync::new(cfg, &canvas, c.id, &course_dir, dry_run, verbose)
+                .run(&c.name, &mut state)
+                .await
             {
                 Ok(s) => {
                     if dry_run && s.announcements > 0 {
@@ -99,7 +95,10 @@ pub async fn run_sync(
                 status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
             } else {
                 status!("Starting Zoom sync for course {}...", c.id);
-                match crate::zoom::zoom_flow(cfg, c.id, None).await {
+                match crate::zoom::zoom_flow(cfg, c.id, None)
+                    .instrument(course_span.clone())
+                    .await
+                {
                     Ok(()) => {
                         status!("✓ Zoom sync completed for course {}", c.id);
                     }

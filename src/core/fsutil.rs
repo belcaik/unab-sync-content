@@ -127,6 +127,18 @@ pub async fn atomic_rename(src: &Path, dest: &Path) -> io::Result<()> {
     tokio::fs::rename(src, dest).await
 }
 
+/// Removes `path`, returning whether a file was actually removed.
+///
+/// A `NotFound` is success (`false`): the file is already gone, which is the
+/// wanted end state.
+pub async fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +164,19 @@ mod tests {
     #[test]
     fn filename_without_extension_is_left_alone() {
         assert!(!sanitize_filename_preserve_ext("README").contains('.'));
+    }
+
+    #[tokio::test]
+    async fn remove_file_if_exists_reports_whether_it_removed_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+
+        assert!(!remove_file_if_exists(&path).await.unwrap());
+
+        tokio::fs::write(&path, b"x").await.unwrap();
+        assert!(remove_file_if_exists(&path).await.unwrap());
+        assert!(!path.exists());
+        // And removing it again is success again, not an error.
+        assert!(!remove_file_if_exists(&path).await.unwrap());
     }
 }

@@ -42,6 +42,12 @@ pub fn course_dir(root: &Path, course: &Course) -> PathBuf {
     })
 }
 
+/// The path of a course's `state.json`, given its on-disk directory
+/// ([`course_dir`]). One spelling for every flow that loads or saves it.
+pub fn state_path(course_dir: &Path) -> PathBuf {
+    course_dir.join("state.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +70,14 @@ mod tests {
 
     fn ids(courses: &[Course]) -> Vec<u64> {
         courses.iter().map(|c| c.id).collect()
+    }
+
+    #[test]
+    fn state_path_is_the_state_json_under_the_course_dir() {
+        assert_eq!(
+            state_path(Path::new("/backup/Course_101")),
+            Path::new("/backup/Course_101/state.json")
+        );
     }
 
     #[test]

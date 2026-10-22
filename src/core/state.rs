@@ -1,9 +1,19 @@
 //! Per-course sync state: what has been fetched, and what failed trying.
 
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
+
+/// Hash content the same way everywhere a `content_hash` is recorded: SHA-1,
+/// hex-encoded lowercase. Not cryptographic — a cheap, stable fingerprint of
+/// "did this content change".
+pub fn content_hash(content: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(content);
+    hex::encode(hasher.finalize())
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
@@ -20,6 +30,21 @@ pub struct ItemState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub error_count: Option<u32>,
+}
+
+impl ItemState {
+    /// The state of an item tracked by its content hash rather than an ETag:
+    /// a rendered markdown page or a projected calendar component.
+    pub fn with_hash(content_hash: String, size: u64, updated_at: Option<String>) -> Self {
+        ItemState {
+            etag: None,
+            updated_at,
+            size: Some(size),
+            content_hash: Some(content_hash),
+            last_error: None,
+            error_count: None,
+        }
+    }
 }
 
 impl State {
@@ -84,6 +109,35 @@ mod tests {
             last_error: None,
             error_count: None,
         }
+    }
+
+    #[test]
+    fn content_hash_is_sha1_hex() {
+        // Known SHA-1 vectors: the output stays lowercase hex, byte-identical
+        // to what the old per-module copies produced.
+        assert_eq!(
+            content_hash(b""),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            content_hash(b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            content_hash("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".as_bytes()),
+            "8b506967e3fe6f7878a37106c9c3ff102684e991"
+        );
+    }
+
+    #[test]
+    fn with_hash_tracks_content_without_an_etag() {
+        let item = ItemState::with_hash("deadbeef".into(), 42, Some("2026-01-01".into()));
+        assert_eq!(item.etag, None);
+        assert_eq!(item.updated_at.as_deref(), Some("2026-01-01"));
+        assert_eq!(item.size, Some(42));
+        assert_eq!(item.content_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(item.last_error, None);
+        assert_eq!(item.error_count, None);
     }
 
     #[test]

@@ -3,11 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use chrono::DateTime;
-use sha1::{Digest, Sha1};
 
 use super::{Plan, PlannedWrite};
 use crate::canvas::{Assignment, Course, Submission};
-use crate::core::state::{ItemState, State};
+use crate::core::state::{content_hash, ItemState, State};
 
 pub(super) fn course() -> Course {
     Course {
@@ -86,15 +85,10 @@ pub(super) fn logical_line(content: &str, prefix: &str) -> String {
     matches.into_iter().next().expect("one match")
 }
 
-/// Build a `State` recording, under the `calendar:{id}` namespace, a
-/// content hash computed independently of `plan`'s own `content_hash`
-/// helper (using the `sha1` crate directly, the same way `canvas/sync.rs`
-/// does), so this does not just recompute the production code's answer
-/// and compare it to itself.
+/// Build a `State` recording, under the `calendar:{id}` namespace, the
+/// content hash of `content` — the same [`content_hash`] the planner records,
+/// so a second plan against this state must come back empty.
 pub(super) fn state_with_hash(assignment_id: u64, content: &str) -> State {
-    let mut hasher = Sha1::new();
-    hasher.update(content.as_bytes());
-    let hash = hex::encode(hasher.finalize());
     let mut state = State::default();
     state.set(
         format!("calendar:{assignment_id}"),
@@ -102,7 +96,7 @@ pub(super) fn state_with_hash(assignment_id: u64, content: &str) -> State {
             etag: None,
             updated_at: None,
             size: None,
-            content_hash: Some(hash),
+            content_hash: Some(content_hash(content.as_bytes())),
             last_error: None,
             error_count: None,
         },
