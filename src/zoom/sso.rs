@@ -212,7 +212,7 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
 
         // If we already left the Microsoft login domain, SSO is done
         if !url.contains("login.microsoftonline.com") {
-            info!("SSO complete, redirected to: {}", url);
+            info!("SSO complete, redirected to: {}", super::redact_url(&url));
             break;
         }
 
@@ -243,7 +243,7 @@ async fn handle_ms_account(page: &Page, creds: &SsoCreds) -> anyhow::Result<()> 
     sleep(Duration::from_secs(5)).await;
 
     let final_url = page.url().await?.unwrap_or_default();
-    info!("Post-SSO URL: {}", final_url);
+    info!("Post-SSO URL: {}", super::redact_url(&final_url));
     Ok(())
 }
 
@@ -341,7 +341,10 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("login.microsoftonline.com") {
-            info!("Redirected to Microsoft login: {}", current_url);
+            info!(
+                "Redirected to Microsoft login: {}",
+                super::redact_url(&current_url)
+            );
             on_microsoft = true;
             break;
         }
@@ -364,7 +367,7 @@ pub async fn handle_zoom_play_sso(page: &Page, creds: &SsoCreds) -> anyhow::Resu
     while start.elapsed() < Duration::from_secs(30) {
         let current_url = page.url().await?.unwrap_or_default();
         if current_url.contains("zoom.us") && !current_url.contains("signin") {
-            info!("Back on Zoom page: {}", current_url);
+            info!("Back on Zoom page: {}", super::redact_url(&current_url));
             back_on_zoom = true;
             break;
         }

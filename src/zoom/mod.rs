@@ -15,6 +15,14 @@ use headless::ZoomHeadless;
 use models::{RecordingSummary, ZoomRecordingFile};
 use tracing::info;
 
+/// The loggable part of `url`: everything before the query string.
+///
+/// SSO redirects carry OAuth `code=` parameters and replay assets carry signed
+/// tokens in the query, so a URL is never logged whole.
+pub(crate) fn redact_url(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(base, _)| base)
+}
+
 pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
     let cfg = crate::config::Config::load_or_init()?;
     let paths = ConfigPaths::new()?;
@@ -129,4 +137,22 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
 
     status!("All recordings processed!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url;
+
+    #[test]
+    fn redact_url_drops_the_query() {
+        assert_eq!(
+            redact_url("https://zoom.us/rec/a.mp4?token=secret&x=1"),
+            "https://zoom.us/rec/a.mp4"
+        );
+    }
+
+    #[test]
+    fn redact_url_keeps_a_url_without_query() {
+        assert_eq!(redact_url("https://zoom.us/rec"), "https://zoom.us/rec");
+    }
 }

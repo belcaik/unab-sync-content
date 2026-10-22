@@ -325,15 +325,15 @@ impl<'a> ZoomHeadless<'a> {
         }
 
         // Verification log
-        let scid_after = self.db.get_scid(self.course_id)?;
+        let has_scid = self.db.get_scid(self.course_id)?.is_some();
         let cookies_after = self.db.load_cookies()?;
         let headers_after = self.db.get_all_request_headers(self.course_id)?;
 
         info!(
-            "AFTER HEADLESS SAVE -> scid={:?}, cookies={}, headers={}",
-            scid_after,
-            cookies_after.len(),
-            headers_after.len()
+            has_scid,
+            cookies = cookies_after.len(),
+            headers = headers_after.len(),
+            "after headless save"
         );
 
         browser.close().await?;
@@ -477,17 +477,9 @@ impl<'a> ZoomHeadless<'a> {
                                     }
                                 }
 
-                                info!("✓ Captured download URL: {}", url);
-                                info!("  Captured {} headers from MP4 request:", headers.len());
-                                for (k, v) in &headers {
-                                    // Log all headers (truncate long values like cookies)
-                                    let display_val = if v.len() > 100 {
-                                        format!("{}...", &v[..100])
-                                    } else {
-                                        v.clone()
-                                    };
-                                    info!("    {}: {}", k, display_val);
-                                }
+                                // Header names only: the values carry the session cookie.
+                                let names: Vec<&str> = headers.keys().map(String::as_str).collect();
+                                info!(url = super::redact_url(&url), ?names, "captured download URL");
 
                                 asset = Some(ReplayHeader {
                                     download_url: url.clone(),
