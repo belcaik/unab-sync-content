@@ -205,11 +205,3 @@ pub(super) fn submission_untouched(assignment_id: u64) -> Submission {
         workflow_state: Some("unsubmitted".into()),
     }
 }
-
-pub(super) fn course_with(id: u64, name: &str) -> Course {
-    Course {
-        id,
-        name: name.into(),
-        course_code: None,
-    }
-}

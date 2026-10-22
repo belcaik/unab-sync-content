@@ -5,37 +5,12 @@ use std::path::{Path, PathBuf};
 
 use super::plan::{content_hash, plan_for_course, FetchFailed};
 use super::{Plan, PlannedDelete, PlannedWrite};
-use crate::canvas::course::course_dir;
+use crate::canvas::course::{course_dir, select_courses};
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::core::config::Config;
 use crate::core::fsutil;
 use crate::core::state::{ItemState, State};
 use crate::status;
-
-/// Select which courses the calendar-sync executor should plan for.
-///
-/// Pure selection logic, extracted so it is testable without a network call:
-/// the executor ([`run_calendar`], a sibling in this module) is the only
-/// caller, and mirrors
-/// the same course/`ignored_courses` interplay already used by
-/// `announcements::run_discovery`. When `filter_course_id` is set it wins
-/// outright — an explicit `--course-id` is an instruction to plan that one
-/// course, ignored or not. Otherwise, courses listed in `ignored_courses`
-/// (matched by their string id, as `canvas.ignored_courses` stores them) are
-/// dropped: they produce no calendars (spec user story 15).
-pub fn select_active_courses(
-    courses: Vec<Course>,
-    filter_course_id: Option<u64>,
-    ignored_courses: &[String],
-) -> Vec<Course> {
-    if let Some(cid) = filter_course_id {
-        return courses.into_iter().filter(|c| c.id == cid).collect();
-    }
-    courses
-        .into_iter()
-        .filter(|c| !ignored_courses.iter().any(|id| id == &c.id.to_string()))
-        .collect()
-}
 
 /// The outcome of syncing one course's assignments (spec ticket 11): either
 /// it produced a plan, or fetching its assignments failed and it is skipped
@@ -108,7 +83,8 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// Runs the calendar-sync flow end to end (spec D10, the executor half).
 ///
 /// Fetches active courses (honouring `canvas.ignored_courses` via
-/// [`select_active_courses`], and `filter_course_id` when given), fetches each
+/// [`select_courses`](crate::canvas::course::select_courses), and
+/// `filter_course_id` when given), fetches each
 /// course's assignments through [`CanvasClient::list_assignments`] (which goes
 /// through the shared paginator), calls the pure [`plan`](fn@super::plan::plan), and applies the
 /// result with [`fsutil::atomic_write`].
@@ -177,7 +153,7 @@ pub async fn run_calendar(
     let canvas = CanvasClient::from_config().await?;
 
     let courses = canvas.list_courses().await?;
-    let selected = select_active_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
+    let selected = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 
     if selected.is_empty() {
         status!("No matching courses.");
@@ -375,12 +351,11 @@ pub(super) fn record_deletes(state: &mut State, deletes: &[PlannedDelete]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_plan, conclude, record_deletes, record_writes, select_active_courses, CourseResult,
-        RunOutcome, RunSummary,
+        apply_plan, conclude, record_deletes, record_writes, CourseResult, RunOutcome, RunSummary,
     };
     use crate::canvas::calendar::identity::calendar_state_key;
     use crate::canvas::calendar::plan::plan;
-    use crate::canvas::calendar::test_support::{assignment_with_due_date, course, course_with};
+    use crate::canvas::calendar::test_support::{assignment_with_due_date, course};
     use crate::canvas::calendar::{Plan, PlannedDelete, PlannedWrite};
     use crate::core::state::{ItemState, State};
     use std::path::{Path, PathBuf};
@@ -425,46 +400,6 @@ mod tests {
         let second = plan(root, &course(), &[assignment], &[], &state);
 
         assert!(second.writes.is_empty());
-    }
-
-    #[test]
-    fn ignored_courses_produce_no_calendars() {
-        let courses = vec![
-            course_with(1, "Kept"),
-            course_with(2, "Ignored"),
-            course_with(3, "Also Kept"),
-        ];
-        let got = select_active_courses(courses, None, &["2".to_string()]);
-        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
-        assert_eq!(ids, vec![1, 3]);
-    }
-
-    #[test]
-    fn no_ignored_courses_keeps_everything() {
-        let courses = vec![course_with(1, "A"), course_with(2, "B")];
-        let got = select_active_courses(courses, None, &[]);
-        assert_eq!(got.len(), 2);
-    }
-
-    #[test]
-    fn filter_course_id_wins_over_ignored_courses() {
-        let courses = vec![course_with(1, "A"), course_with(2, "B")];
-        // Course 2 is ignored, but an explicit --course-id=2 must still select it.
-        let got = select_active_courses(courses, Some(2), &["2".to_string()]);
-        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
-        assert_eq!(ids, vec![2]);
-    }
-
-    #[test]
-    fn filter_course_id_excludes_every_other_course() {
-        let courses = vec![
-            course_with(1, "A"),
-            course_with(2, "B"),
-            course_with(3, "C"),
-        ];
-        let got = select_active_courses(courses, Some(2), &[]);
-        let ids: Vec<u64> = got.iter().map(|c| c.id).collect();
-        assert_eq!(ids, vec![2]);
     }
 
     // --- per-course resilience (ticket 11): pure fold of per-course results

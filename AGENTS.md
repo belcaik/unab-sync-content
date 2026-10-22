@@ -135,6 +135,10 @@ mounted-first trap in `main.rs`.
 `sync` honours `[announcements].enabled` and `[zoom].enabled`; either can be
 turned off without touching the command line.
 
+Every command picks its courses with the same function
+(`canvas::course::select_courses`): an explicit `--course-id` wins, ignored or
+not; without it, `canvas.ignored_courses` are dropped.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -488,8 +492,6 @@ Documented so they are not rediscovered as surprises:
   `caldir` preserves the value verbatim and never sends it to Google anyway,
   and the function is shared with the frozen `windows` `VEVENT`. Known debt,
   deliberately unfixed; fixing it means touching `VEVENT` bytes.
-* **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
-  `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
   course listing which prints each entry.
 

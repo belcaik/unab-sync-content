@@ -1,3 +1,4 @@
+use crate::canvas::course::select_courses;
 use crate::canvas::links::extract_zoom_urls;
 use crate::canvas::{CanvasClient, Module};
 use crate::core::http::build_http_client;
@@ -10,10 +11,10 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
 
     let canvas = CanvasClient::from_config().await?;
     let _http = build_http_client(&cfg);
-    let mut courses = canvas.list_courses().await?;
+    let courses = canvas.list_courses().await?;
+    let courses = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 
     if let Some(cid) = filter_course_id {
-        courses.retain(|c| c.id == cid);
         if courses.is_empty() {
             status!("No active course with id {} found.", cid);
             return Ok(());

@@ -1,4 +1,4 @@
-use crate::canvas::course::course_dir;
+use crate::canvas::course::{course_dir, select_courses};
 use crate::canvas::download::{download_if_needed, Dest};
 use crate::canvas::{Assignment, CanvasClient, Module};
 use crate::core::config::Config;
@@ -29,32 +29,16 @@ pub async fn run_sync(
     let canvas = CanvasClient::from_config().await?;
 
     let courses = canvas.list_courses().await?;
-    let ignored: std::collections::HashSet<String> =
-        cfg.canvas.ignored_courses.iter().cloned().collect();
-
-    let selected_courses: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
-        if ignored.contains(&cid.to_string()) {
-            tracing::info!(course_id = cid, "skipping ignored course");
-            return Ok(());
-        }
-        let sel = courses
-            .into_iter()
-            .filter(move |c| c.id == cid)
-            .collect::<Vec<_>>();
-        if sel.is_empty() {
+    let selected_courses = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
+    if selected_courses.is_empty() {
+        if let Some(cid) = filter_course_id {
             tracing::warn!(
                 course_id = cid,
                 "course not found in active list; nothing to sync"
             );
-            return Ok(());
         }
-        sel
-    } else {
-        courses
-            .into_iter()
-            .filter(move |c| !ignored.contains(&c.id.to_string()))
-            .collect()
-    };
+        return Ok(());
+    }
 
     let course_progress = progress_bar(selected_courses.len() as u64, "Syncing courses");
 

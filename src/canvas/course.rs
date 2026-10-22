@@ -2,6 +2,27 @@ use super::models::Course;
 use crate::core::fsutil::sanitize_component;
 use std::path::{Path, PathBuf};
 
+/// Select which courses a command should process.
+///
+/// One rule for every command (`sync`, `announcements`, `recordings`,
+/// `calendar`): an explicit `--course-id` wins outright — it is an
+/// instruction to process that one course, ignored or not. Without it,
+/// courses listed in `ignored_courses` (matched by their string id, as
+/// `canvas.ignored_courses` stores them) are dropped.
+pub fn select_courses(
+    courses: Vec<Course>,
+    filter_course_id: Option<u64>,
+    ignored_courses: &[String],
+) -> Vec<Course> {
+    if let Some(cid) = filter_course_id {
+        return courses.into_iter().filter(|c| c.id == cid).collect();
+    }
+    courses
+        .into_iter()
+        .filter(|c| !ignored_courses.iter().any(|id| id == &c.id.to_string()))
+        .collect()
+}
+
 /// Derive the on-disk directory for a course, under `root`.
 ///
 /// The name is combined with the course code (when present) and each
@@ -31,6 +52,53 @@ mod tests {
             name: name.to_string(),
             course_code: code.map(str::to_string),
         }
+    }
+
+    fn course_with_id(id: u64) -> Course {
+        Course {
+            id,
+            name: format!("Course {id}"),
+            course_code: None,
+        }
+    }
+
+    fn ids(courses: &[Course]) -> Vec<u64> {
+        courses.iter().map(|c| c.id).collect()
+    }
+
+    #[test]
+    fn explicit_id_wins_even_when_the_course_is_ignored() {
+        let courses = vec![course_with_id(1), course_with_id(2)];
+        let got = select_courses(courses, Some(2), &["2".to_string()]);
+        assert_eq!(ids(&got), vec![2]);
+    }
+
+    #[test]
+    fn explicit_id_selects_a_non_ignored_course() {
+        let courses = vec![course_with_id(1), course_with_id(2), course_with_id(3)];
+        let got = select_courses(courses, Some(2), &["3".to_string()]);
+        assert_eq!(ids(&got), vec![2]);
+    }
+
+    #[test]
+    fn explicit_id_absent_from_the_list_selects_nothing() {
+        let courses = || vec![course_with_id(1), course_with_id(2)];
+        assert!(select_courses(courses(), Some(9), &[]).is_empty());
+        assert!(select_courses(courses(), Some(9), &["9".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn without_explicit_id_ignored_courses_are_dropped() {
+        let courses = vec![course_with_id(1), course_with_id(2), course_with_id(3)];
+        let got = select_courses(courses, None, &["2".to_string()]);
+        assert_eq!(ids(&got), vec![1, 3]);
+    }
+
+    #[test]
+    fn without_explicit_id_and_no_ignored_courses_everything_is_kept() {
+        let courses = vec![course_with_id(1), course_with_id(2)];
+        let got = select_courses(courses, None, &[]);
+        assert_eq!(ids(&got), vec![1, 2]);
     }
 
     #[test]

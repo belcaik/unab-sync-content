@@ -36,10 +36,10 @@
 //! courses and their assignments, calls [`plan`](fn@crate::canvas::calendar::plan), and applies the result to
 //! disk with [`fsutil::atomic_write`](crate::core::fsutil::atomic_write). Per spec "Fuera del alcance de los
 //! tests", the executor and the Canvas calls are untested here — the repo has
-//! no HTTP mock server and this ticket does not add one. [`select_active_courses`](crate::canvas::calendar::select_active_courses)
-//! is pulled out of the executor specifically so the one piece of decision
-//! logic in it (course/`ignored_courses` selection) stays testable without a
-//! network.
+//! no HTTP mock server and this ticket does not add one. Course selection
+//! (`--course-id` versus `ignored_courses`) lives in
+//! [`select_courses`](crate::canvas::course::select_courses), shared by every
+//! command and testable without a network.
 //!
 //! Per-course resilience (spec ticket 11) has its own pure seam: a course
 //! whose assignment fetch fails is recorded as [`CourseResult::Failed`](crate::canvas::calendar::CourseResult::Failed)
@@ -59,10 +59,7 @@ mod vtodo;
 
 use std::path::PathBuf;
 
-pub use exec::{
-    conclude, run_calendar, select_active_courses, CourseResult, RunOutcome, RunSummary,
-    TotalFailure,
-};
+pub use exec::{conclude, run_calendar, CourseResult, RunOutcome, RunSummary, TotalFailure};
 pub use plan::plan;
 
 /// One calendar file to write, in full.
