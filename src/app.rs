@@ -3,7 +3,7 @@
 //! on Zoom.
 
 use crate::canvas::announcements::AnnouncementSync;
-use crate::canvas::course::{course_dir, select_courses};
+use crate::canvas::course::{course_dir, select_courses, state_path};
 use crate::canvas::sync::{sync_course, SyncCounts};
 use crate::canvas::CanvasClient;
 use crate::core::config::Config;
@@ -50,7 +50,7 @@ pub async fn run_sync(
         info!(course_id = c.id, path = %course_dir.display(), "sync course");
 
         // Load course state
-        let state_path = course_dir.join("state.json");
+        let state_path = state_path(&course_dir);
         let mut state = State::load(&state_path).await;
 
         totals += sync_course(&canvas, &course_dir, &c, &mut state, dry_run, verbose).await?;

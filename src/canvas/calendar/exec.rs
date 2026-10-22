@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::plan::{plan_for_course, FetchFailed};
 use super::{Plan, PlannedDelete, PlannedWrite};
-use crate::canvas::course::{course_dir, select_courses};
+use crate::canvas::course::{course_dir, select_courses, state_path};
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::core::config::Config;
 use crate::core::fsutil;
@@ -202,7 +202,7 @@ async fn sync_course(
         Err(FetchFailed)
     };
 
-    let state_path = course_dir(download_root, course).join("state.json");
+    let state_path = state_path(&course_dir(download_root, course));
     let mut state = State::load(&state_path).await;
 
     // Ticket 10's safety requirement: a fetch failure must never reach

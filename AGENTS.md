@@ -331,7 +331,7 @@ src/
     mod.rs          # re-exports: client::CanvasClient, models::*
     models.rs       # Canvas wire types (Course, Module, Assignment, ...)
     client.rs       # Canvas REST client (get_json / list_paginated)
-    course.rs       # course_dir: the per-course on-disk directory name; select_courses: the one course-selection rule
+    course.rs       # course_dir: the per-course on-disk directory name; state_path: its state.json; select_courses: the one course-selection rule
     download.rs     # Canvas files: ETag + state on top of core::transfer
     links.rs        # HTML -> links, media refs, zoom URLs
     sync.rs         # sync_course (CourseSync / ModuleCtx): one course's modules, pages, assignments and files

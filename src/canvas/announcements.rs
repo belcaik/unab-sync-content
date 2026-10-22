@@ -1,4 +1,4 @@
-use crate::canvas::course::{course_dir, select_courses};
+use crate::canvas::course::{course_dir, select_courses, state_path};
 use crate::canvas::download::{download_if_needed, Dest};
 use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
@@ -50,7 +50,7 @@ pub async fn run_discovery(
         if !dry_run {
             ensure_dir(&course_dir).await?;
         }
-        let state_path = course_dir.join("state.json");
+        let state_path = state_path(&course_dir);
         let mut state = State::load(&state_path).await;
 
         let summary = AnnouncementSync::new(

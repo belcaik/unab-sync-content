@@ -5,6 +5,7 @@
 use std::path::Path;
 use tracing::info;
 
+use crate::canvas::course::state_path;
 use crate::core::state::State;
 
 /// The result of scanning the download root.
@@ -75,7 +76,7 @@ pub async fn summarize(download_root: &Path) -> anyhow::Result<StatusReport> {
     let mut total_storage: u64 = 0;
 
     for course_dir in &course_dirs {
-        let state = State::load(&course_dir.join("state.json")).await;
+        let state = State::load(&state_path(course_dir)).await;
 
         let name = course_dir
             .file_name()
@@ -180,13 +181,13 @@ mod tests {
         failed.last_error = Some("boom".into());
         failed.error_count = Some(3);
         state_a.set("file:3".into(), failed);
-        state_a.save(&dir_a.join("state.json")).await.unwrap();
+        state_a.save(&state_path(&dir_a)).await.unwrap();
 
         let dir_b = dir.path().join("Course B_202");
         std::fs::create_dir_all(&dir_b).unwrap();
         let mut state_b = State::default();
         state_b.set("file:9".into(), item(Some(512), Some("2026-02-02")));
-        state_b.save(&dir_b.join("state.json")).await.unwrap();
+        state_b.save(&state_path(&dir_b)).await.unwrap();
 
         let report = summarize(dir.path()).await.unwrap();
         let StatusReport::Courses(summary) = report else {
@@ -229,7 +230,7 @@ mod tests {
         let mut legacy = item(None, None);
         legacy.last_error = Some("old failure".into());
         state.set("file:1".into(), legacy);
-        state.save(&course_dir.join("state.json")).await.unwrap();
+        state.save(&state_path(&course_dir)).await.unwrap();
 
         let report = summarize(dir.path()).await.unwrap();
         let StatusReport::Courses(summary) = report else {
