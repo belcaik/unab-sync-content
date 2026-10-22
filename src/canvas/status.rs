@@ -1,6 +1,7 @@
 //! Aggregation behind the `status` command: walks the download root, loads
-//! each course's `state.json` and folds it into a [`StatusReport`] that
-//! `main.rs` prints. Pure of terminal output by design — it returns data.
+//! each course's `state.json` and folds it into a
+//! [`StatusReport`](crate::canvas::status::StatusReport) that `main.rs` prints.
+//! Pure of terminal output by design — it returns data.
 
 use std::path::Path;
 use tracing::info;
