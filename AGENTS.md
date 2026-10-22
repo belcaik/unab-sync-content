@@ -322,7 +322,7 @@ src/
     http.rs         # the one client: rate limiting, 429/5xx retry, Link parsing
     transfer.rs     # the one transfer: .part, Range resume, atomic rename
     state.rs        # per-course State, ItemState, record_error, content_hash
-    fsutil.rs       # sanitization, atomic write/rename
+    fsutil.rs       # sanitization, atomic write/rename, remove_file_if_exists
     logger.rs       # log file setup, falls back to stderr
   ui/
     mod.rs          # user-facing output channel (status! macro)

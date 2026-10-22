@@ -300,12 +300,8 @@ async fn apply_plan(course_id: u64, course_plan: &Plan) -> std::io::Result<()> {
         tracing::info!(course_id, path = %write.path.display(), "wrote calendar file");
     }
     for delete in &course_plan.deletes {
-        match tokio::fs::remove_file(&delete.path).await {
-            Ok(()) => {
-                tracing::info!(course_id, path = %delete.path.display(), "removed calendar file")
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        if fsutil::remove_file_if_exists(&delete.path).await? {
+            tracing::info!(course_id, path = %delete.path.display(), "removed calendar file")
         }
     }
     Ok(())
