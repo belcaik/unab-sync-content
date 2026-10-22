@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::info;
+use tracing::{info_span, Instrument};
 
 /// Mirrors one course's modules: pages, assignments, and every file they link
 /// to. The per-course orchestration around it (course directory, `state.json`,
@@ -46,7 +47,10 @@ pub async fn sync_course(
     for m in modules {
         module_progress.inc(1);
         module_progress.set_message(format!("Course {} module {}", course.id, m.id));
-        let counts = course_sync.sync_module(&m, &assignments, state).await?;
+        let counts = course_sync
+            .sync_module(&m, &assignments, state)
+            .instrument(info_span!("module", module_id = m.id))
+            .await?;
         totals += counts;
         if dry_run && (counts.pages > 0 || counts.files > 0) {
             module_progress.println(format!(
