@@ -333,7 +333,15 @@ src/
     links.rs        # HTML -> links, media refs, zoom URLs
     sync.rs         # CourseSync / ModuleCtx: the main sync flow
     announcements.rs  # AnnouncementSync
-    calendar.rs     # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
+    calendar/       # calendar-sync: pure deadline planner (plan.rs) + its I/O executor (exec.rs)
+      mod.rs        # module doc, the plan types (Plan/PlannedWrite/PlannedDelete), re-exports
+      identity.rs   # dirs, UIDs, filenames, state-key prefixes and builders
+      ics.rs        # iCalendar primitives shared by both renderers (escaping, folding)
+      vtodo.rs      # the deadline VTODO renderer
+      vevent.rs     # the availability-window VEVENT renderer (frozen bytes)
+      plan.rs       # the pure planner: plan, plan_for_course
+      exec.rs       # course selection, run summary/outcome, the executor
+      test_support.rs  # shared test fixtures
     recordings.rs   # zoom-link discovery report
   zoom/
     mod.rs          # zoom_flow orchestration
@@ -471,8 +479,8 @@ Documented so they are not rediscovered as surprises:
   **not** share this edge: a course whose assignment fetch fails is logged and
   skipped, the rest of the run continues, and the run reports exit code `13`
   if the failure was partial (spec ticket 11).
-* **The `URL` value is escaped as if it were `TEXT`.** `canvas/calendar.rs` runs
-  `escape_text` over the `html_url` for both components, but RFC 5545 §3.8.4.6
+* **The `URL` value is escaped as if it were `TEXT`.** `canvas/calendar/ics.rs`'s
+  `escape_text` runs over the `html_url` for both components, but RFC 5545 §3.8.4.6
   types `URL` as `URI`, which takes no backslash escaping — so a Canvas URL
   containing a comma would be emitted wrong. No observed Canvas URL has one,
   `caldir` preserves the value verbatim and never sends it to Google anyway,
