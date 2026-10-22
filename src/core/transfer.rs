@@ -7,10 +7,13 @@
 //! when the server answers `206`, and a `200` — the server ignored the range —
 //! truncates the part and starts over.
 
+use crate::core::fsutil::atomic_rename;
 use crate::core::http::HttpCtx;
-use reqwest::header::HeaderMap;
+use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, RANGE};
 use std::path::Path;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Error)]
 pub enum TransferError {
@@ -40,7 +43,44 @@ pub async fn fetch_resumable(
     part: &Path,
     dest: &Path,
 ) -> Result<(), TransferError> {
-    let _ = (http, url, headers, part, dest);
+    let resume_from = tokio::fs::metadata(part)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let mut req = http.client.get(url).headers(headers);
+    if resume_from > 0 {
+        req = req.header(RANGE, format!("bytes={resume_from}-"));
+    }
+    let resp = http.send(req).await?;
+    let status = resp.status();
+    if !(status.is_success() || status.as_u16() == 206) {
+        return Err(TransferError::Status(status.as_u16()));
+    }
+
+    // A 200 in response to a Range request means the server ignored it and is
+    // sending the whole body, so the partial file must not be appended to.
+    let appending = resume_from > 0 && status.as_u16() == 206;
+    if let Some(parent) = part.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(appending)
+        .truncate(!appending)
+        .write(true)
+        .open(part)
+        .await?;
+
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        file.write_all(&chunk?).await?;
+    }
+    file.flush().await?;
+    // Close the handle before the rename so this also works on Windows.
+    drop(file);
+
+    atomic_rename(part, dest).await?;
     Ok(())
 }
 
