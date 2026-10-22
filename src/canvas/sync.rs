@@ -6,7 +6,6 @@ use crate::canvas::{Assignment, CanvasClient, Course, Module};
 use crate::core::fsutil::{
     atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
-use crate::core::http::HttpCtx;
 use crate::core::state::{content_hash, ItemState, State};
 use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
@@ -38,7 +37,6 @@ pub async fn sync_course(
         assignments_list.into_iter().map(|a| (a.id, a)).collect();
     let course_sync = CourseSync {
         canvas,
-        httpctx: &canvas.http,
         course_dir,
         course_id: course.id,
         dry_run,
@@ -83,7 +81,6 @@ impl std::ops::AddAssign for SyncCounts {
 /// so `processed` is owned in one place rather than threaded through each arm.
 struct ModuleCtx<'a> {
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_id: u64,
     module_id: u64,
     module_dir: PathBuf,
@@ -132,7 +129,7 @@ impl ModuleCtx<'_> {
         if let Some(parent) = dest.parent() {
             ensure_dir(parent).await?;
         }
-        match download_or_record(self.httpctx, &f, Dest::Exact(&dest), state).await {
+        match download_or_record(&self.canvas.http, &f, Dest::Exact(&dest), state).await {
             Some(_) => {
                 info!(course_id, module_id, file_id, path = %dest.display(), file_ext = ext, "downloaded file");
                 Ok(1)
@@ -179,7 +176,6 @@ impl ModuleCtx<'_> {
 /// One course's sync settings, shared by every module in it.
 struct CourseSync<'a> {
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_dir: &'a Path,
     course_id: u64,
     dry_run: bool,
@@ -210,7 +206,6 @@ impl CourseSync<'_> {
 
         let mut ctx = ModuleCtx {
             canvas,
-            httpctx: self.httpctx,
             course_id,
             module_id: m.id,
             module_dir,

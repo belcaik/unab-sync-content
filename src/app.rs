@@ -57,17 +57,9 @@ pub async fn run_sync(
 
         // Sync announcements for this course
         if cfg.announcements.enabled {
-            match AnnouncementSync::new(
-                cfg,
-                &canvas,
-                &canvas.http,
-                c.id,
-                &course_dir,
-                dry_run,
-                verbose,
-            )
-            .run(&c.name, &mut state)
-            .await
+            match AnnouncementSync::new(cfg, &canvas, c.id, &course_dir, dry_run, verbose)
+                .run(&c.name, &mut state)
+                .await
             {
                 Ok(s) => {
                     if dry_run && s.announcements > 0 {

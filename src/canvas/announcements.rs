@@ -1,12 +1,9 @@
 use crate::canvas::course::{course_dir, select_courses, state_path};
-use crate::canvas::download::{
-    download_or_record, fetch_and_download, preferred_name, Dest,
-};
+use crate::canvas::download::{download_or_record, fetch_and_download, preferred_name, Dest};
 use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::core::config::Config;
 use crate::core::fsutil::{atomic_write, ensure_dir, sanitize_component};
-use crate::core::http::HttpCtx;
 use crate::core::state::{ItemState, State};
 use crate::status;
 use crate::ui::progress::{progress_bar, spinner};
@@ -55,15 +52,7 @@ pub async fn run_discovery(
         let state_path = state_path(&course_dir);
         let mut state = State::load(&state_path).await;
 
-        let summary = AnnouncementSync::new(
-            cfg,
-            &canvas,
-            &canvas.http,
-            course.id,
-            &course_dir,
-            dry_run,
-            false,
-        )
+        let summary = AnnouncementSync::new(cfg, &canvas, course.id, &course_dir, dry_run, false)
         .run(&course.name, &mut state)
         .await
         .unwrap_or_else(|e| {
@@ -111,7 +100,6 @@ impl std::ops::AddAssign for CourseSummary {
 pub struct AnnouncementSync<'a> {
     cfg: &'a Config,
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_id: u64,
     ann_dir: PathBuf,
     media_dir: PathBuf,
@@ -123,7 +111,6 @@ impl<'a> AnnouncementSync<'a> {
     pub fn new(
         cfg: &'a Config,
         canvas: &'a CanvasClient,
-        httpctx: &'a HttpCtx,
         course_id: u64,
         course_dir: &Path,
         dry_run: bool,
@@ -134,7 +121,6 @@ impl<'a> AnnouncementSync<'a> {
         Self {
             cfg,
             canvas,
-            httpctx,
             course_id,
             ann_dir,
             media_dir,
@@ -161,7 +147,7 @@ impl<'a> AnnouncementSync<'a> {
     /// announcement it came from.
     async fn fetch_media(&self, file: &FileObj, state: &mut State) -> Option<String> {
         download_or_record(
-            self.httpctx,
+            &self.canvas.http,
             file,
             Dest::InDir {
                 dir: &self.media_dir,
