@@ -70,7 +70,7 @@ fn cdp_headers_to_map(headers: &Headers) -> HashMap<String, String> {
 
 /// Launches the headless browser and spawns the task that drives its CDP
 /// handler; that task must keep running for the browser to answer commands.
-async fn launch_browser(_cfg: &Config) -> anyhow::Result<(Browser, JoinHandle<()>)> {
+async fn launch_browser() -> anyhow::Result<(Browser, JoinHandle<()>)> {
     let (browser, mut handler) = Browser::launch(
         BrowserConfig::builder()
             .arg("--no-sandbox")
@@ -392,7 +392,7 @@ impl<'a> ZoomHeadless<'a> {
     }
 
     pub async fn authenticate_and_capture(&self) -> anyhow::Result<()> {
-        let (mut browser, handle) = launch_browser(self.config).await?;
+        let (mut browser, handle) = launch_browser().await?;
 
         let page = browser.new_page("about:blank").await?;
         page.set_user_agent(&self.config.zoom.user_agent).await?;
@@ -550,7 +550,7 @@ impl<'a> ZoomHeadless<'a> {
             return Ok(());
         }
 
-        let (mut browser, handle) = launch_browser(self.config).await?;
+        let (mut browser, handle) = launch_browser().await?;
         let page = browser.new_page("about:blank").await?;
         page.set_user_agent(&self.config.zoom.user_agent).await?;
 
