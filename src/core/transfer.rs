@@ -2,10 +2,10 @@
 //! `.part` sidecar, streamed to disk, published by atomic rename.
 //!
 //! Both downloaders (Canvas files, Zoom recordings) go through
-//! [`fetch_resumable`] so the resume policy lives in exactly one place: a
-//! non-empty part file triggers a `Range` request, the body is appended only
-//! when the server answers `206`, and a `200` — the server ignored the range —
-//! truncates the part and starts over.
+//! [`fetch_resumable`](crate::core::transfer::fetch_resumable) so the resume
+//! policy lives in exactly one place: a non-empty part file triggers a `Range`
+//! request, the body is appended only when the server answers `206`, and a
+//! `200` — the server ignored the range — truncates the part and starts over.
 
 use crate::core::fsutil::atomic_rename;
 use crate::core::http::HttpCtx;

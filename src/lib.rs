@@ -9,11 +9,14 @@
 //!   what failed, [`core::fsutil`] sanitizes paths and writes atomically, and
 //!   [`core::logger`] sets up the log file.
 //! - [`canvas::client`] and [`zoom::api`] are the two REST clients.
+//! - [`canvas::course`] names the per-course on-disk directory and selects the
+//!   courses every command works on.
 //! - [`canvas::download`] adds the ETag/state policy for Canvas files on top
 //!   of [`core::transfer`].
-//! - [`canvas::sync`], [`canvas::announcements`], [`canvas::calendar`] and
-//!   [`canvas::recordings`] are the feature flows; [`app`] orchestrates them
-//!   per course, so Canvas code does not depend on Zoom.
+//! - [`canvas::sync`], [`canvas::announcements`], [`canvas::calendar`],
+//!   [`canvas::recordings`] and [`canvas::status`] are the feature flows;
+//!   [`app`] orchestrates them per course, so Canvas code does not depend on
+//!   Zoom.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
 //!   Nothing outside `main` writes to stdout directly.
 
