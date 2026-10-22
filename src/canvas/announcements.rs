@@ -53,12 +53,12 @@ pub async fn run_discovery(
         let mut state = State::load(&state_path).await;
 
         let summary = AnnouncementSync::new(cfg, &canvas, course.id, &course_dir, dry_run, false)
-        .run(&course.name, &mut state)
-        .await
-        .unwrap_or_else(|e| {
-            warn!(course_id = course.id, error = %e, "announcements failed for course");
-            CourseSummary::default()
-        });
+            .run(&course.name, &mut state)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(course_id = course.id, error = %e, "announcements failed for course");
+                CourseSummary::default()
+            });
         totals += summary;
 
         if !dry_run {

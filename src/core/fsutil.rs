@@ -171,12 +171,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gone.txt");
 
-        assert_eq!(remove_file_if_exists(&path).await.unwrap(), false);
+        assert!(!remove_file_if_exists(&path).await.unwrap());
 
         tokio::fs::write(&path, b"x").await.unwrap();
-        assert_eq!(remove_file_if_exists(&path).await.unwrap(), true);
+        assert!(remove_file_if_exists(&path).await.unwrap());
         assert!(!path.exists());
         // And removing it again is success again, not an error.
-        assert_eq!(remove_file_if_exists(&path).await.unwrap(), false);
+        assert!(!remove_file_if_exists(&path).await.unwrap());
     }
 }

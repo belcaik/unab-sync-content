@@ -1,6 +1,4 @@
-use crate::canvas::download::{
-    download_or_record, fetch_or_record, preferred_name, Dest,
-};
+use crate::canvas::download::{download_or_record, fetch_or_record, preferred_name, Dest};
 use crate::canvas::links::canvas_file_ids;
 use crate::canvas::{Assignment, CanvasClient, Course, Module};
 use crate::core::fsutil::{
@@ -111,7 +109,7 @@ impl ModuleCtx<'_> {
         let dest = self
             .module_dir
             .join("Attachments")
-            .join(sanitize_filename_preserve_ext(&preferred_name(&f)));
+            .join(sanitize_filename_preserve_ext(preferred_name(&f)));
         let ext = dest
             .extension()
             .and_then(|s| s.to_str())
@@ -164,10 +162,7 @@ impl ModuleCtx<'_> {
         }
 
         atomic_write(dest, md.as_bytes()).await?;
-        state.set(
-            key,
-            ItemState::with_hash(hash, md.len() as u64, updated_at),
-        );
+        state.set(key, ItemState::with_hash(hash, md.len() as u64, updated_at));
         info!(course_id, module_id, path = %dest.display(), what, "wrote markdown");
         Ok(1)
     }
