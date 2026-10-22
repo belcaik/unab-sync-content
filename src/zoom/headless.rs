@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::core::config::Config;
 use crate::zoom::app_conf;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ZoomCookie, ZoomRecordingFile};
@@ -346,8 +346,8 @@ impl<'a> ZoomHeadless<'a> {
         &self,
         files: Vec<ZoomRecordingFile>,
     ) -> anyhow::Result<()> {
+        use crate::core::fsutil::sanitize_filename_preserve_ext;
         use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
-        use crate::fsutil::sanitize_filename_preserve_ext;
         use crate::zoom::models::ReplayHeader;
         use std::collections::HashMap;
         use std::path::PathBuf;

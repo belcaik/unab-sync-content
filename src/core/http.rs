@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::core::config::Config;
 use reqwest::{header, Client, ClientBuilder, RequestBuilder, Response, Url};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

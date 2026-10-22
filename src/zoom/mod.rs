@@ -6,9 +6,9 @@ pub mod headless;
 pub mod models;
 pub mod sso;
 
-use crate::config::ConfigPaths;
-use crate::progress::progress_bar;
+use crate::core::config::ConfigPaths;
 use crate::status;
+use crate::ui::progress::progress_bar;
 use api::ZoomClient;
 use db::ZoomDb;
 use headless::ZoomHeadless;
@@ -24,7 +24,7 @@ pub(crate) fn redact_url(url: &str) -> &str {
 }
 
 pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
-    let cfg = crate::config::Config::load_or_init()?;
+    let cfg = crate::core::config::Config::load_or_init()?;
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 

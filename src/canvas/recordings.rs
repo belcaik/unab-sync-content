@@ -1,12 +1,12 @@
+use crate::canvas::links::extract_zoom_urls;
 use crate::canvas::{CanvasClient, Module};
-use crate::http::build_http_client;
-use crate::links::extract_zoom_urls;
-use crate::progress::{progress_bar, spinner};
+use crate::core::http::build_http_client;
 use crate::status;
+use crate::ui::progress::{progress_bar, spinner};
 use tracing::info;
 
 pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
-    let cfg = crate::config::Config::load_or_init()?;
+    let cfg = crate::core::config::Config::load_or_init()?;
 
     let canvas = CanvasClient::from_config().await?;
     let _http = build_http_client(&cfg);

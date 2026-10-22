@@ -103,7 +103,7 @@ Un assignment sin `due_at` no genera componentes: no hay nada que ubicar en el t
 
 Solo el `VTODO` se pliega según RFC 5545 §3.1 (líneas de ≤75 octetos, continuación con CRLF + espacio, sin partir un carácter UTF-8). El `VEVENT` de `windows` conserva sus bytes exactos: no está en el alcance de este enriquecimiento.
 
-El registro de decisiones numeradas `ID1`–`ID9` del enriquecimiento del `VTODO` —las que citan los comentarios `spec IDn` de `src/calendar.rs`— vive con las notas de trabajo de la feature, en `.scratch/calendar-rich-vtodo/spec.md`. **Este documento es el contrato**; ese archivo es el registro de diseño de respaldo, igual que `research/`.
+El registro de decisiones numeradas `ID1`–`ID9` del enriquecimiento del `VTODO` —las que citan los comentarios `spec IDn` de `src/canvas/calendar.rs`— vive con las notas de trabajo de la feature, en `.scratch/calendar-rich-vtodo/spec.md`. **Este documento es el contrato**; ese archivo es el registro de diseño de respaldo, igual que `research/`.
 
 ### D4 — Layout: ramo × semántica, en el árbol de caldir
 
