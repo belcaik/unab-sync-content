@@ -11,3 +11,5 @@ pub mod http;
 pub mod logger;
 /// Per-course sync state: what has been fetched, and what failed trying.
 pub mod state;
+/// The one resumable transfer: `.part` sidecar, `Range` resume, atomic rename.
+pub mod transfer;
