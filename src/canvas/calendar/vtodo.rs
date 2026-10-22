@@ -272,8 +272,8 @@ pub(super) fn render_vtodo(
 mod tests {
     use crate::canvas::calendar::plan::plan;
     use crate::canvas::calendar::test_support::{
-        assignment_with_due_date, course, fixed_now, logical_line,
-        submission_graded_without_submitted_at, submission_submitted, submission_untouched,
+        assignment_with_due_date, course, logical_line, submission_graded_without_submitted_at,
+        submission_submitted, submission_untouched,
     };
     use crate::canvas::Course;
     use crate::core::state::State;
@@ -289,14 +289,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         let vtodo = got
             .writes
@@ -318,14 +311,7 @@ mod tests {
         let root = Path::new("/caldir");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(
             logical_line(&got.writes[0].content, "DESCRIPTION:"),
@@ -343,14 +329,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut same_instant = assignment_with_due_date();
         same_instant.unlock_at = same_instant.due_at;
-        let got = plan(
-            root,
-            &course(),
-            &[same_instant],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[same_instant], &[], &State::default());
         assert_eq!(
             logical_line(&got.writes[0].content, "DESCRIPTION:"),
             "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-01T23:59:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
@@ -362,14 +341,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[after],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[after], &[], &State::default());
         assert_eq!(
             logical_line(&got.writes[0].content, "DESCRIPTION:"),
             "DESCRIPTION:Intro to Testing - Essay Draft\\nDisponible: 2026-09-15T00:00:00Z - Vence: 2026-09-01T23:59:00Z\\nhttps://canvas.example.edu/courses/1/assignments/555"
@@ -381,14 +353,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut assignment = assignment_with_due_date();
         assignment.html_url = None;
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         // Two logical lines, no trailing separator and no filler text.
         assert_eq!(
@@ -413,14 +378,7 @@ mod tests {
         let mut assignment = assignment_with_due_date();
         assignment.name = Some("Tarea 1\r\nParte 2\rParte 3".into());
 
-        let got = plan(
-            root,
-            &messy_course,
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &messy_course, &[assignment], &[], &State::default());
         let content = &got.writes[0].content;
 
         assert_eq!(
@@ -455,14 +413,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         let vtodo = got
             .writes
             .iter()
@@ -487,14 +438,7 @@ mod tests {
         let root = Path::new("/caldir");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(got.writes.len(), 1);
         let content = &got.writes[0].content;
@@ -513,14 +457,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = assignment.due_at;
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(got.writes.len(), 1);
         let content = &got.writes[0].content;
@@ -548,14 +485,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(got.writes.len(), 1);
         let content = &got.writes[0].content;
@@ -576,14 +506,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut assignment = assignment_with_due_date();
         assignment.name = None;
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         // No dangling " - " with nothing after it (spec ID1).
         assert!(got.writes[0]
@@ -604,7 +527,6 @@ mod tests {
             &nameless,
             &[assignment_with_due_date()],
             &[],
-            fixed_now(),
             &State::default(),
         );
 
@@ -626,14 +548,7 @@ mod tests {
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
         assignment.submission_types = Some(vec!["online_upload".into()]);
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("PRIORITY:1"));
     }
 
@@ -644,14 +559,7 @@ mod tests {
         assignment.points_possible = Some(0.0);
         assignment.omit_from_final_grade = None;
         assignment.submission_types = Some(vec!["online_upload".into()]);
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("PRIORITY:5"));
     }
 
@@ -662,14 +570,7 @@ mod tests {
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
         assignment.submission_types = Some(vec!["none".into()]);
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("PRIORITY:9"));
     }
 
@@ -680,14 +581,7 @@ mod tests {
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
         assignment.submission_types = Some(vec!["not_graded".into()]);
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("PRIORITY:9"));
     }
 
@@ -698,14 +592,7 @@ mod tests {
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
         assignment.submission_types = None;
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("PRIORITY:9"));
     }
 
@@ -719,14 +606,7 @@ mod tests {
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(true);
         assignment.submission_types = Some(vec!["online_upload".into()]);
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(!got.writes[0].content.contains("PRIORITY:1"));
         assert!(got.writes[0].content.contains("PRIORITY:5"));
     }
@@ -747,7 +627,6 @@ mod tests {
             &course(),
             &[assignment],
             &submissions,
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(got.writes.len(), 1);
@@ -764,7 +643,6 @@ mod tests {
             &course(),
             &[assignment],
             &submissions,
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(got.writes.len(), 1);
@@ -781,7 +659,6 @@ mod tests {
             &course(),
             &[assignment],
             &submissions,
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(got.writes.len(), 1);
@@ -795,14 +672,7 @@ mod tests {
         // confused with "done".
         let root = Path::new("/caldir");
         let assignment = assignment_with_due_date();
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert_eq!(got.writes.len(), 1);
         assert!(!got.writes[0].content.contains("STATUS:"));
     }
@@ -817,7 +687,6 @@ mod tests {
             &course(),
             &[assignment],
             &submissions,
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(got.writes.len(), 1);
@@ -833,8 +702,8 @@ mod tests {
         let root = Path::new("/caldir");
         let a1 = assignment_with_due_date();
         let a2 = assignment_with_due_date();
-        let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
-        let after = plan(root, &course(), &[a2], &[], fixed_now(), &State::default());
+        let before = plan(root, &course(), &[a1], &[], &State::default());
+        let after = plan(root, &course(), &[a2], &[], &State::default());
         assert_eq!(before.writes[0].content, after.writes[0].content);
     }
 }

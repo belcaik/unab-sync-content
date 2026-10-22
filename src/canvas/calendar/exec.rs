@@ -1,11 +1,9 @@
 //! The I/O executor half of the calendar-sync flow (spec D10): fetch, plan,
 //! apply, record — with per-course resilience (spec ticket 11).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
-use super::plan::{content_hash, plan_for_course};
+use super::plan::{content_hash, plan_for_course, FetchFailed};
 use super::{Plan, PlannedDelete, PlannedWrite};
 use crate::canvas::course::course_dir;
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
@@ -17,7 +15,8 @@ use crate::status;
 /// Select which courses the calendar-sync executor should plan for.
 ///
 /// Pure selection logic, extracted so it is testable without a network call:
-/// the executor (`run_calendar` in `main.rs`) is the only caller, and mirrors
+/// the executor ([`run_calendar`], a sibling in this module) is the only
+/// caller, and mirrors
 /// the same course/`ignored_courses` interplay already used by
 /// `announcements::run_discovery`. When `filter_course_id` is set it wins
 /// outright — an explicit `--course-id` is an instruction to plan that one
@@ -185,102 +184,15 @@ pub async fn run_calendar(
         return Ok(RunOutcome::Success);
     }
 
-    let now = Utc::now();
     let mut results = Vec::with_capacity(selected.len());
-
     for course in &selected {
-        let assignments: Result<Vec<Assignment>, ()> =
-            match canvas.list_assignments(course.id).await {
-                Ok(assignments) => Ok(assignments),
-                Err(e) => {
-                    tracing::error!(
-                        course_id = course.id,
-                        error = %e,
-                        "failed to fetch assignments; skipping this course"
-                    );
-                    Err(())
-                }
-            };
-
-        // Only attempt the submissions fetch when the assignments fetch
-        // already succeeded — no point spending a second call on a course
-        // that is going to be skipped regardless.
-        let submissions: Result<Vec<Submission>, ()> = if assignments.is_ok() {
-            match canvas.list_submissions(course.id).await {
-                Ok(submissions) => Ok(submissions),
-                Err(e) => {
-                    tracing::error!(
-                        course_id = course.id,
-                        error = %e,
-                        "failed to fetch submissions; skipping this course"
-                    );
-                    Err(())
-                }
-            }
-        } else {
-            Err(())
-        };
-
-        let state_path = course_dir(&download_root, course).join("state.json");
-        let mut state = State::load(&state_path).await;
-
-        // Ticket 10's safety requirement: a fetch failure must never reach
-        // `plan` disguised as an empty `Vec` — see `plan_for_course`'s doc
-        // comment. `None` here means "no plan attempted", not "empty plan".
-        let Some(course_plan) =
-            plan_for_course(&caldir_root, course, assignments, submissions, now, &state)
-        else {
-            results.push(CourseResult::Failed);
-            continue;
-        };
-
-        if dry_run {
-            tracing::info!(
-                course_id = course.id,
-                writes = course_plan.writes.len(),
-                deletes = course_plan.deletes.len(),
-                "dry-run calendar plan"
-            );
-            results.push(CourseResult::Synced {
-                writes: course_plan.writes.len(),
-                deletes: course_plan.deletes.len(),
-            });
-            continue;
-        }
-
-        match apply_plan(course.id, &course_plan).await {
-            Ok(()) => {
-                record_writes(&mut state, &course_plan.writes);
-                record_deletes(&mut state, &course_plan.deletes);
-                if let Err(e) = state.save(&state_path).await {
-                    tracing::error!(
-                        course_id = course.id,
-                        error = %e,
-                        "failed to persist calendar state; skipping the rest of this course"
-                    );
-                    results.push(CourseResult::Failed);
-                    continue;
-                }
-                results.push(CourseResult::Synced {
-                    writes: course_plan.writes.len(),
-                    deletes: course_plan.deletes.len(),
-                });
-            }
-            Err(e) => {
-                tracing::error!(
-                    course_id = course.id,
-                    error = %e,
-                    "failed to write this course's calendar files; skipping the rest of this course"
-                );
-                results.push(CourseResult::Failed);
-            }
-        }
+        results.push(sync_course(&canvas, course, &caldir_root, &download_root, dry_run).await);
     }
 
     let summary = RunSummary::from_results(&results);
 
     status!(
-        "{}Calendar: {} deadline file(s) written, {} removed, across {} course(s) synced, {} failed",
+        "{}Calendar: {} deadline and window file(s) written, {} removed, across {} course(s) synced, {} failed",
         if dry_run { "DRY-RUN: " } else { "" },
         summary.writes,
         summary.deletes,
@@ -289,6 +201,114 @@ pub async fn run_calendar(
     );
 
     conclude(summary).map_err(anyhow::Error::from)
+}
+
+/// Run one course through fetch → plan → apply, folding every failure mode
+/// into [`CourseResult::Failed`] so the remaining courses still sync (spec
+/// ticket 11). A course that fails partway through its writes is counted as
+/// failed as a whole; nothing already written is rolled back, because each
+/// file lands atomically ([`fsutil::atomic_write`]) and a partial course
+/// self-heals on the next run.
+async fn sync_course(
+    canvas: &CanvasClient,
+    course: &Course,
+    caldir_root: &Path,
+    download_root: &Path,
+    dry_run: bool,
+) -> CourseResult {
+    let assignments = fetch_assignments(canvas, course).await;
+
+    // Only attempt the submissions fetch when the assignments fetch already
+    // succeeded — no point spending a second call on a course that is going
+    // to be skipped regardless.
+    let submissions = if assignments.is_ok() {
+        fetch_submissions(canvas, course).await
+    } else {
+        Err(FetchFailed)
+    };
+
+    let state_path = course_dir(download_root, course).join("state.json");
+    let mut state = State::load(&state_path).await;
+
+    // Ticket 10's safety requirement: a fetch failure must never reach
+    // `plan` disguised as an empty `Vec` — see `plan_for_course`'s doc
+    // comment. `None` here means "no plan attempted", not "empty plan".
+    let Some(course_plan) = plan_for_course(caldir_root, course, assignments, submissions, &state)
+    else {
+        return CourseResult::Failed;
+    };
+
+    let synced = CourseResult::Synced {
+        writes: course_plan.writes.len(),
+        deletes: course_plan.deletes.len(),
+    };
+
+    if dry_run {
+        tracing::info!(
+            course_id = course.id,
+            writes = course_plan.writes.len(),
+            deletes = course_plan.deletes.len(),
+            "dry-run calendar plan"
+        );
+        return synced;
+    }
+
+    match apply_plan(course.id, &course_plan).await {
+        Ok(()) => {
+            record_writes(&mut state, &course_plan.writes);
+            record_deletes(&mut state, &course_plan.deletes);
+            if let Err(e) = state.save(&state_path).await {
+                tracing::error!(
+                    course_id = course.id,
+                    error = %e,
+                    "failed to persist calendar state; skipping the rest of this course"
+                );
+                return CourseResult::Failed;
+            }
+            synced
+        }
+        Err(e) => {
+            tracing::error!(
+                course_id = course.id,
+                error = %e,
+                "failed to write this course's calendar files; skipping the rest of this course"
+            );
+            CourseResult::Failed
+        }
+    }
+}
+
+/// Fetch a course's assignments, logging and collapsing any failure into
+/// [`FetchFailed`] — by the time the error reaches [`plan_for_course`], only
+/// the fact of failure matters.
+async fn fetch_assignments(
+    canvas: &CanvasClient,
+    course: &Course,
+) -> Result<Vec<Assignment>, FetchFailed> {
+    canvas.list_assignments(course.id).await.map_err(|e| {
+        tracing::error!(
+            course_id = course.id,
+            error = %e,
+            "failed to fetch assignments; skipping this course"
+        );
+        FetchFailed
+    })
+}
+
+/// Fetch the caller's own submissions for a course in one bulk call (spec
+/// D1, ticket 09), logging and collapsing any failure into [`FetchFailed`].
+async fn fetch_submissions(
+    canvas: &CanvasClient,
+    course: &Course,
+) -> Result<Vec<Submission>, FetchFailed> {
+    canvas.list_submissions(course.id).await.map_err(|e| {
+        tracing::error!(
+            course_id = course.id,
+            error = %e,
+            "failed to fetch submissions; skipping this course"
+        );
+        FetchFailed
+    })
 }
 
 /// Apply one course's plan to disk: write every planned file, then remove
@@ -360,9 +380,7 @@ mod tests {
     };
     use crate::canvas::calendar::identity::calendar_state_key;
     use crate::canvas::calendar::plan::plan;
-    use crate::canvas::calendar::test_support::{
-        assignment_with_due_date, course, course_with, fixed_now,
-    };
+    use crate::canvas::calendar::test_support::{assignment_with_due_date, course, course_with};
     use crate::canvas::calendar::{Plan, PlannedDelete, PlannedWrite};
     use crate::core::state::{ItemState, State};
     use std::path::{Path, PathBuf};
@@ -399,13 +417,12 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         let mut state = State::default();
         record_writes(&mut state, &first.writes);
 
-        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &state);
+        let second = plan(root, &course(), &[assignment], &[], &state);
 
         assert!(second.writes.is_empty());
     }

@@ -2,20 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use sha1::{Digest, Sha1};
 
 use super::{Plan, PlannedWrite};
 use crate::canvas::{Assignment, Course, Submission};
 use crate::core::state::{ItemState, State};
-
-/// A fixed instant, so a future accidental dependency on `now` in `plan`
-/// shows up as a test failure rather than as flake.
-pub(super) fn fixed_now() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339("2026-08-23T00:00:00Z")
-        .unwrap()
-        .into()
-}
 
 pub(super) fn course() -> Course {
     Course {

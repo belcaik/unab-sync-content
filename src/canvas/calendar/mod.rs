@@ -2,8 +2,8 @@
 //! the I/O executor that runs it end to end.
 //!
 //! [`plan`](fn@crate::canvas::calendar::plan) decides which calendar files should exist for a course's
-//! assignments. It performs no I/O and reads no clock — the current instant
-//! is injected by the caller. See `docs/specs/calendar-sync-flow.md` (D3, D4,
+//! assignments. It performs no I/O and reads no clock. See
+//! `docs/specs/calendar-sync-flow.md` (D3, D4,
 //! D6, D9, D10) for the design this implements. This module emits up to two
 //! components per assignment, in sibling directories: a deadline `VTODO`,
 //! carrying a `PRIORITY` derived from Canvas grading state
@@ -63,7 +63,7 @@ pub use exec::{
     conclude, run_calendar, select_active_courses, CourseResult, RunOutcome, RunSummary,
     TotalFailure,
 };
-pub use plan::{plan, plan_for_course};
+pub use plan::plan;
 
 /// One calendar file to write, in full.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -38,7 +38,7 @@ pub(super) fn deadline_uid(assignment_id: u64) -> String {
 /// Derive the on-disk filename for an assignment's deadline `VTODO`. Shares
 /// its source (the assignment id) with [`deadline_uid`], never the due date.
 pub(super) fn deadline_filename(assignment_id: u64) -> String {
-    format!("assignment-{assignment_id}.ics")
+    component_filename(assignment_id)
 }
 
 /// Derive the calendar UID for an assignment's availability-window `VEVENT`
@@ -51,13 +51,21 @@ pub(super) fn window_uid(assignment_id: u64) -> String {
     format!("u_crawler-window-{assignment_id}@u-crawler.local")
 }
 
+/// The one filename implementation behind [`deadline_filename`] and
+/// [`window_filename`]: both components name their file from the assignment
+/// id alone, and the two live in different directories, so the shared name
+/// can never collide on disk.
+pub(super) fn component_filename(assignment_id: u64) -> String {
+    format!("assignment-{assignment_id}.ics")
+}
+
 /// Derive the on-disk filename for an assignment's availability-window
 /// `VEVENT`. Lives under [`WINDOWS_DIR`], a different directory from
 /// [`deadline_filename`]'s [`DEADLINES_DIR`], so the two never collide on
 /// disk even though both derive their name the same way from the assignment
 /// id.
 pub(super) fn window_filename(assignment_id: u64) -> String {
-    format!("assignment-{assignment_id}.ics")
+    component_filename(assignment_id)
 }
 
 /// Prefix of the `state.json` namespace for a deadline `VTODO`'s projected

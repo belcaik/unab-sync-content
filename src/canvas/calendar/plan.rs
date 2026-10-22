@@ -1,17 +1,16 @@
 //! The pure planner: which calendar files should exist for a course's
-//! assignments, which to (re)write and which to delete. No I/O, no clock —
-//! the current instant is injected by the caller.
+//! assignments, which to (re)write and which to delete. No I/O, no clock.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use sha1::{Digest, Sha1};
 
 use super::ics::availability_start;
 use super::identity::{
-    calendar_state_key, deadline_filename, deadline_uid, window_filename, window_state_key,
-    window_uid, CALENDAR_KEY_PREFIX, DEADLINES_DIR, WINDOWS_DIR, WINDOW_KEY_PREFIX,
+    calendar_state_key, component_filename, deadline_filename, deadline_uid, window_filename,
+    window_state_key, window_uid, CALENDAR_KEY_PREFIX, DEADLINES_DIR, WINDOWS_DIR,
+    WINDOW_KEY_PREFIX,
 };
 use super::vevent::render_vevent;
 use super::vtodo::{is_submission_done, render_vtodo};
@@ -41,8 +40,8 @@ fn index_submissions(submissions: &[Submission]) -> HashMap<u64, &Submission> {
 /// assignment that also has an `unlock_at` strictly before its `due_at`
 /// (spec D3, ticket 08).
 ///
-/// Pure: no network, no disk access and no system clock — `now` is the
-/// caller's injected instant. `submissions` is the caller's own submissions
+/// Pure: no network, no disk access and no system clock. `submissions` is the
+/// caller's own submissions
 /// for this course (spec D1, ticket 09): a deadline `VTODO` is marked
 /// `STATUS:COMPLETED` when [`is_submission_done`](super::vtodo::is_submission_done) says so for the matching
 /// assignment id, per D7 ("submitted, or graded"). No group-assignment
@@ -105,10 +104,25 @@ pub fn plan(
     course: &Course,
     assignments: &[Assignment],
     submissions: &[Submission],
-    _now: DateTime<Utc>,
     prev: &State,
 ) -> Plan {
     let course_dir = course_dir(caldir_root, course);
+    Plan {
+        writes: plan_writes(&course_dir, course, assignments, submissions, prev),
+        deletes: plan_deletes(&course_dir, assignments, prev),
+    }
+}
+
+/// The write half of [`plan`]: a deadline `VTODO` per assignment with a due
+/// date, plus an availability-window `VEVENT` for each such assignment that
+/// also has an `unlock_at` strictly before its `due_at` (spec D3, ticket 08).
+fn plan_writes(
+    course_dir: &Path,
+    course: &Course,
+    assignments: &[Assignment],
+    submissions: &[Submission],
+    prev: &State,
+) -> Vec<PlannedWrite> {
     let deadlines_dir = course_dir.join(DEADLINES_DIR);
     let windows_dir = course_dir.join(WINDOWS_DIR);
     let submissions_by_assignment = index_submissions(submissions);
@@ -122,21 +136,14 @@ pub fn plan(
             .get(&assignment.id)
             .is_some_and(|s| is_submission_done(s));
 
-        let uid = deadline_uid(assignment.id);
-        let path = deadlines_dir.join(deadline_filename(assignment.id));
-        let content = render_vtodo(&uid, course, assignment, due, done);
-        let hash = content_hash(&content);
-        let key = calendar_state_key(assignment.id);
-        let unchanged =
-            prev.get(&key).and_then(|item| item.content_hash.as_deref()) == Some(hash.as_str());
-        if !unchanged {
-            writes.push(PlannedWrite {
-                path,
-                content,
-                assignment_id: assignment.id,
-                state_key: key,
-            });
-        }
+        plan_component(
+            &mut writes,
+            deadlines_dir.join(deadline_filename(assignment.id)),
+            render_vtodo(&deadline_uid(assignment.id), course, assignment, due, done),
+            assignment.id,
+            calendar_state_key(assignment.id),
+            prev,
+        );
 
         // Availability window (spec D3, ticket 08): only when `unlock_at` is
         // present and strictly before `due_at`. Absent `unlock_at` means
@@ -147,68 +154,112 @@ pub fn plan(
         // the two collections cannot drift into disagreeing about whether
         // this assignment has a window.
         if let Some(unlock) = availability_start(assignment.unlock_at, due) {
-            let window_uid = window_uid(assignment.id);
-            let window_path = windows_dir.join(window_filename(assignment.id));
-            let window_content = render_vevent(&window_uid, assignment, unlock, due);
-            let window_hash = content_hash(&window_content);
-            let window_key = window_state_key(assignment.id);
-            let window_unchanged = prev
-                .get(&window_key)
-                .and_then(|item| item.content_hash.as_deref())
-                == Some(window_hash.as_str());
-            if !window_unchanged {
-                writes.push(PlannedWrite {
-                    path: window_path,
-                    content: window_content,
-                    assignment_id: assignment.id,
-                    state_key: window_key,
-                });
-            }
+            plan_component(
+                &mut writes,
+                windows_dir.join(window_filename(assignment.id)),
+                render_vevent(&window_uid(assignment.id), assignment, unlock, due),
+                assignment.id,
+                window_state_key(assignment.id),
+                prev,
+            );
         }
     }
+    writes
+}
 
-    // Reconciliation (spec D5, ticket 10): anything `prev` remembers under a
-    // calendar namespace whose assignment id is no longer in `assignments`
-    // has been deleted from Canvas, so its file must go too.
+/// Hash one rendered component, compare it against `prev` under `state_key`,
+/// and push its write when the content differs (or was never recorded). A
+/// match means Canvas's projected component is unchanged, so **no write is
+/// planned** for it (spec D5, user story 14).
+fn plan_component(
+    writes: &mut Vec<PlannedWrite>,
+    path: PathBuf,
+    content: String,
+    assignment_id: u64,
+    state_key: String,
+    prev: &State,
+) {
+    let hash = content_hash(&content);
+    let unchanged = prev
+        .get(&state_key)
+        .and_then(|item| item.content_hash.as_deref())
+        == Some(hash.as_str());
+    if !unchanged {
+        writes.push(PlannedWrite {
+            path,
+            content,
+            assignment_id,
+            state_key,
+        });
+    }
+}
+
+/// The delete half of [`plan`]: reconciliation (spec D5, ticket 10). Anything
+/// `prev` remembers under a calendar namespace whose assignment id is no
+/// longer in `assignments` has been deleted from Canvas, so its file must go
+/// too.
+fn plan_deletes(course_dir: &Path, assignments: &[Assignment], prev: &State) -> Vec<PlannedDelete> {
     let current_ids: HashSet<u64> = assignments.iter().map(|a| a.id).collect();
+    let deadlines_dir = course_dir.join(DEADLINES_DIR);
+    let windows_dir = course_dir.join(WINDOWS_DIR);
     let mut deletes = Vec::new();
     for key in prev.items.keys() {
-        if let Some(id) = key
-            .strip_prefix(CALENDAR_KEY_PREFIX)
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            if !current_ids.contains(&id) {
-                deletes.push(PlannedDelete {
-                    path: deadlines_dir.join(deadline_filename(id)),
-                    assignment_id: id,
-                    state_key: key.clone(),
-                });
-            }
-        } else if let Some(id) = key
-            .strip_prefix(WINDOW_KEY_PREFIX)
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            if !current_ids.contains(&id) {
-                deletes.push(PlannedDelete {
-                    path: windows_dir.join(window_filename(id)),
-                    assignment_id: id,
-                    state_key: key.clone(),
-                });
-            }
+        if key.starts_with(CALENDAR_KEY_PREFIX) {
+            plan_delete(
+                &mut deletes,
+                key,
+                CALENDAR_KEY_PREFIX,
+                &deadlines_dir,
+                &current_ids,
+            );
+        } else if key.starts_with(WINDOW_KEY_PREFIX) {
+            plan_delete(
+                &mut deletes,
+                key,
+                WINDOW_KEY_PREFIX,
+                &windows_dir,
+                &current_ids,
+            );
         }
     }
-
-    Plan { writes, deletes }
+    deletes
 }
+
+/// Plan the deletion of one calendar state entry whose assignment id is gone
+/// from Canvas: strip `prefix`, parse the id, and push the delete for the
+/// file under `dir`.
+fn plan_delete(
+    deletes: &mut Vec<PlannedDelete>,
+    key: &str,
+    prefix: &str,
+    dir: &Path,
+    current_ids: &HashSet<u64>,
+) {
+    if let Some(id) = key.strip_prefix(prefix).and_then(|s| s.parse::<u64>().ok()) {
+        if !current_ids.contains(&id) {
+            deletes.push(PlannedDelete {
+                path: dir.join(component_filename(id)),
+                assignment_id: id,
+                state_key: key.to_string(),
+            });
+        }
+    }
+}
+
+/// The "fetch failed" marker for [`plan_for_course`]'s parameters. Carries
+/// nothing: the caller has already logged the real error by the time it gets
+/// here — only the fact of failure matters for the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FetchFailed;
 
 /// Gate [`plan`] on both of a course's fetches having actually succeeded
 /// (spec ticket 10's safety requirement): "un ramo que falla al consultarse
 /// NO dispara el borrado de sus componentes". `plan` itself cannot make this
 /// distinction — an empty `Vec<Assignment>` and a failed fetch look
 /// identical once they are both just `&[Assignment]` — so the two have to be
-/// told apart *before* `plan` is called, not inside it. `Err(())` stands in
-/// for "the fetch failed"; the caller has already logged the real error by
-/// the time it gets here; only the fact of failure matters for this
+/// told apart *before* `plan` is called, not inside it. `Err(FetchFailed)`
+/// stands in for "the fetch failed"; the caller has already logged the real
+/// error by the time it gets here; only the fact of failure matters for this
 /// decision.
 ///
 /// Returns `None` — no plan attempted at all, not an empty one — when either
@@ -218,35 +269,27 @@ pub fn plan(
 /// [`select_active_courses`](super::exec::select_active_courses) and [`conclude`](super::exec::conclude)) so the guarantee is a
 /// testable predicate rather than something only visible by reading
 /// `run_calendar`'s control flow.
-pub fn plan_for_course(
+pub(super) fn plan_for_course(
     caldir_root: &Path,
     course: &Course,
-    assignments: Result<Vec<Assignment>, ()>,
-    submissions: Result<Vec<Submission>, ()>,
-    now: DateTime<Utc>,
+    assignments: Result<Vec<Assignment>, FetchFailed>,
+    submissions: Result<Vec<Submission>, FetchFailed>,
     prev: &State,
 ) -> Option<Plan> {
     let assignments = assignments.ok()?;
     let submissions = submissions.ok()?;
-    Some(plan(
-        caldir_root,
-        course,
-        &assignments,
-        &submissions,
-        now,
-        prev,
-    ))
+    Some(plan(caldir_root, course, &assignments, &submissions, prev))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{content_hash, plan, plan_for_course};
+    use super::{content_hash, plan, plan_for_course, FetchFailed};
     use crate::canvas::calendar::exec::record_writes;
     use crate::canvas::calendar::identity::{calendar_state_key, deadline_uid, window_state_key};
     use crate::canvas::calendar::test_support::{
-        assignment_with_due_date, assignment_without_due_date, course, fixed_now,
-        fixture_assignment, fixture_course, logical_line, only_vtodo, read_fixture,
-        state_with_hash, submission_submitted,
+        assignment_with_due_date, assignment_without_due_date, course, fixture_assignment,
+        fixture_course, logical_line, only_vtodo, read_fixture, state_with_hash,
+        submission_submitted,
     };
     use crate::canvas::calendar::vtodo::render_vtodo;
     use crate::canvas::calendar::{Plan, PlannedDelete};
@@ -258,7 +301,7 @@ mod tests {
     #[test]
     fn empty_assignment_set_produces_an_empty_plan() {
         let root = Path::new("/caldir");
-        let got = plan(root, &course(), &[], &[], fixed_now(), &State::default());
+        let got = plan(root, &course(), &[], &[], &State::default());
         assert!(got.writes.is_empty());
         assert!(got.deletes.is_empty());
     }
@@ -267,14 +310,7 @@ mod tests {
     fn assignment_without_due_date_produces_no_components() {
         let root = Path::new("/caldir");
         let assignments = vec![assignment_without_due_date()];
-        let got = plan(
-            root,
-            &course(),
-            &assignments,
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &assignments, &[], &State::default());
         assert!(got.writes.is_empty());
         assert!(got.deletes.is_empty());
     }
@@ -283,14 +319,7 @@ mod tests {
     fn assignment_with_due_date_produces_a_vtodo_write() {
         let root = Path::new("/caldir");
         let assignments = vec![assignment_with_due_date()];
-        let got = plan(
-            root,
-            &course(),
-            &assignments,
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &assignments, &[], &State::default());
         assert_eq!(got.deletes, Vec::<PlannedDelete>::new());
         assert_eq!(got.writes.len(), 1);
         let write = &got.writes[0];
@@ -328,14 +357,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         let vtodo = got
             .writes
             .iter()
@@ -383,14 +405,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         let vevent = got
             .writes
             .iter()
@@ -442,20 +457,12 @@ mod tests {
             published: None,
         };
 
-        let before = plan(
-            root,
-            &course(),
-            &[original],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let before = plan(root, &course(), &[original], &[], &State::default());
         let after = plan(
             root,
             &course(),
             &[renamed_and_rescheduled],
             &[],
-            fixed_now(),
             &State::default(),
         );
 
@@ -471,8 +478,8 @@ mod tests {
         let root = Path::new("/caldir");
         let a1 = assignment_with_due_date();
         let a2 = assignment_with_due_date();
-        let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
-        let after = plan(root, &course(), &[a2], &[], fixed_now(), &State::default());
+        let before = plan(root, &course(), &[a1], &[], &State::default());
+        let after = plan(root, &course(), &[a2], &[], &State::default());
         assert_eq!(before.writes[0].content, after.writes[0].content);
     }
 
@@ -491,14 +498,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         // The VTODO is still emitted, plus the VEVENT.
         assert_eq!(got.writes.len(), 2);
@@ -541,14 +541,7 @@ mod tests {
         let root = Path::new("/caldir");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(got.writes.len(), 1);
         assert!(got.writes[0].content.contains("BEGIN:VTODO"));
@@ -568,14 +561,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
 
         assert_eq!(got.writes.len(), 1);
         assert!(got.writes[0].content.contains("BEGIN:VTODO"));
@@ -600,7 +586,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(first.writes.len(), 2);
@@ -620,7 +605,7 @@ mod tests {
             );
         }
 
-        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &prev);
+        let second = plan(root, &course(), &[assignment], &[], &prev);
 
         assert!(second.writes.is_empty());
         assert!(second.deletes.is_empty());
@@ -641,13 +626,12 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(first.writes.len(), 1);
         let prev = state_with_hash(assignment.id, &first.writes[0].content);
 
-        let second = plan(root, &course(), &[assignment], &[], fixed_now(), &prev);
+        let second = plan(root, &course(), &[assignment], &[], &prev);
 
         assert!(second.writes.is_empty());
         assert!(second.deletes.is_empty());
@@ -662,7 +646,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&original),
             &[],
-            fixed_now(),
             &State::default(),
         );
         let prev = state_with_hash(original.id, &first.writes[0].content);
@@ -674,7 +657,7 @@ mod tests {
                 .into(),
         );
 
-        let got = plan(root, &course(), &[rescheduled], &[], fixed_now(), &prev);
+        let got = plan(root, &course(), &[rescheduled], &[], &prev);
 
         assert_eq!(got.writes.len(), 1);
         assert!(got.writes[0].content.contains("DUE:20261015T120000Z"));
@@ -694,7 +677,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&original),
             &[],
-            fixed_now(),
             &State::default(),
         );
         let prev = state_with_hash(original.id, &first.writes[0].content);
@@ -702,7 +684,7 @@ mod tests {
         let mut renamed = original;
         renamed.name = Some("Essay Final".into());
 
-        let got = plan(root, &course(), &[renamed], &[], fixed_now(), &prev);
+        let got = plan(root, &course(), &[renamed], &[], &prev);
 
         assert_eq!(got.writes.len(), 1);
         assert_eq!(got.writes[0].path, first.writes[0].path);
@@ -740,7 +722,6 @@ mod tests {
             &fixture_course(),
             &[fixture_assignment()],
             &[],
-            fixed_now(),
             &State::default(),
         );
         let vtodo = only_vtodo(&with_window);
@@ -779,7 +760,6 @@ mod tests {
             &fixture_course(),
             &[no_unlock],
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(without_window.writes.len(), 1, "no window component");
@@ -827,7 +807,6 @@ mod tests {
             &fixture_course(),
             &[fixture_assignment()],
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(
@@ -843,7 +822,6 @@ mod tests {
             &fixture_course(),
             &[no_unlock],
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(
@@ -866,7 +844,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         let prev = state_with_hash(assignment.id, &before.writes[0].content);
@@ -876,14 +853,7 @@ mod tests {
             name: "Intro to Testing (Section B)".into(),
             course_code: Some("TST101".into()),
         };
-        let after = plan(
-            root,
-            &renamed_course,
-            &[assignment],
-            &[],
-            fixed_now(),
-            &prev,
-        );
+        let after = plan(root, &renamed_course, &[assignment], &[], &prev);
 
         assert_eq!(after.writes.len(), 1);
         assert_eq!(
@@ -917,7 +887,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         let renamed_course = Course {
@@ -925,14 +894,7 @@ mod tests {
             name: "Intro to Testing (Section B)".into(),
             course_code: Some("TST101".into()),
         };
-        let after = plan(
-            root,
-            &renamed_course,
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let after = plan(root, &renamed_course, &[assignment], &[], &State::default());
 
         assert_eq!(
             before.writes[0].path,
@@ -956,7 +918,6 @@ mod tests {
             &fixture_course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(before.writes.len(), 2);
@@ -969,7 +930,7 @@ mod tests {
                 .unwrap()
                 .into(),
         );
-        let after = plan(root, &fixture_course(), &[moved], &[], fixed_now(), &prev);
+        let after = plan(root, &fixture_course(), &[moved], &[], &prev);
 
         assert_eq!(after.writes.len(), 2);
         let mut before_paths: Vec<_> = before.writes.iter().map(|w| w.path.clone()).collect();
@@ -1014,7 +975,6 @@ mod tests {
             &fixture_course(),
             std::slice::from_ref(&without),
             &[],
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(before.writes.len(), 1);
@@ -1022,14 +982,7 @@ mod tests {
         let mut prev = State::default();
         record_writes(&mut prev, &before.writes);
 
-        let after = plan(
-            root,
-            &fixture_course(),
-            &[fixture_assignment()],
-            &[],
-            fixed_now(),
-            &prev,
-        );
+        let after = plan(root, &fixture_course(), &[fixture_assignment()], &[], &prev);
 
         // The deadline is rewritten in place (it gained a `DTSTART`), and the
         // window appears for the first time.
@@ -1064,7 +1017,6 @@ mod tests {
             &fixture_course(),
             std::slice::from_ref(&assignment),
             &submissions,
-            fixed_now(),
             &State::default(),
         );
         assert_eq!(first.writes.len(), 2, "one write per component");
@@ -1086,21 +1038,13 @@ mod tests {
             &fixture_course(),
             std::slice::from_ref(&assignment),
             &submissions,
-            fixed_now(),
             &state,
         );
         assert_eq!(second, Plan::default(), "second run must plan nothing");
 
         // And a third, from the same state, for the same reason: nothing
         // about the projection drifts on its own between runs.
-        let third = plan(
-            root,
-            &fixture_course(),
-            &[assignment],
-            &submissions,
-            fixed_now(),
-            &state,
-        );
+        let third = plan(root, &fixture_course(), &[assignment], &submissions, &state);
         assert_eq!(third, Plan::default());
     }
 
@@ -1117,7 +1061,6 @@ mod tests {
             &fixture_course(),
             &[assignment],
             &submissions,
-            fixed_now(),
             &State::default(),
         );
 
@@ -1142,13 +1085,12 @@ mod tests {
             &fixture_course(),
             &[assignment],
             &[],
-            fixed_now(),
             &State::default(),
         );
         let mut state = State::default();
         record_writes(&mut state, &first.writes);
 
-        let got = plan(root, &fixture_course(), &[], &[], fixed_now(), &state);
+        let got = plan(root, &fixture_course(), &[], &[], &state);
 
         assert!(got.writes.is_empty());
         let mut deletes: Vec<_> = got
@@ -1188,7 +1130,6 @@ mod tests {
             &fixture_course(),
             &[fixture_assignment()],
             &[],
-            fixed_now(),
             &State::default(),
         );
         record_writes(&mut state, &first.writes);
@@ -1196,9 +1137,8 @@ mod tests {
         assert!(plan_for_course(
             root,
             &fixture_course(),
-            Err(()),
+            Err(FetchFailed),
             Ok(vec![]),
-            fixed_now(),
             &state
         )
         .is_none());
@@ -1206,8 +1146,7 @@ mod tests {
             root,
             &fixture_course(),
             Ok(vec![]),
-            Err(()),
-            fixed_now(),
+            Err(FetchFailed),
             &state
         )
         .is_none());
@@ -1251,7 +1190,7 @@ mod tests {
 
         // Canvas's current response for this course no longer mentions
         // `deleted_id` at all.
-        let got = plan(root, &course(), &[], &[], fixed_now(), &prev);
+        let got = plan(root, &course(), &[], &[], &prev);
 
         assert!(got.writes.is_empty());
         assert_eq!(got.deletes.len(), 2);
@@ -1297,7 +1236,6 @@ mod tests {
             &course(),
             std::slice::from_ref(&assignment),
             &[],
-            fixed_now(),
             &prev,
         );
 
@@ -1328,15 +1266,14 @@ mod tests {
             },
         );
 
-        let assignments_failed: Result<Vec<Assignment>, ()> = Err(());
-        let submissions_failed: Result<Vec<Submission>, ()> = Err(());
+        let assignments_failed: Result<Vec<Assignment>, FetchFailed> = Err(FetchFailed);
+        let submissions_failed: Result<Vec<Submission>, FetchFailed> = Err(FetchFailed);
 
         let got = plan_for_course(
             root,
             &course(),
             assignments_failed,
             submissions_failed,
-            fixed_now(),
             &prev,
         );
 
@@ -1359,15 +1296,15 @@ mod tests {
         // failure is exactly as dangerous as an assignments failure, since
         // `plan` needs both to render a `VTODO`'s STATUS correctly.
         let root = Path::new("/caldir");
-        let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
-        let submissions_failed: Result<Vec<Submission>, ()> = Err(());
+        let assignments_ok: Result<Vec<Assignment>, FetchFailed> =
+            Ok(vec![assignment_with_due_date()]);
+        let submissions_failed: Result<Vec<Submission>, FetchFailed> = Err(FetchFailed);
 
         let got = plan_for_course(
             root,
             &course(),
             assignments_ok,
             submissions_failed,
-            fixed_now(),
             &State::default(),
         );
 
@@ -1377,15 +1314,15 @@ mod tests {
     #[test]
     fn both_fetches_succeeding_produces_a_plan() {
         let root = Path::new("/caldir");
-        let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
-        let submissions_ok: Result<Vec<Submission>, ()> = Ok(vec![]);
+        let assignments_ok: Result<Vec<Assignment>, FetchFailed> =
+            Ok(vec![assignment_with_due_date()]);
+        let submissions_ok: Result<Vec<Submission>, FetchFailed> = Ok(vec![]);
 
         let got = plan_for_course(
             root,
             &course(),
             assignments_ok,
             submissions_ok,
-            fixed_now(),
             &State::default(),
         )
         .expect("both fetches succeeded");
@@ -1414,7 +1351,7 @@ mod tests {
             },
         );
 
-        let got = plan(root, &course(), &[], &[], fixed_now(), &prev);
+        let got = plan(root, &course(), &[], &[], &prev);
 
         assert!(got.deletes.is_empty());
     }

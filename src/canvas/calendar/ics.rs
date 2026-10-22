@@ -106,9 +106,7 @@ pub(super) fn fold_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::canvas::calendar::plan::plan;
-    use crate::canvas::calendar::test_support::{
-        assignment_with_due_date, course, fixed_now, logical_line,
-    };
+    use crate::canvas::calendar::test_support::{assignment_with_due_date, course, logical_line};
     use crate::canvas::Course;
     use crate::core::state::State;
     use std::path::Path;
@@ -133,14 +131,7 @@ mod tests {
         let mut assignment = assignment_with_due_date();
         assignment.name = None;
 
-        let got = plan(
-            root,
-            &long_course,
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &long_course, &[assignment], &[], &State::default());
         let content = &got.writes[0].content;
 
         for line in content.split("\r\n") {
@@ -172,14 +163,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut assignment = assignment_with_due_date();
         assignment.updated_at = Some("2026-08-20T10:15:00Z".into());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("DTSTAMP:20260820T101500Z"));
     }
 
@@ -188,14 +172,7 @@ mod tests {
         let root = Path::new("/caldir");
         let assignment = assignment_with_due_date();
         assert!(assignment.updated_at.is_none());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z
         assert!(got.writes[0].content.contains("DTSTAMP:20260901T235900Z"));
     }
@@ -205,14 +182,7 @@ mod tests {
         let root = Path::new("/caldir");
         let mut assignment = assignment_with_due_date();
         assignment.updated_at = Some("not-a-date".into());
-        let got = plan(
-            root,
-            &course(),
-            &[assignment],
-            &[],
-            fixed_now(),
-            &State::default(),
-        );
+        let got = plan(root, &course(), &[assignment], &[], &State::default());
         assert!(got.writes[0].content.contains("DTSTAMP:20260901T235900Z"));
     }
 }
