@@ -18,7 +18,7 @@ recordings that session can reach.
 * **Idempotent & resumable:** `Range` requests, `.part` files, ETag validation,
   atomic rename on finalize. A `200` in reply to a `Range` request means the
   server ignored it, and the partial file must be truncated rather than
-  appended to — `download.rs` handles this; anything reimplementing it must.
+  appended to — `canvas/download.rs` handles this; anything reimplementing it must.
 * **Deterministic structure:** stable, sanitized, ASCII-transliterated paths.
 * **`--dry-run` writes nothing and launches nothing.** It must not start a
   browser, perform SSO, or download.
@@ -71,7 +71,7 @@ recordings that session can reach.
 * **No `#[allow(clippy::...)]`** without a comment justifying it. There are
   currently none in the crate; adding one is a design signal, not a fix.
 * **Tests:** `cargo test`. Prefer pure functions that can be tested without a
-  network or a browser — that is why `links`, `download`, `zoom::app_conf` and
+  network or a browser — that is why `canvas::links`, `canvas::download`, `zoom::app_conf` and
   `zoom::sso` are separate from the flows that call them.
 
 ---
@@ -217,7 +217,7 @@ documented as working is worse than no configuration.
 ```
 
 There is no week-folding. Names are sanitized and transliterated to ASCII by
-`fsutil::sanitize_component`.
+`core::fsutil::sanitize_component`.
 
 ### Directory Layout (Calendar)
 
@@ -231,7 +231,7 @@ There is no week-folding. Names are sanitized and transliterated to ASCII by
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`fsutil::course_dir`). `deadlines/` and `windows/` are sibling directories
+(`canvas::course::course_dir`). `deadlines/` and `windows/` are sibling directories
 per course × semantics (spec D4), so a client can subscribe to one without
 the other; a third directory for recurring-class semantics has room to land
 later without moving anything under either. Filenames and UIDs derive from
@@ -313,21 +313,28 @@ cron, where nobody would notice until the data was gone.
 src/
   main.rs           # CLI parsing, command dispatch, all user-facing printing
   lib.rs            # module docs and the layer map
-  config.rs         # load/validate/expand config
-  http.rs           # the one client: rate limiting, 429/5xx retry, Link parsing
-  canvas.rs         # Canvas REST client (get_json / list_paginated)
-  download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
-  state.rs          # per-course State, ItemState, record_error
-  links.rs          # HTML -> links, media refs, zoom URLs
-  syncer.rs         # CourseSync / ModuleCtx: the main sync flow
-  announcements.rs  # AnnouncementSync
-  calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
-  recordings.rs     # zoom-link discovery report
-  fsutil.rs         # sanitization, atomic write/rename
   ffmpeg.rs         # ffmpeg invocation
-  progress.rs       # progress bars, registered with ui::bars()
-  ui.rs             # user-facing output channel (status! macro)
-  logger.rs         # log file setup, falls back to stderr
+  core/
+    mod.rs          # folder docs
+    config.rs       # load/validate/expand config
+    http.rs         # the one client: rate limiting, 429/5xx retry, Link parsing
+    state.rs        # per-course State, ItemState, record_error
+    fsutil.rs       # sanitization, atomic write/rename
+    logger.rs       # log file setup, falls back to stderr
+  ui/
+    mod.rs          # user-facing output channel (status! macro)
+    progress.rs     # progress bars, registered with ui::bars()
+  canvas/
+    mod.rs          # re-exports: client::CanvasClient, models::*
+    models.rs       # Canvas wire types (Course, Module, Assignment, ...)
+    client.rs       # Canvas REST client (get_json / list_paginated)
+    course.rs       # course_dir: the per-course on-disk directory name
+    download.rs     # the one downloader: ETag, .part, Range resume, atomic rename
+    links.rs        # HTML -> links, media refs, zoom URLs
+    sync.rs         # CourseSync / ModuleCtx: the main sync flow
+    announcements.rs  # AnnouncementSync
+    calendar.rs     # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
+    recordings.rs   # zoom-link discovery report
   zoom/
     mod.rs          # zoom_flow orchestration
     api.rs          # Zoom recordings REST client
@@ -342,10 +349,10 @@ src/
 Rules that hold today and should keep holding:
 
 * **All HTTP goes through `HttpCtx`.** It is the only place rate limiting and
-  retries live. A raw `reqwest::Client::send()` outside `http.rs` is a bug.
-* **All Canvas file downloads go through `download::download_if_needed`,** under
-  one state-key namespace (`file:{id}`), so a file reachable from both a module
-  and an announcement is fetched once.
+  retries live. A raw `reqwest::Client::send()` outside `core/http.rs` is a bug.
+* **All Canvas file downloads go through `canvas::download::download_if_needed`,**
+  under one state-key namespace (`file:{id}`), so a file reachable from both a
+  module and an announcement is fetched once.
 * **All Canvas list endpoints go through `CanvasClient::list_paginated`.**
 * **`zoom::sso` must not touch the database or the course id.** It takes a page
   and credentials. That is what makes it testable.
@@ -464,7 +471,7 @@ Documented so they are not rediscovered as surprises:
   **not** share this edge: a course whose assignment fetch fails is logged and
   skipped, the rest of the run continues, and the run reports exit code `13`
   if the failure was partial (spec ticket 11).
-* **The `URL` value is escaped as if it were `TEXT`.** `calendar.rs` runs
+* **The `URL` value is escaped as if it were `TEXT`.** `canvas/calendar.rs` runs
   `escape_text` over the `html_url` for both components, but RFC 5545 §3.8.4.6
   types `URL` as `URI`, which takes no backslash escaping — so a Canvas URL
   containing a comma would be emitted wrong. No observed Canvas URL has one,
@@ -495,7 +502,7 @@ database.
 
 * Never print or log tokens, cookies, the `lti_scid`, or the SSO password.
 * `sso_password` sits in cleartext in `config.toml`. The file is written
-  atomically and chmod'd `0600` on Unix (`config::save_config_to_path`), but
+  atomically and chmod'd `0600` on Unix (`core::config::save_config_to_path`), but
   cleartext is still cleartext — an `sso_password_cmd` mirroring `token_cmd`
   would be the right fix.
 * Retrieve the Canvas PAT via `token_cmd` (`pass`, `gopass`) where possible.

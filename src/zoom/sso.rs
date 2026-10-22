@@ -8,7 +8,7 @@
 //! These are free functions over a page and a set of credentials: none of this
 //! touches the recordings database or the course being synced.
 
-use crate::config::Config;
+use crate::core::config::Config;
 use chromiumoxide::Page;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;

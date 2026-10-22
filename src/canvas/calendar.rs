@@ -33,7 +33,7 @@
 //!
 //! [`run_calendar`] is the executor half (spec D10): it fetches active
 //! courses and their assignments, calls [`plan`], and applies the result to
-//! disk with [`fsutil::atomic_write`]. Per spec "Fuera del alcance de los
+//! disk with [`fsutil::atomic_write`](crate::core::fsutil::atomic_write). Per spec "Fuera del alcance de los
 //! tests", the executor and the Canvas calls are untested here — the repo has
 //! no HTTP mock server and this ticket does not add one. [`select_active_courses`]
 //! is pulled out of the executor specifically so the one piece of decision
@@ -53,10 +53,11 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha1::{Digest, Sha1};
 
+use crate::canvas::course::course_dir;
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
-use crate::config::Config;
-use crate::fsutil;
-use crate::state::{ItemState, State};
+use crate::core::config::Config;
+use crate::core::fsutil;
+use crate::core::state::{ItemState, State};
 use crate::status;
 
 /// One calendar file to write, in full.
@@ -162,7 +163,7 @@ fn window_filename(assignment_id: u64) -> String {
 
 /// Prefix of the `state.json` namespace for a deadline `VTODO`'s projected
 /// content (spec D5): `calendar:{assignment_id}`. Distinct from the content
-/// flow's own `assignment:{id}` key (`syncer.rs`) — same assignment,
+/// flow's own `assignment:{id}` key (`canvas/sync.rs`) — same assignment,
 /// different projection, so a separate key stops the two flows from
 /// clobbering each other's bookkeeping. Exposed as a constant (not just
 /// baked into [`calendar_state_key`]) because the reconciliation pass in
@@ -190,7 +191,7 @@ fn window_state_key(assignment_id: u64) -> String {
     format!("{WINDOW_KEY_PREFIX}{assignment_id}")
 }
 
-/// Hash rendered content the same way `syncer.rs` hashes markdown before
+/// Hash rendered content the same way `canvas/sync.rs` hashes markdown before
 /// deciding whether to skip a write: SHA-1, hex-encoded. Not cryptographic —
 /// just a cheap, stable fingerprint of "did the projected component change".
 fn content_hash(content: &str) -> String {
@@ -460,7 +461,7 @@ fn fold_line(line: &str) -> String {
 /// title>` (spec ID1).
 ///
 /// The course name is [`Course::name`] — the human name Canvas shows — and
-/// deliberately neither [`fsutil::course_dir`]'s output (sanitized and
+/// deliberately neither [`course_dir`]'s output (sanitized and
 /// transliterated to ASCII) nor `course_code`. A student reading a list that
 /// aggregates every course needs the name they recognize, not a path
 /// component.
@@ -669,7 +670,7 @@ pub fn plan(
     _now: DateTime<Utc>,
     prev: &State,
 ) -> Plan {
-    let course_dir = fsutil::course_dir(caldir_root, course);
+    let course_dir = course_dir(caldir_root, course);
     let deadlines_dir = course_dir.join(DEADLINES_DIR);
     let windows_dir = course_dir.join(WINDOWS_DIR);
     let submissions_by_assignment = index_submissions(submissions);
@@ -1006,7 +1007,7 @@ pub async fn run_calendar(
             Err(())
         };
 
-        let state_path = fsutil::course_dir(&download_root, course).join("state.json");
+        let state_path = course_dir(&download_root, course).join("state.json");
         let mut state = State::load(&state_path).await;
 
         // Ticket 10's safety requirement: a fetch failure must never reach
@@ -2156,7 +2157,7 @@ mod tests {
 
     /// Build a `State` recording, under the `calendar:{id}` namespace, a
     /// content hash computed independently of `plan`'s own `content_hash`
-    /// helper (using the `sha1` crate directly, the same way `syncer.rs`
+    /// helper (using the `sha1` crate directly, the same way `canvas/sync.rs`
     /// does), so this does not just recompute the production code's answer
     /// and compare it to itself.
     fn state_with_hash(assignment_id: u64, content: &str) -> State {
@@ -2566,7 +2567,7 @@ mod tests {
     fn a_course_rename_moves_the_course_directory_and_that_predates_this_change() {
         // Honest pin of a real limitation rather than a claim it does not
         // exist. The *file* is stable, but the directory above it is
-        // `fsutil::course_dir`, derived from the course's sanitized name —
+        // `canvas::course::course_dir`, derived from the course's sanitized name —
         // shared with `download_root` and with the frozen `windows`
         // collection, and unchanged by this ticket. Renaming a course in
         // Canvas therefore leaves the old course directory behind; the
@@ -3429,7 +3430,7 @@ mod tests {
 
     #[test]
     fn an_unrelated_state_key_with_the_calendar_prefix_as_a_substring_is_not_touched() {
-        // `state.json` is shared with `syncer.rs`, which uses its own
+        // `state.json` is shared with `canvas/sync.rs`, which uses its own
         // `assignment:{id}` namespace for unrelated bookkeeping. This pins
         // that the reconciliation scan only matches the real
         // `calendar:`/`calendar-window:` prefixes, not anything that merely

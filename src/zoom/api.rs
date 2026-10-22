@@ -1,5 +1,5 @@
-use crate::config::Config;
-use crate::http::HttpCtx;
+use crate::core::config::Config;
+use crate::core::http::HttpCtx;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{
     RecordingFileResponse, RecordingListResponse, RecordingSummary, RecordingsResult,

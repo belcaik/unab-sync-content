@@ -1,12 +1,13 @@
+use crate::canvas::course::course_dir;
+use crate::canvas::download::{download_if_needed, Dest};
+use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
-use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{atomic_write, course_dir, ensure_dir, sanitize_component};
-use crate::http::{build_http_client, HttpCtx};
-use crate::links::{classify_by_filename, extract_links, MediaRef};
-use crate::progress::{progress_bar, spinner};
-use crate::state::{ItemState, State};
+use crate::core::config::Config;
+use crate::core::fsutil::{atomic_write, ensure_dir, sanitize_component};
+use crate::core::http::{build_http_client, HttpCtx};
+use crate::core::state::{ItemState, State};
 use crate::status;
+use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -178,7 +179,7 @@ impl<'a> AnnouncementSync<'a> {
             Ok(path) => Self::relative_media_path(&path),
             Err(e) => {
                 warn!(course_id = self.course_id, file_id = file.id, error = %e, "media download failed");
-                state.record_error(crate::download::state_key(file.id), &e);
+                state.record_error(crate::canvas::download::state_key(file.id), &e);
                 None
             }
         }
@@ -198,7 +199,7 @@ impl<'a> AnnouncementSync<'a> {
                     Ok(f) => m.local_path = self.fetch_media(&f, state).await,
                     Err(e) => {
                         warn!(course_id = self.course_id, file_id = fid, error = %e, "media metadata fetch failed");
-                        state.record_error(crate::download::state_key(fid), &e);
+                        state.record_error(crate::canvas::download::state_key(fid), &e);
                     }
                 }
             }

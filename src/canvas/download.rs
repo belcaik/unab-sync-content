@@ -5,9 +5,9 @@
 //! only where the file lands.
 
 use crate::canvas::FileObj;
-use crate::fsutil::{atomic_rename, sanitize_filename_preserve_ext};
-use crate::http::HttpCtx;
-use crate::state::{ItemState, State};
+use crate::core::fsutil::{atomic_rename, sanitize_filename_preserve_ext};
+use crate::core::http::HttpCtx;
+use crate::core::state::{ItemState, State};
 use futures_util::StreamExt;
 use reqwest::header;
 use std::path::{Path, PathBuf};

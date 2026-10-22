@@ -720,7 +720,7 @@ configurations too — see `.github/workflows/ci.yml`). `Cargo.toml` carries a
 holds to. Some worth knowing before changing anything:
 
 - All HTTP goes through `HttpCtx`. A raw `reqwest::Client::send()` outside
-  `src/http.rs` bypasses rate limiting and retries.
+  `src/core/http.rs` bypasses rate limiting and retries.
 - All Canvas file downloads go through `download::download_if_needed`, under
   one state-key namespace, so a file is never fetched twice.
 - Nothing outside `main.rs` writes to stdout. Library code emits `tracing`

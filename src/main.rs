@@ -1,12 +1,12 @@
-use u_crawler::announcements;
-use u_crawler::calendar;
 use u_crawler::canvas;
-use u_crawler::config;
-use u_crawler::logger;
-use u_crawler::progress;
-use u_crawler::recordings;
-use u_crawler::state::State;
-use u_crawler::syncer;
+use u_crawler::canvas::announcements;
+use u_crawler::canvas::calendar;
+use u_crawler::canvas::recordings;
+use u_crawler::canvas::sync;
+use u_crawler::core::config;
+use u_crawler::core::logger;
+use u_crawler::core::state::State;
+use u_crawler::ui::progress;
 #[cfg(feature = "zoom")]
 use u_crawler::zoom;
 
@@ -187,7 +187,7 @@ async fn main() -> ExitCode {
             course_id,
             dry_run,
             verbose,
-        } => match syncer::run_sync(course_id, dry_run, verbose).await {
+        } => match sync::run_sync(course_id, dry_run, verbose).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 tracing::error!(error = %e, "sync failed");

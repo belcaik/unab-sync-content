@@ -1,13 +1,14 @@
+use crate::canvas::course::course_dir;
+use crate::canvas::download::{download_if_needed, Dest};
 use crate::canvas::{Assignment, CanvasClient, Module};
-use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{
-    atomic_write, course_dir, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
+use crate::core::config::Config;
+use crate::core::fsutil::{
+    atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
-use crate::http::{build_http_client, HttpCtx};
-use crate::progress::{progress_bar, spinner};
-use crate::state::{ItemState, State};
+use crate::core::http::{build_http_client, HttpCtx};
+use crate::core::state::{ItemState, State};
 use crate::status;
+use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use regex::Regex;
 use sha1::{Digest, Sha1};
@@ -107,7 +108,7 @@ pub async fn run_sync(
 
         // Sync announcements for this course
         if cfg.announcements.enabled {
-            match crate::announcements::AnnouncementSync::new(
+            match crate::canvas::announcements::AnnouncementSync::new(
                 &cfg,
                 &canvas,
                 &httpctx,
@@ -225,7 +226,7 @@ impl ModuleCtx<'_> {
             return Ok(0);
         }
         let (course_id, module_id) = (self.course_id, self.module_id);
-        let key = crate::download::state_key(file_id);
+        let key = crate::canvas::download::state_key(file_id);
 
         let f = match self.canvas.get_file(file_id).await {
             Ok(f) => f,
