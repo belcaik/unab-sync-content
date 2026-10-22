@@ -1,7 +1,7 @@
 //! The single downloader for Canvas-hosted files.
 //!
 //! Owns one policy for conditional fetching (ETag), resumable transfers (`.part`
-//! plus `Range`), atomic publication, and [`State`] bookkeeping. Callers choose
+//! plus `Range`), atomic publication, and [`State`](crate::core::state::State) bookkeeping. Callers choose
 //! only where the file lands.
 
 use crate::canvas::FileObj;
