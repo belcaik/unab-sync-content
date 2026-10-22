@@ -68,6 +68,18 @@ fn canvas_file_id(url: &str) -> Option<u64> {
         .and_then(|m| m.as_str().parse::<u64>().ok())
 }
 
+/// Every distinct Canvas file id referenced anywhere in a body of HTML.
+///
+/// `CANVAS_FILE_RE` alone covers every shape [`canvas_file_id`] accepts: a
+/// course-scoped `/courses/N/files/M` contains `/files/M` as a substring, so
+/// the scan captures the file id, never the course id.
+pub fn canvas_file_ids(html: &str) -> HashSet<u64> {
+    CANVAS_FILE_RE
+        .captures_iter(html)
+        .filter_map(|c| c.get(1)?.as_str().parse::<u64>().ok())
+        .collect()
+}
+
 pub fn extract_links(html: &str) -> ExtractedLinks {
     let mut all: Vec<String> = Vec::new();
     let mut seen_all = HashSet::new();
@@ -184,6 +196,36 @@ pub fn classify_by_filename(s: &str) -> MediaKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_file_ids_matches_plain_api_and_course_paths() {
+        // Every shape either of the two pre-merge regexes accepted: a bare
+        // `/files/N`, `/api/v1/files/N`, and a course-scoped
+        // `/courses/N/files/M` (the file id wins, never the course id).
+        let html = r#"<a href="/courses/1/files/22">a</a><img src="/api/v1/files/33"/>"#;
+        let ids = canvas_file_ids(html);
+        assert!(ids.contains(&22));
+        assert!(ids.contains(&33));
+        assert!(!ids.contains(&1), "course id must not be captured");
+    }
+
+    #[test]
+    fn canvas_file_ids_matches_bare_and_case_insensitive_paths() {
+        let html = r#"<a href="/files/44">a</a><img src="/API/V1/FILES/55"/>"#;
+        let ids = canvas_file_ids(html);
+        assert!(ids.contains(&44));
+        assert!(ids.contains(&55));
+    }
+
+    #[test]
+    fn canvas_file_ids_dedupes_and_ignores_non_file_urls() {
+        let html = r#"<a href="https://canvas.example.com/files/7?verifier=x">a</a>
+                     <a href="https://canvas.example.com/files/7/download">b</a>
+                     <a href="https://example.com/page">c</a>"#;
+        let ids = canvas_file_ids(html);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&7));
+    }
 
     #[test]
     fn extracts_image_anchor_and_canvas_file() {

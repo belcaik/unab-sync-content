@@ -1,4 +1,5 @@
 use crate::canvas::download::{download_if_needed, Dest};
+use crate::canvas::links::canvas_file_ids;
 use crate::canvas::{Assignment, CanvasClient, Course, Module};
 use crate::core::fsutil::{
     atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
@@ -267,7 +268,7 @@ impl CourseSync<'_> {
                     )
                     .await?;
 
-                for fid in discover_file_ids(&html) {
+                for fid in canvas_file_ids(&html) {
                     counts.files += ctx.sync_file(fid, state).await?;
                 }
                 continue;
@@ -305,7 +306,7 @@ impl CourseSync<'_> {
                                 )
                                 .await?;
 
-                            let file_ids = discover_file_ids(&html);
+                            let file_ids = canvas_file_ids(&html);
                             for fid in file_ids {
                                 counts.files += ctx.sync_file(fid, state).await?;
                             }
@@ -319,21 +320,9 @@ impl CourseSync<'_> {
     }
 }
 
-/// Matches `/files/12345` or `/api/v1/files/12345` in an absolute or relative URL.
-static FILE_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:/api/v1)?/files/(\d+)").unwrap());
-
 /// Matches `/courses/12345/pages/some-slug`, capturing course id and slug.
 static COURSE_PAGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/courses/(\d+)/pages/([A-Za-z0-9_\-]+)").unwrap());
-
-/// Canvas file ids referenced anywhere in a body of HTML.
-fn discover_file_ids(html: &str) -> HashSet<u64> {
-    FILE_ID_RE
-        .captures_iter(html)
-        .filter_map(|c| c.get(1)?.as_str().parse::<u64>().ok())
-        .collect()
-}
 
 /// Whether `url` points at a wiki page belonging to `course_id`.
 fn is_course_page_url(url: &str, course_id: u64) -> bool {
@@ -355,14 +344,6 @@ fn extract_page_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn discover_file_ids_matches_both_api_and_plain_paths() {
-        let html = r#"<a href="/courses/1/files/22">a</a><img src="/api/v1/files/33"/>"#;
-        let ids = discover_file_ids(html);
-        assert!(ids.contains(&22));
-        assert!(ids.contains(&33));
-    }
 
     #[test]
     fn is_course_page_url_rejects_another_course() {
