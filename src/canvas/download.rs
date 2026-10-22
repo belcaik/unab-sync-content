@@ -5,14 +5,13 @@
 //! only where the file lands.
 
 use crate::canvas::FileObj;
-use crate::core::fsutil::{atomic_rename, sanitize_filename_preserve_ext};
+use crate::core::fsutil::sanitize_filename_preserve_ext;
 use crate::core::http::HttpCtx;
 use crate::core::state::{ItemState, State};
-use futures_util::StreamExt;
+use crate::core::transfer::{fetch_resumable, TransferError};
 use reqwest::header;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 #[derive(Debug, Error)]
@@ -25,6 +24,16 @@ pub enum DownloadError {
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl From<TransferError> for DownloadError {
+    fn from(e: TransferError) -> Self {
+        match e {
+            TransferError::Status(code) => Self::Status(code),
+            TransferError::Http(e) => Self::Http(e),
+            TransferError::Io(e) => Self::Io(e),
+        }
+    }
 }
 
 /// Where a download should land.
@@ -87,38 +96,7 @@ pub async fn download_if_needed(
     }
 
     let part = dest.with_extension("part");
-    let resume_from = tokio::fs::metadata(&part)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    let mut req = httpctx.client.get(url);
-    if resume_from > 0 {
-        req = req.header(header::RANGE, format!("bytes={resume_from}-"));
-    }
-    let resp = httpctx.send(req).await?;
-    let status = resp.status();
-    if !(status.is_success() || status.as_u16() == 206) {
-        return Err(DownloadError::Status(status.as_u16()));
-    }
-
-    // A 200 in response to a Range request means the server ignored it and is
-    // sending the whole body, so the partial file must not be appended to.
-    let appending = resume_from > 0 && status.as_u16() == 206;
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(appending)
-        .truncate(!appending)
-        .write(true)
-        .open(&part)
-        .await?;
-
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        file.write_all(&chunk?).await?;
-    }
-    file.flush().await?;
-    atomic_rename(&part, &dest).await?;
+    fetch_resumable(httpctx, url, header::HeaderMap::new(), &part, &dest).await?;
     info!(file_id = f.id, path = %dest.display(), "downloaded");
 
     let size = tokio::fs::metadata(&dest)
