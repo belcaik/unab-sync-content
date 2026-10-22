@@ -44,10 +44,9 @@ enabled = true
 caldir_root = "/home/appuser/Caldir"
 
 [zoom]
-# This image is built with `--no-default-features` (no headless browser, no
-# ffmpeg). Leave Zoom disabled — the `calendar` command never touches it,
-# but the field is required by the config schema regardless.
+# This image is built with `--no-default-features` (no headless browser).
+# Leave Zoom disabled — the `calendar` command never touches it, but the
+# section is required by the config schema regardless.
 enabled = false
-ffmpeg_path = "ffmpeg"
 user_agent = ""
 external_tool_id = 187

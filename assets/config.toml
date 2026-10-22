@@ -29,6 +29,5 @@ caldir_root = "~/Documents/Caldir"  # root of the caldir tree u_crawler owns exc
 
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely
-ffmpeg_path = "ffmpeg"          # or a full path if not on $PATH
 user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"
 external_tool_id = 187

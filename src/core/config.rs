@@ -114,7 +114,6 @@ impl Canvas {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Zoom {
     pub enabled: bool,
-    pub ffmpeg_path: String,
     pub user_agent: String,
     #[serde(default = "default_tool_id")]
     pub external_tool_id: u64,
@@ -142,7 +141,6 @@ impl Default for Config {
             },
             zoom: Zoom {
                 enabled: true,
-                ffmpeg_path: "ffmpeg".to_string(),
                 user_agent: "Mozilla/5.0".to_string(),
                 external_tool_id: 187,
             },
@@ -200,10 +198,6 @@ impl Config {
 
         if token_empty && cmd_empty {
             missing.push("canvas.token or canvas.token_cmd".to_string());
-        }
-
-        if self.zoom.enabled && self.zoom.ffmpeg_path.trim().is_empty() {
-            missing.push("zoom.ffmpeg_path".to_string());
         }
 
         if !missing.is_empty() {
@@ -344,5 +338,28 @@ mod tests {
         canvas.set_token_cmd("pass show canvas/pat".to_string());
         assert_eq!(canvas.token_cmd.as_deref(), Some("pass show canvas/pat"));
         assert_eq!(canvas.token, None);
+    }
+
+    #[test]
+    fn a_legacy_ffmpeg_path_key_is_ignored() {
+        // Configs written before the ffmpeg removal still carry the key, and
+        // these structs do not use deny_unknown_fields, so they keep loading.
+        let text = r#"
+download_root = "/tmp/x"
+concurrency = 4
+max_rps = 2
+user_agent = ""
+
+[canvas]
+base_url = "https://example.instructure.com"
+
+[zoom]
+enabled = true
+ffmpeg_path = "ffmpeg"
+user_agent = "Mozilla/5.0"
+external_tool_id = 187
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.zoom.enabled);
     }
 }
