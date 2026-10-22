@@ -32,6 +32,21 @@ pub struct ItemState {
     pub error_count: Option<u32>,
 }
 
+impl ItemState {
+    /// The state of an item tracked by its content hash rather than an ETag:
+    /// a rendered markdown page or a projected calendar component.
+    pub fn with_hash(content_hash: String, size: u64, updated_at: Option<String>) -> Self {
+        ItemState {
+            etag: None,
+            updated_at,
+            size: Some(size),
+            content_hash: Some(content_hash),
+            last_error: None,
+            error_count: None,
+        }
+    }
+}
+
 impl State {
     pub async fn load(path: &Path) -> State {
         if let Ok(mut f) = tokio::fs::File::open(path).await {
@@ -112,6 +127,17 @@ mod tests {
             content_hash("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".as_bytes()),
             "8b506967e3fe6f7878a37106c9c3ff102684e991"
         );
+    }
+
+    #[test]
+    fn with_hash_tracks_content_without_an_etag() {
+        let item = ItemState::with_hash("deadbeef".into(), 42, Some("2026-01-01".into()));
+        assert_eq!(item.etag, None);
+        assert_eq!(item.updated_at.as_deref(), Some("2026-01-01"));
+        assert_eq!(item.size, Some(42));
+        assert_eq!(item.content_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(item.last_error, None);
+        assert_eq!(item.error_count, None);
     }
 
     #[test]

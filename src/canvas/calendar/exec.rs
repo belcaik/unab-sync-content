@@ -321,14 +321,7 @@ pub(super) fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
         let hash = content_hash(write.content.as_bytes());
         state.set(
             write.state_key.clone(),
-            ItemState {
-                etag: None,
-                updated_at: None,
-                size: Some(write.content.len() as u64),
-                content_hash: Some(hash),
-                last_error: None,
-                error_count: None,
-            },
+            ItemState::with_hash(hash, write.content.len() as u64, None),
         );
     }
 }

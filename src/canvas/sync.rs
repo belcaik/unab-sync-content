@@ -180,14 +180,7 @@ impl ModuleCtx<'_> {
         atomic_write(dest, md.as_bytes()).await?;
         state.set(
             key,
-            ItemState {
-                etag: None,
-                updated_at,
-                size: Some(md.len() as u64),
-                content_hash: Some(hash),
-                last_error: None,
-                error_count: None,
-            },
+            ItemState::with_hash(hash, md.len() as u64, updated_at),
         );
         info!(course_id, module_id, path = %dest.display(), what, "wrote markdown");
         Ok(1)
