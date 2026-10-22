@@ -332,6 +332,7 @@ src/
     download.rs     # the one downloader: ETag, .part, Range resume, atomic rename
     links.rs        # HTML -> links, media refs, zoom URLs
     sync.rs         # CourseSync / ModuleCtx: the main sync flow
+    status.rs       # status report: aggregates per-course state.json into StatusReport
     announcements.rs  # AnnouncementSync
     calendar.rs     # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
     recordings.rs   # zoom-link discovery report

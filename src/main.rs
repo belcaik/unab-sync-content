@@ -2,10 +2,10 @@ use u_crawler::canvas;
 use u_crawler::canvas::announcements;
 use u_crawler::canvas::calendar;
 use u_crawler::canvas::recordings;
+use u_crawler::canvas::status::{self, StatusReport};
 use u_crawler::canvas::sync;
 use u_crawler::core::config;
 use u_crawler::core::logger;
-use u_crawler::core::state::State;
 use u_crawler::ui::progress;
 #[cfg(feature = "zoom")]
 use u_crawler::zoom;
@@ -155,56 +155,31 @@ async fn main() -> ExitCode {
     }
 
     match cli.command {
-        Commands::Init => {
-            match handle_init().await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "init failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(10) // config error
-                }
-            }
-        }
+        Commands::Init => exit_on(handle_init().await, "init failed", 10),
         Commands::Auth(AuthCommands::Canvas(args)) => {
-            match handle_auth_canvas(args).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "auth canvas failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(11) // auth error
-                }
-            }
+            exit_on(handle_auth_canvas(args).await, "auth canvas failed", 11)
         }
         Commands::Scan { course_id } => {
-            if let Err(e) = handle_scan(course_id).await {
-                tracing::error!(error = %e, course_id = ?course_id, "scan failed");
-                eprintln!("error: {e}");
-                return ExitCode::from(12); // network
+            let result = handle_scan(course_id).await;
+            if result.is_err() {
+                tracing::error!(course_id = ?course_id, "scan failed for course filter");
             }
-            ExitCode::SUCCESS
+            exit_on(result, "scan failed", 12)
         }
         Commands::Sync {
             course_id,
             dry_run,
             verbose,
-        } => match sync::run_sync(course_id, dry_run, verbose).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                tracing::error!(error = %e, "sync failed");
-                eprintln!("error: {e}");
-                ExitCode::from(12)
-            }
-        },
-        Commands::Announcements { course_id, dry_run } => {
-            match announcements::run_discovery(course_id, dry_run).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "announcements failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            }
-        }
+        } => exit_on(
+            sync::run_sync(course_id, dry_run, verbose).await,
+            "sync failed",
+            12,
+        ),
+        Commands::Announcements { course_id, dry_run } => exit_on(
+            announcements::run_discovery(course_id, dry_run).await,
+            "announcements failed",
+            12,
+        ),
         Commands::Calendar { course_id, dry_run } => {
             match calendar::run_calendar(course_id, dry_run).await {
                 Ok(calendar::RunOutcome::Success) => ExitCode::SUCCESS,
@@ -212,35 +187,21 @@ async fn main() -> ExitCode {
                     eprintln!("warning: some courses failed to sync; see the log for details");
                     ExitCode::from(13) // partial failure: some courses failed
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "calendar sync failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
+                Err(e) => exit_on(Err(e), "calendar sync failed", 12),
             }
         }
-        Commands::Recordings { course_id, dry_run } => {
-            match recordings::run_discovery(course_id, dry_run).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    tracing::error!(error = %e, "recordings discovery failed");
-                    eprintln!("error: {e}");
-                    ExitCode::from(12)
-                }
-            }
-        }
+        Commands::Recordings { course_id, dry_run } => exit_on(
+            recordings::run_discovery(course_id, dry_run).await,
+            "recordings discovery failed",
+            12,
+        ),
         #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
-            ZoomCommands::Flow { course_id, since } => {
-                match zoom::zoom_flow(course_id, since).await {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        tracing::error!(error = %e, "zoom flow failed");
-                        eprintln!("error: {e}");
-                        ExitCode::from(12)
-                    }
-                }
-            }
+            ZoomCommands::Flow { course_id, since } => exit_on(
+                zoom::zoom_flow(course_id, since).await,
+                "zoom flow failed",
+                12,
+            ),
         },
         #[cfg(not(feature = "zoom"))]
         Commands::Zoom { .. } => {
@@ -251,14 +212,18 @@ async fn main() -> ExitCode {
             );
             ExitCode::from(12)
         }
-        Commands::Status { verbose } => match handle_status(verbose).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                tracing::error!(error = %e, "status failed");
-                eprintln!("error: {e}");
-                ExitCode::from(12)
-            }
-        },
+        Commands::Status { verbose } => exit_on(handle_status(verbose).await, "status failed", 12),
+    }
+}
+
+fn exit_on(result: anyhow::Result<()>, what: &str, code: u8) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %e, "{what}");
+            eprintln!("error: {e}");
+            ExitCode::from(code)
+        }
     }
 }
 
@@ -292,12 +257,10 @@ async fn handle_auth_canvas(args: CanvasAuthArgs) -> anyhow::Result<()> {
         cfg.canvas.base_url = base;
     }
     if let Some(token) = args.token {
-        cfg.canvas.token = Some(token);
-        cfg.canvas.token_cmd = None;
+        cfg.canvas.set_token(token);
     }
     if let Some(cmd) = args.token_cmd {
-        cfg.canvas.token_cmd = Some(cmd);
-        cfg.canvas.token = None;
+        cfg.canvas.set_token_cmd(cmd);
     }
 
     cfg.expand_paths();
@@ -359,138 +322,61 @@ async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
 }
 
 async fn handle_status(verbose: bool) -> anyhow::Result<()> {
-    use std::path::PathBuf;
-    use tracing::info;
-
     let cfg = Config::load_or_init()?;
-    let download_root = PathBuf::from(&cfg.download_root);
+    let download_root = std::path::PathBuf::from(&cfg.download_root);
 
-    info!(path = %download_root.display(), "scanning download root for courses");
-
-    // Check if download_root exists
-    if !download_root.exists() {
-        println!("No backup directory found at {}", download_root.display());
-        println!("Run 'u_crawler sync' to create your first backup.");
-        return Ok(());
-    }
-
-    // Scan for course directories
-    let mut entries = tokio::fs::read_dir(&download_root).await?;
-    let mut course_dirs = Vec::new();
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_dir() {
-            course_dirs.push(path);
+    match status::summarize(&download_root).await? {
+        StatusReport::NoBackupRoot => {
+            println!("No backup directory found at {}", download_root.display());
+            println!("Run 'u_crawler sync' to create your first backup.");
         }
-    }
+        StatusReport::NoCourses => {
+            println!("No courses found in {}", download_root.display());
+            println!("Run 'u_crawler sync' to create your first backup.");
+        }
+        StatusReport::Courses(summary) => {
+            println!("Backup Status:\n");
 
-    if course_dirs.is_empty() {
-        println!("No courses found in {}", download_root.display());
-        println!("Run 'u_crawler sync' to create your first backup.");
-        return Ok(());
-    }
+            for course in &summary.courses {
+                println!("Course: {}", course.name);
+                println!("  Files: {}", course.file_count);
+                println!("  Storage: {}", format_bytes(course.storage_bytes));
+                match &course.last_updated {
+                    Some(timestamp) => println!("  Last sync: {}", timestamp),
+                    None => println!("  Last sync: Never"),
+                }
 
-    info!(count = course_dirs.len(), "found course directories");
-
-    println!("Backup Status:\n");
-
-    // Track totals across all courses
-    let mut total_files: usize = 0;
-    let mut total_storage: u64 = 0;
-
-    // Load state from each course directory
-    for course_dir in &course_dirs {
-        let state_path = course_dir.join("state.json");
-        let state = State::load(&state_path).await;
-
-        let course_name = course_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-
-        // Calculate statistics
-        let file_count = state.items.len();
-        let mut course_size: u64 = 0;
-        let mut last_updated: Option<String> = None;
-        let failed_items: Vec<_> = state
-            .items
-            .iter()
-            .filter(|(_, item)| item.last_error.is_some())
-            .collect();
-
-        for item in state.items.values() {
-            // Sum up file sizes
-            if let Some(size) = item.size {
-                course_size += size;
-            }
-
-            // Find most recent updated_at
-            if let Some(ref updated) = item.updated_at {
-                match &last_updated {
-                    None => last_updated = Some(updated.clone()),
-                    Some(current) => {
-                        if updated > current {
-                            last_updated = Some(updated.clone());
+                if !course.failed_items.is_empty() {
+                    println!(
+                        "  Failed downloads: {} items need retry",
+                        course.failed_items.len()
+                    );
+                    if verbose {
+                        for item in &course.failed_items {
+                            println!("    - {} (failed {} time(s))", item.key, item.error_count);
+                            if let Some(err) = &item.last_error {
+                                println!("      Error: {}", truncate_chars(err, 60));
+                            }
                         }
+                    } else {
+                        println!("      Run with --verbose to see details");
                     }
                 }
+
+                println!();
             }
-        }
 
-        // Accumulate totals
-        total_files += file_count;
-        total_storage += course_size;
-
-        info!(
-            course = course_name,
-            items = file_count,
-            size = course_size,
-            "loaded course state"
-        );
-
-        // Display course statistics
-        println!("Course: {}", course_name);
-        println!("  Files: {}", file_count);
-        println!("  Storage: {}", format_bytes(course_size));
-        if let Some(timestamp) = last_updated {
-            println!("  Last sync: {}", timestamp);
-        } else {
-            println!("  Last sync: Never");
-        }
-
-        // Display failed downloads if any
-        if !failed_items.is_empty() {
+            println!("─────────────────────────────");
             println!(
-                "  Failed downloads: {} items need retry",
-                failed_items.len()
+                "Total: {} courses, {} files, {}",
+                summary.courses.len(),
+                summary.total_files,
+                format_bytes(summary.total_storage)
             );
-            if verbose {
-                for (key, item) in &failed_items {
-                    let attempts = item.error_count.unwrap_or(1);
-                    println!("    - {} (failed {} time(s))", key, attempts);
-                    if let Some(err) = &item.last_error {
-                        println!("      Error: {}", truncate_chars(err, 60));
-                    }
-                }
-            } else {
-                println!("      Run with --verbose to see details");
-            }
+            println!();
+            println!("Tip: Run 'u_crawler sync --dry-run' to check for remote changes");
         }
-
-        println!();
     }
-
-    // Display totals summary
-    println!("─────────────────────────────");
-    println!(
-        "Total: {} courses, {} files, {}",
-        course_dirs.len(),
-        total_files,
-        format_bytes(total_storage)
-    );
-    println!();
-    println!("Tip: Run 'u_crawler sync --dry-run' to check for remote changes");
 
     Ok(())
 }
