@@ -18,7 +18,7 @@ recordings that session can reach.
 * **Idempotent & resumable:** `Range` requests, `.part` files, ETag validation,
   atomic rename on finalize. A `200` in reply to a `Range` request means the
   server ignored it, and the partial file must be truncated rather than
-  appended to — `download.rs` handles this; anything reimplementing it must.
+  appended to — `core/transfer.rs` owns this; nothing reimplements it.
 * **Deterministic structure:** stable, sanitized, ASCII-transliterated paths.
 * **`--dry-run` writes nothing and launches nothing.** It must not start a
   browser, perform SSO, or download.
@@ -49,9 +49,9 @@ recordings that session can reach.
   `base64`, `futures`). `cargo build --no-default-features` drops all of
   these and needs neither network+git for `chromiumoxide` nor a browser —
   see "Building without Zoom" below.
+* **Process:** `tokio::process::Command` (only to execute `canvas.token_cmd` via `sh -lc`)
 * **Errors:** `thiserror` for typed module errors, `anyhow` for orchestration
 * **UX:** `indicatif`
-* **Process:** `tokio::process` (for `ffmpeg`)
 
 ---
 
@@ -71,7 +71,7 @@ recordings that session can reach.
 * **No `#[allow(clippy::...)]`** without a comment justifying it. There are
   currently none in the crate; adding one is a design signal, not a fix.
 * **Tests:** `cargo test`. Prefer pure functions that can be tested without a
-  network or a browser — that is why `links`, `download`, `zoom::app_conf` and
+  network or a browser — that is why `canvas::links`, `canvas::download`, `zoom::app_conf` and
   `zoom::sso` are separate from the flows that call them.
 
 ---
@@ -136,6 +136,10 @@ mounted-first trap in `main.rs`.
 `sync` honours `[announcements].enabled` and `[zoom].enabled`; either can be
 turned off without touching the command line.
 
+Every command picks its courses with the same function
+(`canvas::course::select_courses`): an explicit `--course-id` wins, ignored or
+not; without it, `canvas.ignored_courses` are dropped.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -183,7 +187,6 @@ caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns ex
 
 [zoom]
 enabled = true
-ffmpeg_path = "ffmpeg"
 user_agent = "Mozilla/5.0 ..."
 external_tool_id = 187       # the Canvas external tool id for Zoom
 ```
@@ -217,7 +220,7 @@ documented as working is worse than no configuration.
 ```
 
 There is no week-folding. Names are sanitized and transliterated to ASCII by
-`fsutil::sanitize_component`.
+`core::fsutil::sanitize_component`.
 
 ### Directory Layout (Calendar)
 
@@ -231,7 +234,7 @@ There is no week-folding. Names are sanitized and transliterated to ASCII by
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`fsutil::course_dir`). `deadlines/` and `windows/` are sibling directories
+(`canvas::course::course_dir`). `deadlines/` and `windows/` are sibling directories
 per course × semantics (spec D4), so a client can subscribe to one without
 the other; a third directory for recurring-class semantics has room to land
 later without moving anything under either. Filenames and UIDs derive from
@@ -311,41 +314,61 @@ cron, where nobody would notice until the data was gone.
 
 ```
 src/
-  main.rs           # CLI parsing, command dispatch, all user-facing printing
-  lib.rs            # module docs and the layer map
-  config.rs         # load/validate/expand config
-  http.rs           # the one client: rate limiting, 429/5xx retry, Link parsing
-  canvas.rs         # Canvas REST client (get_json / list_paginated)
-  download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
-  state.rs          # per-course State, ItemState, record_error
-  links.rs          # HTML -> links, media refs, zoom URLs
-  syncer.rs         # CourseSync / ModuleCtx: the main sync flow
-  announcements.rs  # AnnouncementSync
-  calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
-  recordings.rs     # zoom-link discovery report
-  fsutil.rs         # sanitization, atomic write/rename
-  ffmpeg.rs         # ffmpeg invocation
-  progress.rs       # progress bars, registered with ui::bars()
-  ui.rs             # user-facing output channel (status! macro)
-  logger.rs         # log file setup, falls back to stderr
-  zoom/
-    mod.rs          # zoom_flow orchestration
-    api.rs          # Zoom recordings REST client
-    db.rs           # SQLite session store, ZoomSession, ZoomDbError
-    models.rs       # wire types
-    headless.rs     # browser driving and CDP interception
-    sso.rs          # Canvas -> Microsoft -> Zoom login, free functions over a Page
-    app_conf.rs     # pure parser for Zoom's window.appConf blob
-    download.rs     # HTTP fallback when ffmpeg cannot fetch a recording
+  src/main.rs           # CLI parsing, command dispatch, all user-facing printing
+  src/app.rs            # top-level orchestrator: one config load, the per-course loop, each flow in turn
+  src/lib.rs            # module docs and the layer map
+  src/core/
+    src/core/mod.rs          # folder docs
+    src/core/config.rs       # load/validate/expand config
+    src/core/http.rs         # the one client: rate limiting, 429/5xx retry, Link parsing
+    src/core/transfer.rs     # the one transfer: .part, Range resume, atomic rename
+    src/core/state.rs        # per-course State, ItemState, record_error, content_hash
+    src/core/fsutil.rs       # sanitization, atomic write/rename, remove_file_if_exists
+    src/core/logger.rs       # log file setup, falls back to stderr
+  src/ui/
+    src/ui/mod.rs          # user-facing output channel (status! macro)
+    src/ui/progress.rs     # progress bars, registered with ui::bars()
+  src/canvas/
+    src/canvas/mod.rs          # re-exports: client::CanvasClient, models::*
+    src/canvas/models.rs       # Canvas wire types (Course, Module, Assignment, ...)
+    src/canvas/client.rs       # Canvas REST client (get_json / list_paginated)
+    src/canvas/course.rs       # course_dir: the per-course on-disk directory name; state_path: its state.json; select_courses: the one course-selection rule
+    src/canvas/download.rs     # Canvas files: ETag + state on top of core::transfer; fetch_or_record / download_or_record / fetch_and_download turn failures into recorded state, not propagated errors
+    src/canvas/links.rs        # HTML -> links, media refs, zoom URLs, Canvas file ids
+    src/canvas/sync.rs         # sync_course (CourseSync / ModuleCtx): one course's modules, pages, assignments and files
+    src/canvas/status.rs       # status report: aggregates per-course state.json into StatusReport
+    src/canvas/announcements.rs  # AnnouncementSync
+    src/canvas/calendar/       # calendar-sync: pure deadline planner (plan.rs) + its I/O executor (exec.rs)
+      src/canvas/calendar/mod.rs        # module doc, the plan types (Plan/PlannedWrite/PlannedDelete), re-exports
+      src/canvas/calendar/identity.rs   # dirs, UIDs, filenames, state-key prefixes and builders
+      src/canvas/calendar/ics.rs        # iCalendar primitives shared by both renderers (escaping, folding)
+      src/canvas/calendar/vtodo.rs      # the deadline VTODO renderer
+      src/canvas/calendar/vevent.rs     # the availability-window VEVENT renderer (frozen bytes)
+      src/canvas/calendar/plan.rs       # the pure planner: plan, plan_for_course
+      src/canvas/calendar/exec.rs       # course selection, run summary/outcome, the executor
+      src/canvas/calendar/test_support.rs  # shared test fixtures
+    src/canvas/recordings.rs   # zoom-link discovery report
+  src/zoom/
+    src/zoom/mod.rs          # zoom_flow orchestration
+    src/zoom/api.rs          # Zoom recordings REST client
+    src/zoom/db.rs           # SQLite session store, ZoomSession, ZoomDbError
+    src/zoom/models.rs       # wire types
+    src/zoom/headless.rs     # browser driving and CDP interception
+    src/zoom/sso.rs          # Canvas -> Microsoft -> Zoom login, free functions over a Page
+    src/zoom/app_conf.rs     # pure parser for Zoom's window.appConf blob
+    src/zoom/download.rs     # media client + replay request headers for recording downloads
 ```
 
 Rules that hold today and should keep holding:
 
 * **All HTTP goes through `HttpCtx`.** It is the only place rate limiting and
-  retries live. A raw `reqwest::Client::send()` outside `http.rs` is a bug.
-* **All Canvas file downloads go through `download::download_if_needed`,** under
-  one state-key namespace (`file:{id}`), so a file reachable from both a module
-  and an announcement is fetched once.
+  retries live. A raw `reqwest::Client::send()` outside `core/http.rs` is a bug.
+* **All file transfers go through `core::transfer::fetch_resumable`.** The
+  caller picks the `.part` naming; the resume policy (append on `206`,
+  truncate on `200`) is not reimplemented.
+* **All Canvas file downloads go through `canvas::download::download_if_needed`,**
+  under one state-key namespace (`file:{id}`), so a file reachable from both a
+  module and an announcement is fetched once.
 * **All Canvas list endpoints go through `CanvasClient::list_paginated`.**
 * **`zoom::sso` must not touch the database or the course id.** It takes a page
   and credentials. That is what makes it testable.
@@ -378,10 +401,10 @@ Rules that hold today and should keep holding:
    identifiers, and the cookies are harvested and stored.
 3. `api.rs` lists meetings and their recording files.
 4. `headless.rs` visits each play URL, captures the short-lived asset request
-   headers, and downloads via `ffmpeg` (stream copy), falling back to a plain
-   HTTP download when ffmpeg fails.
-
-`ffmpeg` must be present; `zoom.ffmpeg_path` points at it.
+   headers, and downloads over plain HTTP through `core::transfer` — resumable
+   off the `.mp4.part` sidecar, on the flow's one media `HttpCtx`, which is
+   built without a total request timeout so a large recording is not killed
+   mid-stream.
 
 ---
 
@@ -456,7 +479,7 @@ docker run --rm -v "$PWD":/app -w /app \
 Documented so they are not rediscovered as surprises:
 
 * **`sync` aborts on a page fetch failure.** `CourseSync::sync_module` uses `?`
-  on `canvas.get_page`, and `run_sync` uses `?` on `sync_module`. A single
+  on `canvas.get_page`, and `app::run_sync` uses `?` on `sync_course`. A single
   unreadable page therefore kills the whole run, including courses not yet
   reached — while an unreadable *file* is merely recorded via
   `State::record_error` and skipped. The file behaviour is the intended one;
@@ -464,15 +487,13 @@ Documented so they are not rediscovered as surprises:
   **not** share this edge: a course whose assignment fetch fails is logged and
   skipped, the rest of the run continues, and the run reports exit code `13`
   if the failure was partial (spec ticket 11).
-* **The `URL` value is escaped as if it were `TEXT`.** `calendar.rs` runs
-  `escape_text` over the `html_url` for both components, but RFC 5545 §3.8.4.6
+* **The `URL` value is escaped as if it were `TEXT`.** `canvas/calendar/ics.rs`'s
+  `escape_text` runs over the `html_url` for both components, but RFC 5545 §3.8.4.6
   types `URL` as `URI`, which takes no backslash escaping — so a Canvas URL
   containing a comma would be emitted wrong. No observed Canvas URL has one,
   `caldir` preserves the value verbatim and never sends it to Google anyway,
   and the function is shared with the frozen `windows` `VEVENT`. Known debt,
   deliberately unfixed; fixing it means touching `VEVENT` bytes.
-* **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
-  `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
   course listing which prints each entry.
 
@@ -483,11 +504,12 @@ Documented so they are not rediscovered as surprises:
 Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
-byte-size formatting, char-safe truncation, and Zoom cookie expiry.
+byte-size formatting, char-safe truncation, Zoom cookie expiry, course-selection
+rules, course-directory sanitization, and mock-server tests for `Range` resume
+(`core::transfer`) and Canvas download failure-recording (`canvas::download`).
 
 Worth adding: a mock-server integration test covering pagination across three
-pages, ETag skip, and `Range` resume — `tests/` currently only covers the Zoom
-database.
+pages and ETag skip — `tests/` currently only covers the Zoom database.
 
 ---
 
@@ -495,7 +517,7 @@ database.
 
 * Never print or log tokens, cookies, the `lti_scid`, or the SSO password.
 * `sso_password` sits in cleartext in `config.toml`. The file is written
-  atomically and chmod'd `0600` on Unix (`config::save_config_to_path`), but
+  atomically and chmod'd `0600` on Unix (`core::config::save_config_to_path`), but
   cleartext is still cleartext — an `sso_password_cmd` mirroring `token_cmd`
   would be the right fix.
 * Retrieve the Canvas PAT via `token_cmd` (`pass`, `gopass`) where possible.

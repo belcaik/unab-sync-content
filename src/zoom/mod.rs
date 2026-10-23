@@ -6,24 +6,36 @@ pub mod headless;
 pub mod models;
 pub mod sso;
 
-use crate::config::ConfigPaths;
-use crate::progress::progress_bar;
+use crate::core::config::{Config, ConfigPaths};
+use crate::core::http::HttpCtx;
 use crate::status;
+use crate::ui::progress::progress_bar;
 use api::ZoomClient;
 use db::ZoomDb;
 use headless::ZoomHeadless;
 use models::{RecordingSummary, ZoomRecordingFile};
 use tracing::info;
 
-pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<()> {
-    let cfg = crate::config::Config::load_or_init()?;
+/// The loggable part of `url`: everything before the query string.
+///
+/// SSO redirects carry OAuth `code=` parameters and replay assets carry signed
+/// tokens in the query, so a URL is never logged whole.
+pub(crate) fn redact_url(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(base, _)| base)
+}
+
+pub async fn zoom_flow(cfg: &Config, course_id: u64, since: Option<String>) -> anyhow::Result<()> {
     let paths = ConfigPaths::new()?;
     let db = ZoomDb::new(&paths.config_dir)?;
 
     status!("Starting Zoom flow for course {}", course_id);
 
+    // One media context for the whole flow: paced and retried by HttpCtx, but
+    // built without a total request timeout so a large recording can stream.
+    let media_http = HttpCtx::new(cfg, download::build_media_client()?);
+
     // 1. Reuse the stored session if it is complete and still accepted.
-    let headless = ZoomHeadless::new(&cfg, &db, course_id);
+    let headless = ZoomHeadless::new(cfg, &db, course_id, media_http);
     let stored = db.load_session(course_id)?;
 
     info!(
@@ -35,7 +47,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     let mut valid_session = false;
     if stored.is_some() {
         status!("Found existing credentials in DB. Validating...");
-        match ZoomClient::new(&cfg, &db, course_id).await {
+        match ZoomClient::new(cfg, &db, course_id).await {
             Ok(client) if client.validate_cookies().await => {
                 status!("Cookies are valid. Skipping headless capture.");
                 valid_session = true;
@@ -62,7 +74,7 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
     status!("Starting listing and download for course {}", course_id);
 
     // 2. List recordings using captured credentials
-    let client = ZoomClient::new(&cfg, &db, course_id).await?;
+    let client = ZoomClient::new(cfg, &db, course_id).await?;
 
     let listing = client.list_recordings(since.as_deref()).await?;
     db.save_meetings(course_id, &listing)?;
@@ -129,4 +141,22 @@ pub async fn zoom_flow(course_id: u64, since: Option<String>) -> anyhow::Result<
 
     status!("All recordings processed!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url;
+
+    #[test]
+    fn redact_url_drops_the_query() {
+        assert_eq!(
+            redact_url("https://zoom.us/rec/a.mp4?token=secret&x=1"),
+            "https://zoom.us/rec/a.mp4"
+        );
+    }
+
+    #[test]
+    fn redact_url_keeps_a_url_without_query() {
+        assert_eq!(redact_url("https://zoom.us/rec"), "https://zoom.us/rec");
+    }
 }

@@ -1,4 +1,4 @@
-use crate::config::{Config, ConfigPaths};
+use crate::core::config::{Config, ConfigPaths};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};

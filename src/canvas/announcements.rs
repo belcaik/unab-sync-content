@@ -1,15 +1,14 @@
+use crate::canvas::course::{course_dir, select_courses, state_path};
+use crate::canvas::download::{download_or_record, fetch_and_download, preferred_name, Dest};
+use crate::canvas::links::{classify_by_filename, extract_links, MediaRef};
 use crate::canvas::{Announcement, CanvasClient, FileObj};
-use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{atomic_write, course_dir, ensure_dir, sanitize_component};
-use crate::http::{build_http_client, HttpCtx};
-use crate::links::{classify_by_filename, extract_links, MediaRef};
-use crate::progress::{progress_bar, spinner};
-use crate::state::{ItemState, State};
+use crate::core::config::Config;
+use crate::core::fsutil::{atomic_write, ensure_dir, sanitize_component};
+use crate::core::state::{ItemState, State};
 use crate::status;
+use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -26,22 +25,15 @@ pub struct AnnouncementRecord {
     pub zoom_links: Vec<String>,
 }
 
-pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyhow::Result<()> {
-    let cfg = Config::load_or_init()?;
-    let http = build_http_client(&cfg);
-    let httpctx = HttpCtx::new(&cfg, http);
-    let canvas = CanvasClient::from_config().await?;
+pub async fn run_discovery(
+    cfg: &Config,
+    filter_course_id: Option<u64>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let canvas = CanvasClient::new(cfg).await?;
 
     let courses = canvas.list_courses().await?;
-    let ignored: HashSet<String> = cfg.canvas.ignored_courses.iter().cloned().collect();
-    let selected: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
-        courses.into_iter().filter(|c| c.id == cid).collect()
-    } else {
-        courses
-            .into_iter()
-            .filter(|c| !ignored.contains(&c.id.to_string()))
-            .collect()
-    };
+    let selected = select_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 
     if selected.is_empty() {
         status!("No matching courses.");
@@ -57,24 +49,16 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
         if !dry_run {
             ensure_dir(&course_dir).await?;
         }
-        let state_path = course_dir.join("state.json");
+        let state_path = state_path(&course_dir);
         let mut state = State::load(&state_path).await;
 
-        let summary = AnnouncementSync::new(
-            &cfg,
-            &canvas,
-            &httpctx,
-            course.id,
-            &course_dir,
-            dry_run,
-            false,
-        )
-        .run(&course.name, &mut state)
-        .await
-        .unwrap_or_else(|e| {
-            warn!(course_id = course.id, error = %e, "announcements failed for course");
-            CourseSummary::default()
-        });
+        let summary = AnnouncementSync::new(cfg, &canvas, course.id, &course_dir, dry_run, false)
+            .run(&course.name, &mut state)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(course_id = course.id, error = %e, "announcements failed for course");
+                CourseSummary::default()
+            });
         totals += summary;
 
         if !dry_run {
@@ -116,7 +100,6 @@ impl std::ops::AddAssign for CourseSummary {
 pub struct AnnouncementSync<'a> {
     cfg: &'a Config,
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_id: u64,
     ann_dir: PathBuf,
     media_dir: PathBuf,
@@ -128,7 +111,6 @@ impl<'a> AnnouncementSync<'a> {
     pub fn new(
         cfg: &'a Config,
         canvas: &'a CanvasClient,
-        httpctx: &'a HttpCtx,
         course_id: u64,
         course_dir: &Path,
         dry_run: bool,
@@ -139,7 +121,6 @@ impl<'a> AnnouncementSync<'a> {
         Self {
             cfg,
             canvas,
-            httpctx,
             course_id,
             ann_dir,
             media_dir,
@@ -161,27 +142,21 @@ impl<'a> AnnouncementSync<'a> {
 
     /// Downloads one Canvas-hosted file, returning its course-relative path.
     ///
-    /// A failure is logged and yields `None`: one missing attachment must not
-    /// abandon the announcement it came from.
+    /// A failure is recorded and yields `None` (see
+    /// [`download_or_record`]): one missing attachment must not abandon the
+    /// announcement it came from.
     async fn fetch_media(&self, file: &FileObj, state: &mut State) -> Option<String> {
-        match download_if_needed(
-            self.httpctx,
+        download_or_record(
+            &self.canvas.http,
             file,
             Dest::InDir {
                 dir: &self.media_dir,
-                name: &media_name(file),
+                name: &preferred_name(file),
             },
             state,
         )
         .await
-        {
-            Ok(path) => Self::relative_media_path(&path),
-            Err(e) => {
-                warn!(course_id = self.course_id, file_id = file.id, error = %e, "media download failed");
-                state.record_error(crate::download::state_key(file.id), &e);
-                None
-            }
-        }
+        .and_then(|path| Self::relative_media_path(&path))
     }
 
     /// Resolves the media referenced in an announcement body, downloading the
@@ -194,13 +169,9 @@ impl<'a> AnnouncementSync<'a> {
         let mut out = Vec::with_capacity(refs.len());
         for mut m in refs {
             if let (true, Some(fid)) = (self.downloads_media(), m.file_id) {
-                match self.canvas.get_file(fid).await {
-                    Ok(f) => m.local_path = self.fetch_media(&f, state).await,
-                    Err(e) => {
-                        warn!(course_id = self.course_id, file_id = fid, error = %e, "media metadata fetch failed");
-                        state.record_error(crate::download::state_key(fid), &e);
-                    }
-                }
+                m.local_path = fetch_and_download(self.canvas, fid, &self.media_dir, state)
+                    .await
+                    .and_then(|path| Self::relative_media_path(&path));
             }
             out.push(m);
         }
@@ -396,15 +367,4 @@ impl<'a> AnnouncementSync<'a> {
         }
         Ok(totals)
     }
-}
-
-/// The preferred on-disk name for an announcement's media file.
-///
-/// The extension may be absent here; the downloader derives one from the
-/// response `Content-Type` when it is.
-fn media_name(f: &FileObj) -> String {
-    f.display_name
-        .clone()
-        .or_else(|| f.filename.clone())
-        .unwrap_or_else(|| format!("file_{}", f.id))
 }

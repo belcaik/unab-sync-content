@@ -52,7 +52,6 @@ so `max_rps` and `concurrency` apply to everything.
 |---|---|
 | Rust 1.70+ | Only to build from source. |
 | Git | Only with the default `zoom` feature: `chromiumoxide` is fetched from a Git repository at build time, so that build needs network and `git`. `cargo build --no-default-features` needs neither — see [Building without Zoom](#building-without-zoom). |
-| ffmpeg | Required for Zoom recordings. Not needed if `zoom.enabled = false`, or if built with `--no-default-features`. |
 | Chrome or Chromium | Launched automatically for the Zoom login. You do not start it yourself. Not needed at all with `--no-default-features`. |
 
 Linux and macOS are the primary targets; the release workflow also builds for
@@ -90,8 +89,8 @@ build and run fully without it:
 cargo build --release --no-default-features
 ```
 
-This build needs neither `git` (to resolve `chromiumoxide`) nor Chrome/Chromium
-nor `ffmpeg`, and produces a smaller binary — the intended build for a
+This build needs neither `git` (to resolve `chromiumoxide`) nor Chrome/Chromium,
+and produces a smaller binary — the intended build for a
 cron/calendar-only deployment. `sync` still runs, but silently skips the Zoom
 stage; `zoom flow` still parses as a command but exits with a clear error
 telling you this build does not include it, instead of failing at compile time
@@ -341,7 +340,6 @@ caldir_root = "~/Documents/Caldir"  # root of the caldir tree; `~` is expanded
 
 [zoom]
 enabled = true          # false skips Zoom entirely during `sync`
-ffmpeg_path = "ffmpeg"  # or an absolute path
 user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ..."
 external_tool_id = 187  # the Zoom LTI tool id in your Canvas
 ```
@@ -353,7 +351,6 @@ Loading fails, listing the offending keys, if:
 - `download_root` is empty
 - `canvas.base_url` is empty or still contains the `<tenant>` placeholder
 - both `canvas.token` and `canvas.token_cmd` are empty
-- `zoom.enabled` is true and `zoom.ffmpeg_path` is empty
 
 ### Finding `external_tool_id`
 
@@ -615,17 +612,11 @@ your behalf.
    and headers, then downloaded immediately — those URLs expire quickly, which
    is why recordings are processed one at a time rather than in parallel.
 
-Downloads use `ffmpeg` in stream-copy mode:
-
-```
-ffmpeg -y -loglevel error -hide_banner \
-  -headers "<captured headers>" \
-  -i "<asset url>" \
-  -c copy -map 0 -movflags +faststart "<dest>.mp4"
-```
-
-If `ffmpeg` fails, a plain HTTP download is attempted as a fallback. Recordings
-already present on disk are skipped without re-visiting them.
+Downloads are plain HTTP GETs of the captured asset URL, replaying the captured
+request headers, through the same resumable transfer Canvas files use: an
+interrupted download resumes from its `.mp4.part` sidecar with a `Range`
+request, appending only when the server answers `206`. Recordings already
+present on disk are skipped without re-visiting them.
 
 `sync` runs this same flow per course, unless `--dry-run` is set or
 `zoom.enabled` is false.
@@ -682,8 +673,8 @@ matches your Canvas, and that Chrome or Chromium is installed. Then set
 `logging.level = "debug"` and read the log file to see which step stopped.
 
 **Recordings are listed but fail to download.**
-Confirm `ffmpeg -version` works. Asset URLs are short-lived; if a batch times
-out, re-run — already-downloaded recordings are skipped.
+Asset URLs are short-lived; if a batch times out, re-run — already-downloaded
+recordings are skipped and partial ones resume.
 
 **Some files fail every run.**
 `u_crawler status --verbose` lists them with their errors. Re-running retries
@@ -720,7 +711,7 @@ configurations too — see `.github/workflows/ci.yml`). `Cargo.toml` carries a
 holds to. Some worth knowing before changing anything:
 
 - All HTTP goes through `HttpCtx`. A raw `reqwest::Client::send()` outside
-  `src/http.rs` bypasses rate limiting and retries.
+  `src/core/http.rs` bypasses rate limiting and retries.
 - All Canvas file downloads go through `download::download_if_needed`, under
   one state-key namespace, so a file is never fetched twice.
 - Nothing outside `main.rs` writes to stdout. Library code emits `tracing`

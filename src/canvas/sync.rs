@@ -1,193 +1,73 @@
-use crate::canvas::{Assignment, CanvasClient, Module};
-use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
-use crate::fsutil::{
-    atomic_write, course_dir, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
+use crate::canvas::download::{download_or_record, fetch_or_record, preferred_name, Dest};
+use crate::canvas::links::canvas_file_ids;
+use crate::canvas::{Assignment, CanvasClient, Course, Module};
+use crate::core::fsutil::{
+    atomic_write, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
-use crate::http::{build_http_client, HttpCtx};
-use crate::progress::{progress_bar, spinner};
-use crate::state::{ItemState, State};
-use crate::status;
+use crate::core::state::{content_hash, ItemState, State};
+use crate::ui::progress::{progress_bar, spinner};
 use html2md::parse_html;
 use regex::Regex;
-use sha1::{Digest, Sha1};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::{info, warn};
+use tracing::info;
+use tracing::{info_span, Instrument};
 
-pub async fn run_sync(
-    filter_course_id: Option<u64>,
+/// Mirrors one course's modules: pages, assignments, and every file they link
+/// to. The per-course orchestration around it (course directory, `state.json`,
+/// and the other flows) lives in [`crate::app::run_sync`].
+pub async fn sync_course(
+    canvas: &CanvasClient,
+    course_dir: &Path,
+    course: &Course,
+    state: &mut State,
     dry_run: bool,
     verbose: bool,
-) -> anyhow::Result<()> {
-    let cfg = Config::load_or_init()?;
-
-    let http = build_http_client(&cfg);
-    let httpctx = HttpCtx::new(&cfg, http);
-    let canvas = CanvasClient::from_config().await?;
-
-    let courses = canvas.list_courses().await?;
-    let ignored: std::collections::HashSet<String> =
-        cfg.canvas.ignored_courses.iter().cloned().collect();
-
-    let selected_courses: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
-        if ignored.contains(&cid.to_string()) {
-            tracing::info!(course_id = cid, "skipping ignored course");
-            return Ok(());
-        }
-        let sel = courses
-            .into_iter()
-            .filter(move |c| c.id == cid)
-            .collect::<Vec<_>>();
-        if sel.is_empty() {
-            tracing::warn!(
-                course_id = cid,
-                "course not found in active list; nothing to sync"
-            );
-            return Ok(());
-        }
-        sel
-    } else {
-        courses
-            .into_iter()
-            .filter(move |c| !ignored.contains(&c.id.to_string()))
-            .collect()
+) -> anyhow::Result<SyncCounts> {
+    let modules_spinner = spinner(&format!("Loading modules for {}", course.name));
+    let modules = canvas.list_modules_with_items(course.id).await?;
+    modules_spinner.finish_and_clear();
+    // Preload assignments to avoid per-item fetch; map by id
+    let assignments_spinner = spinner(&format!("Loading assignments for {}", course.name));
+    let assignments_list = canvas.list_assignments(course.id).await.unwrap_or_default();
+    assignments_spinner.finish_and_clear();
+    let assignments: std::collections::HashMap<u64, Assignment> =
+        assignments_list.into_iter().map(|a| (a.id, a)).collect();
+    let course_sync = CourseSync {
+        canvas,
+        course_dir,
+        course_id: course.id,
+        dry_run,
+        verbose,
     };
-
-    let course_progress = progress_bar(selected_courses.len() as u64, "Syncing courses");
-
+    let module_progress =
+        progress_bar(modules.len() as u64, &format!("Modules in {}", course.name));
     let mut totals = SyncCounts::default();
-    for c in selected_courses {
-        course_progress.inc(1);
-        course_progress.set_message(format!("Syncing course {}", c.id));
-        let course_dir = course_dir(Path::new(&cfg.download_root), &c);
-        if !dry_run {
-            ensure_dir(&course_dir).await?;
-        }
-        info!(course_id = c.id, path = %course_dir.display(), "sync course");
-
-        // Load course state
-        let state_path = course_dir.join("state.json");
-        let mut state = State::load(&state_path).await;
-
-        let modules_spinner = spinner(&format!("Loading modules for {}", c.name));
-        let modules = canvas.list_modules_with_items(c.id).await?;
-        modules_spinner.finish_and_clear();
-        // Preload assignments to avoid per-item fetch; map by id
-        let assignments_spinner = spinner(&format!("Loading assignments for {}", c.name));
-        let assignments_list = canvas.list_assignments(c.id).await.unwrap_or_default();
-        assignments_spinner.finish_and_clear();
-        let assignments: std::collections::HashMap<u64, Assignment> =
-            assignments_list.into_iter().map(|a| (a.id, a)).collect();
-        let course_sync = CourseSync {
-            canvas: &canvas,
-            httpctx: &httpctx,
-            course_dir: &course_dir,
-            course_id: c.id,
-            dry_run,
-            verbose,
-        };
-        let module_progress = progress_bar(modules.len() as u64, &format!("Modules in {}", c.name));
-        for m in modules {
-            module_progress.inc(1);
-            module_progress.set_message(format!("Course {} module {}", c.id, m.id));
-            let counts = course_sync
-                .sync_module(&m, &assignments, &mut state)
-                .await?;
-            totals += counts;
-            if dry_run && (counts.pages > 0 || counts.files > 0) {
-                module_progress.println(format!(
-                    "DRY-RUN module {} -> pages: {}, files: {}",
-                    m.id, counts.pages, counts.files
-                ));
-            }
-        }
-        module_progress.finish_and_clear();
-
-        // Sync announcements for this course
-        if cfg.announcements.enabled {
-            match crate::announcements::AnnouncementSync::new(
-                &cfg,
-                &canvas,
-                &httpctx,
-                c.id,
-                &course_dir,
-                dry_run,
-                verbose,
-            )
-            .run(&c.name, &mut state)
-            .await
-            {
-                Ok(s) => {
-                    if dry_run && s.announcements > 0 {
-                        status!(
-                            "DRY-RUN announcements for course {}: {} (links: {}, media: {})",
-                            c.id,
-                            s.announcements,
-                            s.links,
-                            s.media
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(course_id = c.id, error = %e, "announcements failed for course");
-                }
-            }
-        }
-
-        // Sync Zoom recordings for this course.
-        //
-        // The Zoom flow launches a browser, performs an interactive SSO and downloads
-        // video, so it must not run under --dry-run, and it must honour zoom.enabled.
-        // It is only compiled in when the `zoom` feature is enabled (see AGENTS.md).
-        #[cfg(feature = "zoom")]
-        {
-            if !cfg.zoom.enabled {
-                info!(course_id = c.id, "zoom disabled in config; skipping");
-            } else if dry_run {
-                status!("DRY-RUN: would sync Zoom recordings for course {}", c.id);
-            } else {
-                status!("Starting Zoom sync for course {}...", c.id);
-                match crate::zoom::zoom_flow(c.id, None).await {
-                    Ok(()) => {
-                        status!("✓ Zoom sync completed for course {}", c.id);
-                    }
-                    Err(e) => {
-                        warn!(course_id = c.id, error = %e, "zoom flow failed for course");
-                        // Continue with other courses even if Zoom fails
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "zoom"))]
-        {
-            info!(
-                course_id = c.id,
-                "zoom feature not compiled into this build; skipping"
-            );
-        }
-
-        if !dry_run {
-            state.save(&state_path).await?;
+    for m in modules {
+        module_progress.inc(1);
+        module_progress.set_message(format!("Course {} module {}", course.id, m.id));
+        let counts = course_sync
+            .sync_module(&m, &assignments, state)
+            .instrument(info_span!("module", module_id = m.id))
+            .await?;
+        totals += counts;
+        if dry_run && (counts.pages > 0 || counts.files > 0) {
+            module_progress.println(format!(
+                "DRY-RUN module {} -> pages: {}, files: {}",
+                m.id, counts.pages, counts.files
+            ));
         }
     }
-    course_progress.finish_and_clear();
-    if dry_run {
-        status!(
-            "DRY-RUN summary: pages to write: {}, files to download: {}",
-            totals.pages,
-            totals.files
-        );
-    }
-    Ok(())
+    module_progress.finish_and_clear();
+    Ok(totals)
 }
 
 /// Number of items a module sync wrote, or would write under `--dry-run`.
 #[derive(Debug, Default, Clone, Copy)]
-struct SyncCounts {
-    pages: usize,
-    files: usize,
+pub struct SyncCounts {
+    pub pages: usize,
+    pub files: usize,
 }
 
 impl std::ops::AddAssign for SyncCounts {
@@ -203,7 +83,6 @@ impl std::ops::AddAssign for SyncCounts {
 /// so `processed` is owned in one place rather than threaded through each arm.
 struct ModuleCtx<'a> {
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_id: u64,
     module_id: u64,
     module_dir: PathBuf,
@@ -225,26 +104,16 @@ impl ModuleCtx<'_> {
             return Ok(0);
         }
         let (course_id, module_id) = (self.course_id, self.module_id);
-        let key = crate::download::state_key(file_id);
+        let key = crate::canvas::download::state_key(file_id);
 
-        let f = match self.canvas.get_file(file_id).await {
-            Ok(f) => f,
-            Err(e) => {
-                warn!(course_id, module_id, file_id, error = %e, "unable to fetch file metadata");
-                state.record_error(key, &e);
-                return Ok(0);
-            }
+        let Some(f) = fetch_or_record(self.canvas, file_id, state).await else {
+            return Ok(0);
         };
 
-        let name = f
-            .display_name
-            .clone()
-            .or_else(|| f.filename.clone())
-            .unwrap_or_else(|| format!("file_{file_id}"));
         let dest = self
             .module_dir
             .join("Attachments")
-            .join(sanitize_filename_preserve_ext(&name));
+            .join(sanitize_filename_preserve_ext(preferred_name(&f)));
         let ext = dest
             .extension()
             .and_then(|s| s.to_str())
@@ -262,16 +131,12 @@ impl ModuleCtx<'_> {
         if let Some(parent) = dest.parent() {
             ensure_dir(parent).await?;
         }
-        match download_if_needed(self.httpctx, &f, Dest::Exact(&dest), state).await {
-            Ok(_) => {
+        match download_or_record(&self.canvas.http, &f, Dest::Exact(&dest), state).await {
+            Some(_) => {
                 info!(course_id, module_id, file_id, path = %dest.display(), file_ext = ext, "downloaded file");
                 Ok(1)
             }
-            Err(e) => {
-                warn!(course_id, module_id, file_id, error = %e, "download failed");
-                state.record_error(key, &e);
-                Ok(0)
-            }
+            None => Ok(0),
         }
     }
 
@@ -287,7 +152,7 @@ impl ModuleCtx<'_> {
         what: &str,
     ) -> anyhow::Result<usize> {
         let (course_id, module_id) = (self.course_id, self.module_id);
-        let hash = sha1_hex(md.as_bytes());
+        let hash = content_hash(md.as_bytes());
 
         if state.get(&key).and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
             if !self.dry_run && self.verbose {
@@ -301,17 +166,7 @@ impl ModuleCtx<'_> {
         }
 
         atomic_write(dest, md.as_bytes()).await?;
-        state.set(
-            key,
-            ItemState {
-                etag: None,
-                updated_at,
-                size: Some(md.len() as u64),
-                content_hash: Some(hash),
-                last_error: None,
-                error_count: None,
-            },
-        );
+        state.set(key, ItemState::with_hash(hash, md.len() as u64, updated_at));
         info!(course_id, module_id, path = %dest.display(), what, "wrote markdown");
         Ok(1)
     }
@@ -320,7 +175,6 @@ impl ModuleCtx<'_> {
 /// One course's sync settings, shared by every module in it.
 struct CourseSync<'a> {
     canvas: &'a CanvasClient,
-    httpctx: &'a HttpCtx,
     course_dir: &'a Path,
     course_id: u64,
     dry_run: bool,
@@ -351,7 +205,6 @@ impl CourseSync<'_> {
 
         let mut ctx = ModuleCtx {
             canvas,
-            httpctx: self.httpctx,
             course_id,
             module_id: m.id,
             module_dir,
@@ -397,7 +250,7 @@ impl CourseSync<'_> {
                     )
                     .await?;
 
-                for fid in discover_file_ids(&html) {
+                for fid in canvas_file_ids(&html) {
                     counts.files += ctx.sync_file(fid, state).await?;
                 }
                 continue;
@@ -435,7 +288,7 @@ impl CourseSync<'_> {
                                 )
                                 .await?;
 
-                            let file_ids = discover_file_ids(&html);
+                            let file_ids = canvas_file_ids(&html);
                             for fid in file_ids {
                                 counts.files += ctx.sync_file(fid, state).await?;
                             }
@@ -449,27 +302,9 @@ impl CourseSync<'_> {
     }
 }
 
-fn sha1_hex(data: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
-}
-
-/// Matches `/files/12345` or `/api/v1/files/12345` in an absolute or relative URL.
-static FILE_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:/api/v1)?/files/(\d+)").unwrap());
-
 /// Matches `/courses/12345/pages/some-slug`, capturing course id and slug.
 static COURSE_PAGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/courses/(\d+)/pages/([A-Za-z0-9_\-]+)").unwrap());
-
-/// Canvas file ids referenced anywhere in a body of HTML.
-fn discover_file_ids(html: &str) -> HashSet<u64> {
-    FILE_ID_RE
-        .captures_iter(html)
-        .filter_map(|c| c.get(1)?.as_str().parse::<u64>().ok())
-        .collect()
-}
 
 /// Whether `url` points at a wiki page belonging to `course_id`.
 fn is_course_page_url(url: &str, course_id: u64) -> bool {
@@ -491,14 +326,6 @@ fn extract_page_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn discover_file_ids_matches_both_api_and_plain_paths() {
-        let html = r#"<a href="/courses/1/files/22">a</a><img src="/api/v1/files/33"/>"#;
-        let ids = discover_file_ids(html);
-        assert!(ids.contains(&22));
-        assert!(ids.contains(&33));
-    }
 
     #[test]
     fn is_course_page_url_rejects_another_course() {

@@ -3,10 +3,14 @@
 //! Distinct from `tracing`, which records diagnostics for the log file. This is
 //! the channel the person running the command reads.
 //!
-//! Everything goes through the shared [`MultiProgress`] that [`crate::progress`]
-//! registers its bars with. Writing to stdout directly while a progress bar is
-//! drawing corrupts the display, which is why `println!` is not used here — nor
-//! anywhere outside `main`.
+//! Everything goes through the shared [`MultiProgress`](indicatif::MultiProgress) that
+//! [`progress`](crate::ui::progress) registers its bars with. Writing to
+//! stdout directly while a
+//! progress bar is drawing corrupts the display, which is why `println!` is
+//! not used here — nor anywhere outside `main`.
+
+/// Progress bars.
+pub mod progress;
 
 use indicatif::MultiProgress;
 use std::sync::OnceLock;

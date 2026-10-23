@@ -1,7 +1,6 @@
-use crate::canvas::Course;
 use sanitize_filename::sanitize;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn ascii_skeleton(input: &str) -> String {
     // Transliterate to ASCII, then replace any non [A-Za-z0-9_] with '_'
@@ -50,25 +49,6 @@ pub fn sanitize_component<S: AsRef<str>>(s: S) -> String {
     } else {
         final_s
     }
-}
-
-/// Derive the on-disk directory for a course, under `root`.
-///
-/// The name is combined with the course code (when present) and each
-/// component is sanitized and transliterated to ASCII via
-/// [`sanitize_component`]. A missing/empty course code falls back to the
-/// sanitized name alone.
-pub fn course_dir(root: &Path, course: &Course) -> PathBuf {
-    let code = course.course_code.clone().unwrap_or_default();
-    root.join(if code.is_empty() {
-        sanitize_component(&course.name)
-    } else {
-        format!(
-            "{}_{}",
-            sanitize_component(&course.name),
-            sanitize_component(code)
-        )
-    })
 }
 
 fn sanitize_stem(input: &str) -> String {
@@ -147,48 +127,21 @@ pub async fn atomic_rename(src: &Path, dest: &Path) -> io::Result<()> {
     tokio::fs::rename(src, dest).await
 }
 
+/// Removes `path`, returning whether a file was actually removed.
+///
+/// A `NotFound` is success (`false`): the file is already gone, which is the
+/// wanted end state.
+pub async fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::Course;
-
-    fn course(name: &str, code: Option<&str>) -> Course {
-        Course {
-            id: 1,
-            name: name.to_string(),
-            course_code: code.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn course_dir_joins_sanitized_name_and_code_under_root() {
-        let root = Path::new("/backup");
-        let c = course("Intro to CS", Some("CS101"));
-        assert_eq!(course_dir(root, &c), root.join("Intro_to_CS_CS101"));
-    }
-
-    #[test]
-    fn course_dir_falls_back_to_name_when_code_is_empty() {
-        let root = Path::new("/backup");
-        let c = course("Independent Study", Some(""));
-        assert_eq!(course_dir(root, &c), root.join("Independent_Study"));
-
-        let c_none = course("Independent Study", None);
-        assert_eq!(course_dir(root, &c_none), root.join("Independent_Study"));
-    }
-
-    #[test]
-    fn course_dir_transliterates_accents_and_strips_invalid_chars() {
-        let root = Path::new("/backup");
-        let c = course("Cálculo II: Límites/Continuidad", Some("MAT-102?"));
-        let got = course_dir(root, &c);
-        let name = got.file_name().unwrap().to_str().unwrap();
-        assert!(name.is_ascii(), "expected ascii, got {name:?}");
-        assert!(!name.contains('/'));
-        assert!(!name.contains('?'));
-        assert!(!name.contains(':'));
-        assert_eq!(got, root.join("Calculo_II_LimitesContinuidad_MAT_102"));
-    }
 
     #[test]
     fn sanitize_component_strips_path_separators() {
@@ -211,5 +164,19 @@ mod tests {
     #[test]
     fn filename_without_extension_is_left_alone() {
         assert!(!sanitize_filename_preserve_ext("README").contains('.'));
+    }
+
+    #[tokio::test]
+    async fn remove_file_if_exists_reports_whether_it_removed_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+
+        assert!(!remove_file_if_exists(&path).await.unwrap());
+
+        tokio::fs::write(&path, b"x").await.unwrap();
+        assert!(remove_file_if_exists(&path).await.unwrap());
+        assert!(!path.exists());
+        // And removing it again is success again, not an error.
+        assert!(!remove_file_if_exists(&path).await.unwrap());
     }
 }
