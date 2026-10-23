@@ -7,6 +7,8 @@
 //!   request in the crate goes through it.
 //! - [`canvas`] and [`zoom::api`] are the two REST clients.
 //! - [`download`] is the only downloader: one ETag/resume/atomic-rename policy.
+//! - [`layout`] turns course/module/item metadata into on-disk names; it is
+//!   pure, so the writers and the offline migrator agree on every path.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -28,6 +30,8 @@ pub mod ffmpeg;
 pub mod fsutil;
 /// The shared HTTP client, with rate limiting and bounded retries.
 pub mod http;
+/// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
+pub mod layout;
 /// Extraction of links and media references from Canvas HTML.
 pub mod links;
 /// Log file setup.
