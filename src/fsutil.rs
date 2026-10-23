@@ -3,7 +3,7 @@ use sanitize_filename::sanitize;
 use std::io;
 use std::path::{Path, PathBuf};
 
-fn ascii_skeleton(input: &str) -> String {
+pub(crate) fn ascii_skeleton(input: &str) -> String {
     // Transliterate to ASCII, then replace any non [A-Za-z0-9_] with '_'
     let s = deunicode::deunicode(input);
     let mut out = String::with_capacity(s.len());
