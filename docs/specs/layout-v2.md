@@ -172,3 +172,18 @@ Paralelismo: cuando T0 termina, arrancan a la vez T1, T4 y T5. T2 empieza cuando
 4. **Biblioteca real sin riesgo:** se clona el vault del NAS con hardlinks (`cp -al`, mismo FS, sin costo de espacio), se corre `u_crawler migrate --root <clon> --dry-run`, se revisa el reporte y luego se aplica sobre el clon. Hay que comprobar que el original no cambió (manifiesto de hashes antes y después) y que `find` en el clon da el mismo número de archivos.
 5. `caldir push` en modo prueba después del rename de `caldir_root`: confirmar que no hay borrados o creaciones de UID en Radicale.
 6. Solo entonces se publica la imagen Docker y se deja que el cron migre el NAS real.
+
+## Hallazgos en la biblioteca real (NAS, 2026-10-23)
+
+La biblioteca completa vive en el NAS (`baphomet:/mnt/backup/UNAB`, ext4, x86_64, 4 núcleos, **podman, sin docker**). El PC la monta por sshfs. Tiene 43 GB y 4.693 archivos, distribuidos en 22 ramos y 21 carpetas `Zoom/<id>`.
+
+1. **Hay layouts v1 de distintas épocas.** Los 7 ramos de 2025 (`202515_*`, `202525_*`) **no tienen `announcements/`**, así que su `course_id` no se puede sacar de `index.json`. La fixture (T1) tiene que incluir ramos así.
+2. **Por eso, 7 carpetas Zoom no tienen el puente `index.json`** (157107, 157429, 157965, 188678, 188933, 189530, 189943). El planificador (T2) necesita una segunda regla offline para asociarlas: hacer coincidir los tokens de los nombres de las grabaciones con los de la carpeta del ramo. El token más fuerte es el NRC (`1033`, `1226`, `2411`, `1149`, `1332`, `2173`, `2211`). Después vienen el código corto (`FMMA015`, `FMMA115`) y el nombre (`ELEMENTOS_DE_FISICA_Y_MEDICION`). Formatos reales que aparecen:
+   - `2025_06_23_202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION.mp4`
+   - `2025_06_18_Clase_FMMA015_1226_18_06_2025.mp4`
+   - `2025_10_06_Sesion_01_FMMA115_NRC_1332_0610.mp4`
+   - `2025_10_01_202525_1149_MECANICA_1.mp4`
+
+   La asociación solo se acepta cuando apunta a **un único** ramo. Si es ambigua, queda en `unresolved` y no se mueve. Con `--canvas` se puede confirmar con `GET /api/v1/courses/<id>`, que también responde para ramos inactivos. Ese endpoint no pasa por la lista de activos.
+3. **La raíz del vault es un repositorio git** (`UNAB/.git`, 12 GB, 968 archivos versionados, con cambios sin commitear). El migrador **nunca entra a `.git`** ni lo mueve, y lo mismo vale para `.obsidian/` y los archivos sueltos de la raíz (`Pasted image ….png`): todo lo que está fuera de `download_root` es ajeno y se queda en su lugar. Los renames los detecta git (`git status` los muestra como renamed), así que no hace falta `git mv`.
+4. **La migración real debe correr en el NAS** (podman o el binario directo sobre ext4), no a través de sshfs. Sobre sshfs, `rename` es remoto, `cp -al` no es fiable y el BLAKE3 obligaría a pasar los 43 GB por la red.
