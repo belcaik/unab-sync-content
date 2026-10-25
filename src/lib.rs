@@ -13,6 +13,9 @@
 //!   in place.
 //! - [`links`] extracts URLs from Canvas HTML and rewrites Canvas `/files/<id>`
 //!   links in markdown to local paths.
+//! - [`index`] renders the layout v2 index files (per-course `README.md` and
+//!   `curso.json`, per-module `README.md`, root `INDEX.md` and `AGENTS.md`)
+//!   from an in-memory model both `sync` and `migrate` can build.
 //! - [`migrate`] applies that rewrite on disk, after copying the original note
 //!   under `.u_crawler/backup/`.
 //! - [`state`] records per-course what has been fetched and what failed.
@@ -38,6 +41,9 @@ pub mod frontmatter;
 pub mod fsutil;
 /// The shared HTTP client, with rate limiting and bounded retries.
 pub mod http;
+/// Layout v2 index files: pure rendering of the per-course and library-level
+/// `README.md`, `curso.json`, `INDEX.md` and `AGENTS.md`.
+pub mod index;
 /// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
 pub mod layout;
 /// Extraction of links from Canvas HTML, and rewriting of Canvas file links in markdown.

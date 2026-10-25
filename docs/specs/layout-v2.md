@@ -76,7 +76,7 @@ Los números de módulo salen de la `position` de Canvas cuando está disponible
   - `src/announcements.rs:137-138`.
   - `src/zoom/headless.rs:361`: la salida pasa a `<ramo>/grabaciones/`. La deduplicación usa `state` (`zoom:<file_id>`) **y** el nombre calculado, porque el migrador no puede conocer los ids de grabación sin conexión.
   - `src/calendar.rs`, que usa `fsutil::course_dir`.
-- **Nuevo `src/index.rs`**: renderizado puro de `README.md` por ramo y módulo, `curso.json`, `INDEX.md` y `AGENTS.md`. Lo llaman `sync` y `migrate`, este último sin red.
+- **`src/index.rs`** (T5): renderizado puro de `README.md` por ramo y módulo, `curso.json`, `INDEX.md` y `AGENTS.md`. Lo llaman `sync` y `migrate`, este último sin red. La API está en [API de `index.rs`](#api-de-indexrs).
 - **`src/frontmatter.rs` + `src/links.rs`** (T4): frontmatter YAML (`ramo`, `tipo`, `canvas_id`, `url`, `publicado`, `vence`, `disponible`) y reescritura de `canvas.../files/<id>` a la ruta relativa local. El regex `(?i)(?:/api/v1)?/files/(\d+)` vive en `links.rs` (`CANVAS_FILE_ID_RE`); `syncer::discover_file_ids` llama a `canvas_file_ids`. La API está en [API de frontmatter y de la reescritura](#api-de-frontmatter-y-de-la-reescritura).
 - **CLI (`main.rs`)**: `migrate [--root P] [--dry-run] [--undo <ts>] [--canvas]`. `sync`, `announcements`, `calendar` y `zoom flow` llaman a `migrate::ensure_v2` al iniciar: detectan, planifican, aplican y emiten `warn!` con un resumen.
 - **Config**: `[layout] course_dir`, `code_pattern`, `name_strip_pattern` y `section_pattern`, conectados en `config.rs` y documentados en `assets/config.toml` (regla del repo: ninguna clave inerte).
@@ -167,6 +167,24 @@ Implementada en T4. `render`, `parse`, `upsert`, `canvas_file_ids`, `rewrite_can
 - `apply(&str, &Frontmatter, md_path, &BTreeMap<u64, PathBuf>) -> String`. Separa el frontmatter, reescribe solo el cuerpo y después hace `upsert`. La clave `url` no se trata como enlace de archivo.
 - `rewrite_file(&Rewrite) -> Result<RewriteOutcome, RewriteError>`. `Rewrite` lleva `root`, `path`, `frontmatter`, `files` y `backup_ts` (un solo segmento `[A-Za-z0-9._-]`, ni `.` ni `..`). Normaliza sin `canonicalize` (un symlink de raíz no se sigue). Recorre cada componente y rechaza symlinks, incluido el de `.part` y el del respaldo, antes de escribir. Exige archivo regular y UTF-8. Si el texto ya coincide, devuelve `Unchanged` y no crea respaldo. Si no, escribe el respaldo en `<root>/.u_crawler/backup/<ts>/<ruta>` con `atomic_write` (copia, no hardlink) y después la nota. Si el respaldo ya existe y es igual a los bytes actuales, reanuda y no lo pisa. Si existe y difiere, `ChangedSinceBackup` y no toca ninguno de los dos. Ante cualquier error los bytes de la nota quedan como estaban. Quien llama elige `backup_ts`.
 
+### API de `index.rs`
+
+Implementada en T5. Todo es puro (sin E/S ni red) y devuelve **texto**: quien llama escribe el archivo con `fsutil::atomic_write`. Todos los nombres de archivo y directorio salen de `layout.rs` — este módulo nunca inventa nombres. Los textos están en español (el vault es del usuario) y las fechas se escriben como `YYYY-MM-DD HH:MM UTC`.
+
+**Modelo en memoria.** `LibraryIndex { courses: Vec<CourseIndex> }`, construible tanto desde Canvas (sync, T6) como desde disco (migrate, sin red). `CourseIndex` lleva el `dir` final, un `layout::CourseMeta` (`canvas_id` puede ser `None` tras una migración offline), `term`, `section`, `zoom_ids` (los ids de las carpetas `Zoom/<id>` migradas al ramo) y las listas `modules`, `assignments`, `announcements`, `recordings`. `ModuleIndex` lleva `position`, `name`, `dir`, `pages: Vec<PageIndex>` y `assignments: Vec<AssignmentRef>` (referencias a tareas en `tareas/`). Los constructores `new` derivan el nombre del archivo desde `layout.rs` (`ModuleIndex::new`, `PageIndex::new`, `AssignmentIndex::new`, `AssignmentRef::new`, `AnnouncementIndex::new`); hay `From<&canvas::Assignment> for AssignmentIndex`. `AnnouncementIndex` no tiene constructor sin fecha: el nombre v2 es `YYYY-MM-DD_<slug>.md`, así que quien lee desde disco registra el nombre que encontró. El render siempre ordena (módulos por `position`, ramos por `dir`, tareas por vencimiento — sin fecha al final —, anuncios del más nuevo al más antiguo), así que la misma entrada produce el mismo texto.
+
+**Render**
+
+| Función | Archivo | Contenido |
+|---|---|---|
+| `render_course_readme(&CourseIndex)` | `<ramo>/README.md` | título + metadatos (`Código`, `Término`, `Sección`, `ID Canvas`), `## Módulos` ordenados, `## Tareas` con `— vence <fecha>`, `## Anuncios recientes` (tope `RECENT_ANNOUNCEMENTS = 10`, el resto se resume como "…y N más"), `## Grabaciones`. Secciones vacías se omiten. |
+| `render_module_readme(&ModuleIndex)` | `modulos/NN-x/README.md` | `## Páginas` (enlaces relativos al mismo directorio) y `## Tareas` (`../../tareas/`). |
+| `render_curso_json(&CourseIndex)` | `<ramo>/curso.json` | `{ canvas_id, course_code, name, term, section, zoom_ids }`, pretty JSON con `\n` final. `canvas_id: null` cuando el ramo se migró sin red. |
+| `render_index_md(&LibraryIndex, today: NaiveDate)` | `<root>/INDEX.md` | `## Ramos` (nombre, código, término) y `## Próximas entregas` (tareas con `vence >= today`, de todas las ramas, más próximas primero). `today` es parámetro para que el render sea puro y testeable. |
+| `render_agents_md()` | `<root>/AGENTS.md` | texto estático (incluye `LAYOUT_VERSION`) que explica a un agente cómo navegar el árbol v2; marca la biblioteca como de solo lectura para agentes. |
+
+Los tests comparan el texto completo (snapshots en línea) de cada render, incluido el caso offline `canvas_id: null`, el tope de anuncios, el escape de `[]` en textos de enlace y el filtro de próximas entregas en el límite (`vence` hoy incluye).
+
 ### Reglas del migrador (invariantes que se testean)
 
 1. No existe ninguna operación de borrado. Las únicas son `rename`, `mkdir` y la escritura atómica de `.md` con respaldo previo. Las carpetas viejas vacías se dejan en su lugar y se reportan.
@@ -175,6 +193,14 @@ Implementada en T4. `render`, `parse`, `upsert`, `canvas_file_ids`, `rewrite_can
 4. Antes de cada operación se escribe y se sincroniza su línea en el diario. Un corte a mitad de camino se reanuda.
 5. `Zoom/<id>` sin un ramo asociado se queda en su lugar, con un `warn!`. Un ramo sin `index.json`, como ATDF106-2520, se migra igual y queda con `canvas_id: null` hasta el próximo `sync`.
 6. Todo `rename` es sobre el mismo sistema de archivos. Ante `EXDEV` la ejecución se detiene y no copia.
+
+### Fixture sintética (T1)
+
+`tests/fixtures/v1/` escribe un árbol v1 determinista en un directorio vacío que le pasa el test (`write_v1_library`). No usa datos reales: los nombres son los ejemplos de este spec y de `layout.rs`, los ids son inventados y los mp4 son unos pocos bytes. Un test de integración lo incluye con `#[path = "fixtures/v1/mod.rs"] mod v1;`.
+
+La función devuelve el catálogo y el manifiesto `ruta relativa → SHA-1` de cada archivo. `hash_tree` vuelve a hashear el árbol: en un test de no-pérdida el multiset de hashes no cambia aunque cambien las rutas. Los archivos de `foreign` (`.obsidian/`, `.git/HEAD`, `Pasted image.png`) se quedan en la misma ruta.
+
+Los nombres v2 del catálogo salen de `layout` con la plantilla UNAB comentada en `assets/config.toml` (`unab_naming`, `course_dirs` con `existing` vacío, `parse_v1_recording` + `recording_file`, `attachment_file`). Los nombres v1 salen de `fsutil`, igual que los escritores. El árbol cubre las dos secciones de ATDF106 (2520 con `announcements/` y sin `index.json`), el par `…DISRUPCION_EMPRESARIAL.mp4` / `…_1.mp4`, `Sesion_sincronica_1`, cuatro ramos de 2025 sin `announcements/` (uno por cada nombre de grabación del hallazgo de la biblioteca), `nota-del-usuario.md` dentro de un módulo, `CodeR_S3.zip` y un `Zoom/424242/` huérfano. No hay `library.json`.
 
 ## Ejecución con agentes (tablero herdr)
 

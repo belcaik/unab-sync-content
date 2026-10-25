@@ -332,6 +332,7 @@ src/
   fsutil.rs         # sanitization, atomic write/rename
   frontmatter.rs    # YAML frontmatter for generated notes (render, parse, upsert)
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
+  index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   migrate/
     mod.rs          # offline migration; only rewrite is implemented (no detect/plan/apply, no CLI)
     rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
@@ -501,13 +502,15 @@ Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
-round-trip and upsert, Canvas `/files/<id>` markdown rewrite, and
+round-trip and upsert, Canvas `/files/<id>` markdown rewrite,
 `migrate::rewrite` (generated-path gate, backup, resume, and on Unix the
-hardlink inode).
+hardlink inode), layout v2 index rendering, and the synthetic layout-v1
+library (`tests/fixtures/v1/`, written under a temp dir; no real course data —
+see `docs/specs/layout-v2.md`).
 
 Worth adding: a mock-server integration test covering pagination across three
-pages, ETag skip, and `Range` resume — `tests/` currently only covers the Zoom
-database.
+pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and
+that v1 fixture.
 
 ---
 
