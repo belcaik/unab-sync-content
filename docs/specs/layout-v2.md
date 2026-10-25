@@ -70,14 +70,14 @@ Los números de módulo salen de la `position` de Canvas cuando está disponible
   - `detect.rs`: reconoce el layout v1. Sus señales son la carpeta `Zoom/` con subcarpetas numéricas, `Modules/<id>_`, `NN-ASSIGN-` y la ausencia de `library.json`.
   - `plan.rs`: planificador **puro**. Recibe un inventario del árbol (más metadatos opcionales de Canvas) y devuelve un `Plan { moves, edits, duplicates, conflicts, unresolved }`.
   - `apply.rs`: ejecutor. Escribe primero la línea del diario y después ejecuta `rename(2)`. Solo trabaja dentro del mismo sistema de archivos y se detiene si `rename` devuelve `EXDEV`. Reanuda desde el diario y revierte con `--undo`. Para el BLAKE3 usa la crate `blake3`.
-  - `rewrite.rs`: inserta el frontmatter y reescribe los enlaces de los `.md` generados. Escribe siempre con un rename atómico (`fsutil::atomic_write`), nunca en el mismo archivo, para que un clon con hardlinks (`cp -al`) no altere el original.
+  - `rewrite.rs` (T4): inserta el frontmatter y reescribe los enlaces de los `.md` generados. Antes copia los bytes a `.u_crawler/backup/<ts>/` y después escribe con `fsutil::atomic_write` (inode nuevo), nunca in-place, para que un clon con hardlinks (`cp -al`) no altere el original. La API está en [API de frontmatter y de la reescritura](#api-de-frontmatter-y-de-la-reescritura).
 - **Escritores que cambian para usar `layout.rs`**:
   - `src/syncer.rs:246,342` (Modules/Attachments). Las tareas pasan a `tareas/`.
   - `src/announcements.rs:137-138`.
   - `src/zoom/headless.rs:361`: la salida pasa a `<ramo>/grabaciones/`. La deduplicación usa `state` (`zoom:<file_id>`) **y** el nombre calculado, porque el migrador no puede conocer los ids de grabación sin conexión.
   - `src/calendar.rs`, que usa `fsutil::course_dir`.
 - **Nuevo `src/index.rs`**: renderizado puro de `README.md` por ramo y módulo, `curso.json`, `INDEX.md` y `AGENTS.md`. Lo llaman `sync` y `migrate`, este último sin red.
-- **Nuevo `src/frontmatter.rs` + `src/links.rs`**: renderiza YAML (`ramo`, `tipo`, `canvas_id`, `url`, `publicado`, `vence`, `disponible`). Reescribe `canvas.../files/<id>` a la ruta relativa local usando el mapa `file:<id>` → ruta. Ya existe el regex de `/files/<id>` en `syncer.rs:458`, y hay que reutilizarlo.
+- **`src/frontmatter.rs` + `src/links.rs`** (T4): frontmatter YAML (`ramo`, `tipo`, `canvas_id`, `url`, `publicado`, `vence`, `disponible`) y reescritura de `canvas.../files/<id>` a la ruta relativa local. El regex `(?i)(?:/api/v1)?/files/(\d+)` vive en `links.rs` (`CANVAS_FILE_ID_RE`); `syncer::discover_file_ids` llama a `canvas_file_ids`. La API está en [API de frontmatter y de la reescritura](#api-de-frontmatter-y-de-la-reescritura).
 - **CLI (`main.rs`)**: `migrate [--root P] [--dry-run] [--undo <ts>] [--canvas]`. `sync`, `announcements`, `calendar` y `zoom flow` llaman a `migrate::ensure_v2` al iniciar: detectan, planifican, aplican y emiten `warn!` con un resumen.
 - **Config**: `[layout] course_dir`, `code_pattern`, `name_strip_pattern` y `section_pattern`, conectados en `config.rs` y documentados en `assets/config.toml` (regla del repo: ninguna clave inerte).
 - **Docs**: actualizar `AGENTS.md` (layout de descargas y calendario, CLI, nueva sección "Migración") y el README con una sección de breaking change.
@@ -136,6 +136,36 @@ Implementada en T0. Todo es puro (sin E/S) y devuelve **nombres relativos**: qui
 | `2026_03_11_202605_2333_DISRUPCION_EMPRESARIAL_1.mp4` (existe la versión sin `_1`) | `2026-03-11_clase-parte-2.mp4` |
 | `2026_10_14_202625_1108_RESPONSABILIDAD_SOCIAL_SEMANA_3.mp4` | `2026-10-14_semana-3.mp4` |
 | `2026_07_02_Sesion_sincronica_3.mp4` | `2026-07-02_sesion-sincronica-3.mp4` |
+
+### API de frontmatter y de la reescritura
+
+Implementada en T4. `render`, `parse`, `upsert`, `canvas_file_ids`, `rewrite_canvas_file_links`, `generated_kind` y `apply` son puras. La única escritura es `rewrite_file`. No hay comando `migrate` ni llamada desde `sync`: T6 y T7 son quienes conectan esto. Cambiar estas firmas es cambiar este spec.
+
+**`frontmatter`**
+
+- `DocKind`: `Page` → `page`, `Assignment` → `tarea`, `Announcement` → `anuncio`, `Recording` → `grabacion`. `as_str` / `parse`. Cualquier otra cadena es `None`.
+- `Frontmatter { ramo, tipo, canvas_id: Option<u64>, url, publicado, vence, disponible: Option<String> }`. `ramo` y `tipo` siempre se escriben. Un opcional `None` o en blanco se omite, y un `upsert` posterior borra esa clave si ya estaba.
+- `render(&Frontmatter) -> String`: bloque `---`, claves en el orden de arriba, salto de línea final. Las cadenas van entre comillas dobles (`\\`, `\"`, `\n`, `\r`, `\t`, `\uXXXX`). `tipo` es un token sin comillas. `canvas_id` es un entero sin comillas.
+- `parse(&str) -> Result<Option<Frontmatter>, FrontmatterError>`. Sin frontmatter, un `---` sin cierre, o un bloque que no menciona ninguna de nuestras claves: `Ok(None)` (las propiedades del usuario no se leen como nuestras). Si hay alguna de nuestras claves pero falta `ramo` o `tipo`, o es null: `MissingRamo` / `MissingTipo`. `tipo` desconocido: `BadTipo`. `canvas_id` presente y no entero: `BadCanvasId`. Las fechas son texto opaco; no se validan.
+- `upsert(&str, &Frontmatter) -> String`. Si ya hay un bloque cerrado al inicio, actualiza nuestras claves en su sitio, descarta duplicados de esas claves y agrega las que falten. Conserva las claves ajenas, los comentarios y el cuerpo (incluido un `---` posterior). `upsert(upsert(s)) == upsert(s)`. Un BOM `\u{feff}` se conserva. No usa una crate de YAML: el subconjunto escalar alcanza para no reformatear el documento.
+
+**`links`**
+
+- `canvas_file_ids(&str) -> impl Iterator<Item = u64>`. El mismo regex de arriba. En `/courses/<n>/files/<id>` el id capturado es el del archivo. El primer id de izquierda a derecha gana: si ese id no está en el mapa, el enlace queda igual aunque un id posterior sí esté.
+- `rewrite_canvas_file_links(&str, md_path, &BTreeMap<u64, PathBuf>) -> String`. `md_path` y los valores del mapa son relativos a la misma raíz. El destino nuevo es el camino desde el directorio de la nota hasta el archivo, con `/` y los `..` que hagan falta, sin `./`. Se reemplaza el destino entero (se pierde `?verifier=`). Un id ausente del mapa se deja byte a byte.
+- Se reescriben enlaces e imágenes en línea (título opcional, destino entre `<>`), autolinks, definiciones de referencia con sangría 0–3, y URLs `http(s)` sueltas (estas dos últimas pasan a `[nombre-de-archivo](ruta)`). No se reescribe el código entre cercas (`` ``` `` o `~~~`, sangría ≤ 3) ni los spans de código en línea, aunque el span no se cierre en la misma línea. Tampoco el HTML crudo (`href`). Un destino que ya es la ruta calculada no se toca. Si la ruta relativa lleva un carácter de control, o un componente que no es un nombre normal (`..` dentro del mapa), el enlace queda igual. Un destino que no es `[A-Za-z0-9._~/-]+` se envuelve en `<>`.
+
+**`migrate::rewrite`**
+
+- `generated_kind(&Path) -> Option<DocKind>` es la compuerta. La ruta es relativa a la raíz de la biblioteca. Rechaza cualquier componente `.git`, `.obsidian` o `.u_crawler`, y cualquier `..` o componente que no sea UTF-8. El primer marcador con cola válida gana:
+  - v1 `Modules` + exactamente `[<id>_<nombre>, archivo]`: el directorio es `^[0-9]+_.+`; el archivo es `^[0-9]{2,}-.+\.md`. Si el resto empieza por `ASSIGN-` y el título no está vacío, es tarea; `02-ASSIGN-.md` no es nada; `02-ASSIGN.md` es página.
+  - v1 `announcements` + un solo archivo `(?:YYYY-MM-DD_)?[A-Za-z0-9_]+_[0-9]+.md`. `announcements/media/…` no entra.
+  - v2 `modulos` + `[NN-kebab, NN-kebab.md]` es página. `README.md` y `sin-titulo.md` no lo son; `01-sin-titulo.md` sí. El kebab es minúsculas: `01-Intro.md` bajo `modulos` no es página.
+  - v2 `tareas` + un `.md` kebab es tarea (incluye `tareas/index.md` y `tareas/sin-titulo.md`).
+  - v2 `anuncios` o `grabaciones` + `YYYY-MM-DD_kebab.md` es anuncio o grabación. `index.md`, `adjuntos/` y un `.mp4` no entran.
+  - Kebab: `[a-z0-9]+(?:-[a-z0-9]+)*`. La fecha es año de 4 dígitos, mes 01–12, día 01–31.
+- `apply(&str, &Frontmatter, md_path, &BTreeMap<u64, PathBuf>) -> String`. Separa el frontmatter, reescribe solo el cuerpo y después hace `upsert`. La clave `url` no se trata como enlace de archivo.
+- `rewrite_file(&Rewrite) -> Result<RewriteOutcome, RewriteError>`. `Rewrite` lleva `root`, `path`, `frontmatter`, `files` y `backup_ts` (un solo segmento `[A-Za-z0-9._-]`, ni `.` ni `..`). Normaliza sin `canonicalize` (un symlink de raíz no se sigue). Recorre cada componente y rechaza symlinks, incluido el de `.part` y el del respaldo, antes de escribir. Exige archivo regular y UTF-8. Si el texto ya coincide, devuelve `Unchanged` y no crea respaldo. Si no, escribe el respaldo en `<root>/.u_crawler/backup/<ts>/<ruta>` con `atomic_write` (copia, no hardlink) y después la nota. Si el respaldo ya existe y es igual a los bytes actuales, reanuda y no lo pisa. Si existe y difiere, `ChangedSinceBackup` y no toca ninguno de los dos. Ante cualquier error los bytes de la nota quedan como estaban. Quien llama elige `backup_ts`.
 
 ### Reglas del migrador (invariantes que se testean)
 

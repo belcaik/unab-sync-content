@@ -9,6 +9,12 @@
 //! - [`download`] is the only downloader: one ETag/resume/atomic-rename policy.
 //! - [`layout`] turns course/module/item metadata into on-disk names; it is
 //!   pure, so the writers and the offline migrator agree on every path.
+//! - [`frontmatter`] renders the YAML block on a generated note and updates it
+//!   in place.
+//! - [`links`] extracts URLs from Canvas HTML and rewrites Canvas `/files/<id>`
+//!   links in markdown to local paths.
+//! - [`migrate`] applies that rewrite on disk, after copying the original note
+//!   under `.u_crawler/backup/`.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -26,16 +32,20 @@ pub mod config;
 pub mod download;
 /// Invocation of `ffmpeg`, used to fetch Zoom's streamed recordings.
 pub mod ffmpeg;
+/// YAML frontmatter for pages, assignments, announcements and recordings.
+pub mod frontmatter;
 /// Filesystem helpers: name sanitization and atomic writes.
 pub mod fsutil;
 /// The shared HTTP client, with rate limiting and bounded retries.
 pub mod http;
 /// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
 pub mod layout;
-/// Extraction of links and media references from Canvas HTML.
+/// Extraction of links from Canvas HTML, and rewriting of Canvas file links in markdown.
 pub mod links;
 /// Log file setup.
 pub mod logger;
+/// Offline migration from the v1 library layout. [`migrate::rewrite`] rewrites generated markdown.
+pub mod migrate;
 /// Progress bars.
 pub mod progress;
 /// Discovery of Zoom links referenced across a course.

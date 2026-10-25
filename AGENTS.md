@@ -324,13 +324,17 @@ src/
   canvas.rs         # Canvas REST client (get_json / list_paginated)
   download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
   state.rs          # per-course State, ItemState, record_error
-  links.rs          # HTML -> links, media refs, zoom URLs
+  links.rs          # HTML -> links, media refs, zoom URLs; Canvas /files/<id> markdown rewrite
   syncer.rs         # CourseSync / ModuleCtx: the main sync flow
   announcements.rs  # AnnouncementSync
   calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
+  frontmatter.rs    # YAML frontmatter for generated notes (render, parse, upsert)
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
+  migrate/
+    mod.rs          # offline migration; only rewrite is implemented (no detect/plan/apply, no CLI)
+    rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
@@ -356,6 +360,12 @@ Rules that hold today and should keep holding:
 * **All Canvas list endpoints go through `CanvasClient::list_paginated`.**
 * **`zoom::sso` must not touch the database or the course id.** It takes a page
   and credentials. That is what makes it testable.
+* **`migrate::rewrite` rewrites only markdown `generated_kind` accepts.** It
+  copies the original bytes to `<root>/.u_crawler/backup/<ts>/` and then
+  replaces the note with `fsutil::atomic_write` (a new inode, so a `cp -al`
+  clone keeps the old one). A note that already matches is left alone and gets
+  no backup. There is no `migrate` CLI command. The frozen signatures are in
+  `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
 ---
@@ -490,7 +500,10 @@ Documented so they are not rediscovered as surprises:
 Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
-byte-size formatting, char-safe truncation, and Zoom cookie expiry.
+byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
+round-trip and upsert, Canvas `/files/<id>` markdown rewrite, and
+`migrate::rewrite` (generated-path gate, backup, resume, and on Unix the
+hardlink inode).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume — `tests/` currently only covers the Zoom
