@@ -17,6 +17,8 @@ pub enum ConfigError {
     TomlDe(#[from] toml::de::Error),
     #[error(transparent)]
     TomlSer(#[from] toml::ser::Error),
+    #[error(transparent)]
+    InvalidLayout(#[from] crate::layout::LayoutError),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +35,46 @@ pub struct Config {
     pub announcements: Announcements,
     #[serde(default)]
     pub calendar: Calendar,
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+/// How library paths are named (layout v2). See `docs/specs/layout-v2.md`
+/// and [`crate::layout::CourseNaming`], which compiles and applies it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    /// Course directory template. Placeholders: `{code}`, `{name}`, `{id}`.
+    #[serde(default = "default_course_dir")]
+    pub course_dir: String,
+    /// Regex applied to `course_code`; capture group 1 (or the whole match)
+    /// replaces `{code}`. Empty keeps the code as is.
+    #[serde(default)]
+    pub code_pattern: String,
+    /// Regex whose every match is removed from the course name before it
+    /// fills `{name}`. Empty keeps the name as is.
+    #[serde(default)]
+    pub name_strip_pattern: String,
+    /// Regex finding the section (NRC) in the code, then the name; capture
+    /// group 1 (or the whole match) is the `-s<section>` suffix given to
+    /// courses whose directory names would collide. Empty falls back to
+    /// `-c<canvas id>`.
+    #[serde(default)]
+    pub section_pattern: String,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            course_dir: default_course_dir(),
+            code_pattern: String::new(),
+            name_strip_pattern: String::new(),
+            section_pattern: String::new(),
+        }
+    }
+}
+
+fn default_course_dir() -> String {
+    "{code}-{name}".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +174,7 @@ impl Default for Config {
             },
             announcements: Announcements::default(),
             calendar: Calendar::default(),
+            layout: Layout::default(),
         }
     }
 }
@@ -193,6 +236,8 @@ impl Config {
         if !missing.is_empty() {
             return Err(ConfigError::MissingFields(missing));
         }
+
+        crate::layout::CourseNaming::new(&self.layout)?;
 
         Ok(())
     }
@@ -310,5 +355,34 @@ mod tests {
         let loaded = load_config_from_path(&path).await.unwrap();
         assert_eq!(loaded.canvas.base_url, cfg.canvas.base_url);
         assert_eq!(loaded.zoom.enabled, cfg.zoom.enabled);
+        assert_eq!(loaded.layout, cfg.layout);
+    }
+
+    #[test]
+    fn layout_section_is_optional_and_defaults_to_generic_template() {
+        let base = toml::to_string(&Config::default()).unwrap();
+        let without: String = base.split("[layout]").next().unwrap().to_string();
+        let cfg: Config = toml::from_str(&without).unwrap();
+        assert_eq!(cfg.layout, Layout::default());
+        assert_eq!(cfg.layout.course_dir, "{code}-{name}");
+    }
+
+    #[test]
+    fn shipped_template_parses_and_its_layout_compiles() {
+        let cfg: Config = toml::from_str(include_str!("../assets/config.toml")).unwrap();
+        crate::layout::CourseNaming::new(&cfg.layout).unwrap();
+    }
+
+    #[test]
+    fn invalid_layout_fails_validation() {
+        let mut cfg = Config::default();
+        cfg.canvas.base_url = "https://example.instructure.com".into();
+        cfg.canvas.token = Some("t".into());
+        assert!(cfg.postprocess_and_validate().is_ok());
+        cfg.layout.course_dir = "{nombre}".into();
+        assert!(matches!(
+            cfg.postprocess_and_validate(),
+            Err(ConfigError::InvalidLayout(_))
+        ));
     }
 }

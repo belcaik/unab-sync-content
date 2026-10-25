@@ -27,6 +27,23 @@ download_media = true           # also download Canvas-hosted attachments and in
 enabled = true                   # set false to skip the calendar-sync flow
 caldir_root = "~/Documents/Caldir"  # root of the caldir tree u_crawler owns exclusively
 
+[layout]
+# How course directories are named (layout v2). Everything becomes lowercase
+# kebab-case ASCII. `course_dir` takes the placeholders {code}, {name} and {id}.
+course_dir = "{code}-{name}"
+code_pattern = ""               # regex on course_code; group 1 (or the match) fills {code}
+name_strip_pattern = ""         # regex; every match is removed from the name before {name}
+section_pattern = ""            # regex finding the section/NRC (in the code, then the name); only
+                                # used to add -s<nrc> when a course would get a directory name
+                                # that another course has, or already had, in this library
+#
+# Example (UNAB): code "ATDF105_202615_2690_EL_ON" + name "202615_2690_MINERIA DE DATOS"
+# become "atdf105-mineria-de-datos"; two sections of ATDF106 become
+# "atdf106-...-s2520" and "atdf106-...-s2524".
+# code_pattern = '^([A-Z]+[0-9]+)'
+# name_strip_pattern = '^[0-9]{6}[_\s]+[0-9]+[_\s]+'
+# section_pattern = '(?:^|_)[0-9]{6}[_\s]+([0-9]+)[_\s]'
+
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely
 ffmpeg_path = "ffmpeg"          # or a full path if not on $PATH

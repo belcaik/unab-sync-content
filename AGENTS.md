@@ -181,6 +181,12 @@ download_media = true
 enabled = true
 caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns exclusively
 
+[layout]                     # layout v2 naming, see docs/specs/layout-v2.md
+course_dir = "{code}-{name}" # placeholders {code}, {name}, {id}
+code_pattern = ""            # regex on course_code; group 1 fills {code}
+name_strip_pattern = ""      # regex removed from the name before {name}
+section_pattern = ""         # regex for the section/NRC, used for -s<nrc> when a dir name is taken
+
 [zoom]
 enabled = true
 ffmpeg_path = "ffmpeg"
@@ -324,6 +330,7 @@ src/
   calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
+  layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
