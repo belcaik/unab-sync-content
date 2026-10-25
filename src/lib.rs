@@ -9,6 +9,9 @@
 //! - [`download`] is the only downloader: one ETag/resume/atomic-rename policy.
 //! - [`layout`] turns course/module/item metadata into on-disk names; it is
 //!   pure, so the writers and the offline migrator agree on every path.
+//! - [`index`] renders the layout v2 index files (per-course `README.md` and
+//!   `curso.json`, per-module `README.md`, root `INDEX.md` and `AGENTS.md`)
+//!   from an in-memory model both `sync` and `migrate` can build.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -30,6 +33,9 @@ pub mod ffmpeg;
 pub mod fsutil;
 /// The shared HTTP client, with rate limiting and bounded retries.
 pub mod http;
+/// Layout v2 index files: pure rendering of the per-course and library-level
+/// `README.md`, `curso.json`, `INDEX.md` and `AGENTS.md`.
+pub mod index;
 /// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
 pub mod layout;
 /// Extraction of links and media references from Canvas HTML.
