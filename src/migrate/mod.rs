@@ -10,13 +10,18 @@
 //! - [`plan::plan`] turns the inventory, plus optional Canvas metadata, into a
 //!   [`plan::Plan`]: moves, markdown edits, destination collisions and what
 //!   it could not place. It is pure and deterministic.
+//! - [`rewrite`] copies a generated markdown note under `.u_crawler/backup/`
+//!   and then refreshes its YAML frontmatter and Canvas file links.
 //!
-//! Nothing here deletes, overwrites or even opens a file for writing. The
+//! [`scan`], [`detect`] and [`plan`] do not delete, overwrite or open a file
+//! for writing. [`rewrite`] is the only writer here, and it only replaces a
+//! note [`rewrite::generated_kind`] accepts, after the backup exists. The
 //! executor that applies a plan (journal, `rename(2)`, BLAKE3 for collisions)
-//! is a separate step.
+//! is a separate step. There is no `migrate` CLI.
 
 pub mod detect;
 pub mod plan;
+pub mod rewrite;
 
 use crate::layout::{self, CourseMeta, ExistingCourseDir};
 use serde::Deserialize;

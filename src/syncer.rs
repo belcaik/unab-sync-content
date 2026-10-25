@@ -5,6 +5,7 @@ use crate::fsutil::{
     atomic_write, course_dir, ensure_dir, sanitize_component, sanitize_filename_preserve_ext,
 };
 use crate::http::{build_http_client, HttpCtx};
+use crate::links::canvas_file_ids;
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
 use crate::status;
@@ -455,20 +456,13 @@ fn sha1_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Matches `/files/12345` or `/api/v1/files/12345` in an absolute or relative URL.
-static FILE_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:/api/v1)?/files/(\d+)").unwrap());
-
 /// Matches `/courses/12345/pages/some-slug`, capturing course id and slug.
 static COURSE_PAGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/courses/(\d+)/pages/([A-Za-z0-9_\-]+)").unwrap());
 
 /// Canvas file ids referenced anywhere in a body of HTML.
 fn discover_file_ids(html: &str) -> HashSet<u64> {
-    FILE_ID_RE
-        .captures_iter(html)
-        .filter_map(|c| c.get(1)?.as_str().parse::<u64>().ok())
-        .collect()
+    canvas_file_ids(html).collect()
 }
 
 /// Whether `url` points at a wiki page belonging to `course_id`.

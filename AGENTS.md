@@ -324,18 +324,20 @@ src/
   canvas.rs         # Canvas REST client (get_json / list_paginated)
   download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
   state.rs          # per-course State, ItemState, record_error
-  links.rs          # HTML -> links, media refs, zoom URLs
+  links.rs          # HTML -> links, media refs, zoom URLs; Canvas /files/<id> markdown rewrite
   syncer.rs         # CourseSync / ModuleCtx: the main sync flow
   announcements.rs  # AnnouncementSync
   calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
+  frontmatter.rs    # YAML frontmatter for generated notes (render, parse, upsert)
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
   index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   migrate/
-    mod.rs          # read-only library scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs)
+    mod.rs          # read-only scan into an Inventory; rewrite is the only writer (no rename executor, no CLI)
     detect.rs       # pure: v1 / v2 / empty, from the inventory
     plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
+    rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
@@ -361,6 +363,17 @@ Rules that hold today and should keep holding:
 * **All Canvas list endpoints go through `CanvasClient::list_paginated`.**
 * **`zoom::sso` must not touch the database or the course id.** It takes a page
   and credentials. That is what makes it testable.
+* **`migrate::rewrite` rewrites only markdown `generated_kind` accepts.** It
+  copies the original bytes to `<root>/.u_crawler/backup/<ts>/` and then
+  replaces the note with `fsutil::atomic_write` (a new inode, so a `cp -al`
+  clone keeps the old one). A note that already matches is left alone and gets
+  no backup. A leading `---` is frontmatter only when the interior is a
+  property list; html2md's `<hr>` (a blank line after the fence) and an
+  indented prose line between two rules stay in the body. An existing
+  non-symlink `.part` beside the note or the backup is refused (`PartExists`);
+  `atomic_write` itself is unchanged and downloads still truncate their own
+  `.part`. There is no `migrate` CLI command. The frozen signatures are in
+  `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
 ---
@@ -495,12 +508,15 @@ Documented so they are not rediscovered as surprises:
 Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
-byte-size formatting, char-safe truncation, Zoom cookie expiry, and the
-synthetic layout-v1 library (`tests/fixtures/v1/`, written under a temp dir;
-no real course data — see `docs/specs/layout-v2.md`), and the migration plan
-over that library (`tests/migrate_plan.rs`: golden snapshot in
-`tests/golden/migrate_plan_v1.txt`, regenerated with `U_CRAWLER_BLESS=1`;
-no-loss and second-run-is-empty checks).
+byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
+round-trip and upsert, Canvas `/files/<id>` markdown rewrite,
+`migrate::rewrite` (generated-path gate, backup, resume, a leading horizontal
+rule left in the body, refusal of an existing `.part`, and on Unix the
+hardlink inode), layout v2 index rendering, the synthetic layout-v1
+library (`tests/fixtures/v1/`, written under a temp dir; no real course data —
+see `docs/specs/layout-v2.md`), and the migration plan over that library
+(`tests/migrate_plan.rs`: golden snapshot in `tests/golden/migrate_plan_v1.txt`,
+regenerated with `U_CRAWLER_BLESS=1`; no-loss and second-run-is-empty checks).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and
