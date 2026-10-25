@@ -332,6 +332,10 @@ src/
   fsutil.rs         # sanitization, atomic write/rename
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
   index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
+  migrate/
+    mod.rs          # read-only library scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs)
+    detect.rs       # pure: v1 / v2 / empty, from the inventory
+    plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
@@ -493,7 +497,10 @@ URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, and the
 synthetic layout-v1 library (`tests/fixtures/v1/`, written under a temp dir;
-no real course data — see `docs/specs/layout-v2.md`).
+no real course data — see `docs/specs/layout-v2.md`), and the migration plan
+over that library (`tests/migrate_plan.rs`: golden snapshot in
+`tests/golden/migrate_plan_v1.txt`, regenerated with `U_CRAWLER_BLESS=1`;
+no-loss and second-run-is-empty checks).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and

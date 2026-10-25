@@ -12,6 +12,8 @@
 //! - [`index`] renders the layout v2 index files (per-course `README.md` and
 //!   `curso.json`, per-module `README.md`, root `INDEX.md` and `AGENTS.md`)
 //!   from an in-memory model both `sync` and `migrate` can build.
+//! - [`migrate`] finds a layout v1 library and plans its move to v2, without
+//!   ever deleting or overwriting a file.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -42,6 +44,9 @@ pub mod layout;
 pub mod links;
 /// Log file setup.
 pub mod logger;
+/// Retroactive layout v1 → v2 migration: library scan, layout detection and
+/// the pure migration planner.
+pub mod migrate;
 /// Progress bars.
 pub mod progress;
 /// Discovery of Zoom links referenced across a course.

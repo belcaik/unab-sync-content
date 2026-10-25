@@ -126,6 +126,8 @@ Implementada en T0. Todo es puro (sin E/S) y devuelve **nombres relativos**: qui
 
 - `parse_v1_recording(file_name, siblings: &[&str]) -> Option<V1Recording { date, topic, part }>` separa `YYYY_MM_DD_<tema>[_N].mp4`. En v1, `zoom::headless` agregaba `_N` (desde 1) a la segunda, tercera… copia del mismo nombre, así que `_N` es la parte `N + 1`. Pero `Sesion_sincronica_3` también termina en `_3`: el sufijo solo se interpreta como parte cuando `siblings` contiene el nombre sin sufijo. Devuelve `None` para el fallback `zoom-<meeting id>` (sin fecha) y para lo que no sea `.mp4`.
 
+- `CourseNaming::parse_v1_course_dir(dir) -> CourseMeta` recupera nombre y código de una carpeta v1 (`<nombre>_<código>`, ambos saneados). Corta en el primer `_` tras el cual `code_pattern` calza justo al inicio del resto. Sin patrón o sin ese corte, todo es nombre y el código queda `None`. El id siempre es `None`. Con la plantilla UNAB, `202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON` da nombre `202615_2690_MINERIA_DE_DATOS` y código `ATDF105_202615_2690_EL_ON`. El nombre recuperado lleva `_` donde Canvas tenía espacios.
+
 **Casos de tabla (tests en `src/layout.rs`)**, con la plantilla UNAB comentada en `assets/config.toml`, que el test lee del propio archivo:
 
 | Entrada v1 | Salida v2 |
@@ -154,6 +156,40 @@ Implementada en T5. Todo es puro (sin E/S ni red) y devuelve **texto**: quien ll
 | `render_agents_md()` | `<root>/AGENTS.md` | texto estático (incluye `LAYOUT_VERSION`) que explica a un agente cómo navegar el árbol v2; marca la biblioteca como de solo lectura para agentes. |
 
 Los tests comparan el texto completo (snapshots en línea) de cada render, incluido el caso offline `canvas_id: null`, el tope de anuncios, el escape de `[]` en textos de enlace y el filtro de próximas entregas en el límite (`vence` hoy incluye).
+
+### API de `migrate::detect` y `migrate::plan`
+
+Implementada en T2. Todas las rutas son relativas a su raíz y usan `/`.
+
+- **`migrate::scan(root, caldir_root) -> io::Result<Inventory>`** es la única E/S, y es de solo lectura. Lista cada archivo regular con su tamaño, nunca entra a `.git` y no lista symlinks (se quedan donde están). Lee los ids de `announcements/index.json` (`courses/<id>` del `html_url`; si dos registros no coinciden, no hay id) y los `curso.json` de la raíz como `ExistingCourseDir`, y lista las carpetas de primer nivel de `caldir_root`. Falla ante un nombre que no sea UTF-8: es mejor no planificar que planificar media biblioteca.
+- **`detect::detect(&Inventory) -> Detected`**: `V2` si existe `.u_crawler/library.json`; si no, `V1(V1Signals { zoom_dirs, module_dirs, assignment_files, announcement_dirs })` con al menos una señal; si no, `Empty`. Una carpeta de primer nivel es un ramo v1 si tiene directamente `state.json`, `Modules/` o `announcements/`.
+- **`plan::plan(&Inventory, &CourseNaming, &[CanvasCourse]) -> Plan`**, puro. `CanvasCourse { meta, module_positions }` es opcional (`[]` sin red). `Plan { courses, moves, edits, duplicates, conflicts, unresolved }`; `courses` (carpeta v1 → v2, `CourseMeta` y `zoom_ids`) se agregó a lo que pedía el spec porque `index.rs` lo necesita para `curso.json`. `Display` da el informe por líneas que usa el golden snapshot y que puede mostrar `--dry-run`.
+
+**Correspondencia** (dentro del ramo):
+
+| v1 | v2 |
+|---|---|
+| `state.json` | `.u_crawler/state.json` |
+| `Modules/<id>_<Nombre>/NN-<Título>.md` | `modulos/<module_dir>/<page_file>` (edit `page`) |
+| `Modules/<id>_<Nombre>/NN-ASSIGN-<Título>.md` | `tareas/<assignment_file>` (edit `assignment`) |
+| `Modules/<id>_<Nombre>/Attachments/<f>` | `modulos/<module_dir>/adjuntos/<attachment_file>` |
+| `announcements/<fecha>_<slug>_<id>.md` | `anuncios/<announcement_file>` (edit `announcement`) |
+| `announcements/index.json` | `anuncios/index.json` |
+| `announcements/media/<f>` | `anuncios/adjuntos/<attachment_file>` |
+| `Zoom/<id>/<YYYY_MM_DD_tema[_N]>.mp4` | `grabaciones/<recording_file>`; un `.mp4` sin fecha pasa por `attachment_file` |
+| `<caldir_root>/<carpeta v1>/` | `<caldir_root>/<carpeta v2>/` (un solo rename de directorio) |
+
+Lo demás es ajeno y viaja con su carpeta **conservando su nombre**: una nota en un módulo va al módulo v2, un archivo en la raíz del ramo a la raíz del ramo v2, una subcarpeta desconocida de `announcements/` a `anuncios/`. Lo que está fuera de los ramos v1 y de `Zoom/` no se mueve. Solo los archivos generados que se mueven sin colisión reciben un `Edit`; una nota del usuario que se llame `NN-algo.md` se tomaría por página (no hay forma offline de distinguirla) y T4 la respaldaría antes de reescribirla.
+
+**Reglas del plan:**
+
+- **Ramos.** El id sale de `index.json`. Con Canvas, un ramo sin id se empareja si `fsutil::course_dir` del ramo de Canvas da exactamente la carpeta v1 (y solo uno lo hace); entonces nombre, código y posiciones de módulos son los oficiales. Si no, nombre y código salen de `parse_v1_course_dir`. Los directorios salen de `course_dirs`, con los ramos en orden de carpeta v1 y, como `existing`, los `curso.json` más **todo nombre de la raíz que no sea un ramo v1**: un ramo nunca cae dentro de una carpeta ajena (ni de una carpeta v2 sin `curso.json`; por eso T3 debe escribir `curso.json` antes de dar la migración por terminada).
+- **Módulos.** Número = `position` de Canvas; los módulos que Canvas no lista (o todos, sin red) siguen en orden de `module_id`, después de la mayor posición conocida.
+- **Zoom.** `Zoom/<id>` va al ramo con ese id de Canvas. Si no hay, se buscan palabras de los temas de las grabaciones, por niveles: sección (NRC), luego código corto, luego todas las palabras del nombre corto. Decide el primer nivel que encuentra algo: un solo ramo se acepta, varios dan `AmbiguousZoom`, ninguno da `OrphanZoom`. Lo que esté en `Zoom/` fuera de una carpeta numérica es `UnrecognizedZoomEntry`. Nada de eso se mueve.
+- **Colisiones.** Dos orígenes con el mismo destino, o un destino que ya existe, forman una `Collision { to, from (ordenados), occupied }`. Si todos los tamaños coinciden va a `duplicates` (probable duplicado, que T3 confirma con BLAKE3); si no, a `conflicts` (seguro distinto: `nombre.conflicto-<hash8>.ext`). Si el destino es un directorio existente o queda bajo un archivo, cada origen va a `unresolved` como `DestinationBlocked`. En caldir, si la carpeta v2 ya existe, `CaldirTargetExists`.
+- **Vacío.** `Plan::is_empty()` mira `moves`, `edits`, `duplicates` y `conflicts`; `unresolved` es informe. Una biblioteca ya migrada (con su Zoom huérfano) planifica vacío. El test hace la migración con renames sobre la fixture en un tempdir, vuelve a escanear y comprueba plan vacío, el mismo multiconjunto de hashes y los archivos ajenos intactos.
+
+El golden snapshot está en `tests/golden/migrate_plan_v1.txt`; `U_CRAWLER_BLESS=1 cargo test --test migrate_plan` lo regenera.
 
 ### Reglas del migrador (invariantes que se testean)
 
