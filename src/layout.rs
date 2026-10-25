@@ -170,6 +170,40 @@ impl CourseNaming {
         }
     }
 
+    /// The Canvas name and code a v1 course directory was built from.
+    ///
+    /// v1 named a course `<name>_<code>`, both through
+    /// `fsutil::sanitize_component` (`fsutil::course_dir`), so the split is
+    /// lost in the name. This takes the rightmost `_` after which
+    /// `code_pattern` matches at the very start of the rest (rightmost, so a
+    /// code-shaped word of the name, like `PYTHON3`, is not taken for the
+    /// code): that rest is the
+    /// code, what comes before it the name. Without a pattern, or without such
+    /// a split, the whole directory is the name and the code is unknown. The
+    /// id is always `None` — a v1 directory name carries none.
+    pub fn parse_v1_course_dir(&self, dir: &str) -> CourseMeta {
+        let split = self.code_pattern.as_ref().and_then(|re| {
+            dir.rmatch_indices('_').map(|(i, _)| i).find(|&i| {
+                i > 0
+                    && re
+                        .find(&dir[i + 1..])
+                        .is_some_and(|m| m.start() == 0 && !m.is_empty())
+            })
+        });
+        match split {
+            Some(i) => CourseMeta {
+                id: None,
+                name: dir[..i].to_string(),
+                code: Some(dir[i + 1..].to_string()),
+            },
+            None => CourseMeta {
+                id: None,
+                name: dir.to_string(),
+                code: None,
+            },
+        }
+    }
+
     /// Directory names for `courses`, in input order, given the course
     /// directories the library already has.
     ///
@@ -594,6 +628,38 @@ mod tests {
             name: name.into(),
             code: Some(code.into()),
         }
+    }
+
+    #[test]
+    fn parse_v1_course_dir_splits_on_the_code_pattern() {
+        let meta =
+            unab().parse_v1_course_dir("202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON");
+        assert_eq!(meta.id, None);
+        assert_eq!(meta.name, "202615_2690_MINERIA_DE_DATOS");
+        assert_eq!(meta.code.as_deref(), Some("ATDF105_202615_2690_EL_ON"));
+        assert_eq!(unab().course_slug(&meta), "atdf105-mineria-de-datos");
+        assert_eq!(unab().section(&meta).as_deref(), Some("2690"));
+    }
+
+    #[test]
+    fn parse_v1_course_dir_skips_a_code_shaped_word_of_the_name() {
+        let meta = unab()
+            .parse_v1_course_dir("202615_2700_PROGRAMACION_EN_PYTHON3_ATDF200_202615_2700_EL_ON");
+        assert_eq!(meta.name, "202615_2700_PROGRAMACION_EN_PYTHON3");
+        assert_eq!(meta.code.as_deref(), Some("ATDF200_202615_2700_EL_ON"));
+        assert_eq!(unab().course_slug(&meta), "atdf200-programacion-en-python3");
+    }
+
+    #[test]
+    fn parse_v1_course_dir_without_a_split_is_all_name() {
+        let meta = unab().parse_v1_course_dir("Apuntes_sueltos");
+        assert_eq!(meta.name, "Apuntes_sueltos");
+        assert_eq!(meta.code, None);
+        let meta = generic().parse_v1_course_dir("Mineria_ATDF105");
+        assert_eq!(meta.name, "Mineria_ATDF105");
+        assert_eq!(meta.code, None);
+        // A code that is the whole directory leaves no name, so no split.
+        assert_eq!(unab().parse_v1_course_dir("ATDF105_X").code, None);
     }
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
