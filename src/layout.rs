@@ -12,7 +12,7 @@ use crate::config;
 use crate::fsutil::ascii_skeleton;
 use chrono::{Datelike, NaiveDate};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// Version written to `.u_crawler/library.json` by a v2 library.
@@ -170,19 +170,78 @@ impl CourseNaming {
         }
     }
 
-    /// Final directory names for a whole set of courses, in input order:
-    /// [`CourseNaming::course_slug`] followed by [`disambiguate`].
-    pub fn course_slugs(&self, courses: &[CourseMeta]) -> Vec<String> {
-        let candidates: Vec<SlugCandidate> = courses
+    /// Directory names for `courses`, in input order, given the course
+    /// directories the library already has.
+    ///
+    /// Names are stable over time: a course that already owns a directory
+    /// keeps it, whatever else is passed, and only a newcomer whose name is
+    /// taken gets a suffix. A course owns an [`ExistingCourseDir`] when both
+    /// have the same Canvas id or, if the directory has no recorded id (a v1
+    /// course migrated offline), the same Canvas name and code. Every other
+    /// course goes through [`CourseNaming::course_slug`] and then
+    /// [`disambiguate`] against all of `existing`'s names, so the writer that
+    /// only sees active courses still avoids the directories of archived ones.
+    pub fn course_dirs(
+        &self,
+        existing: &[ExistingCourseDir],
+        courses: &[CourseMeta],
+    ) -> Vec<String> {
+        let mut owner: Vec<Option<usize>> = vec![None; courses.len()];
+        let mut claimed = vec![false; existing.len()];
+        let by_id =
+            |e: &ExistingCourseDir, c: &CourseMeta| e.course.id.is_some() && e.course.id == c.id;
+        let by_name = |e: &ExistingCourseDir, c: &CourseMeta| {
+            e.course.id.is_none() && e.course.name == c.name && e.course.code == c.code
+        };
+        for same in [
+            &by_id as &dyn Fn(&ExistingCourseDir, &CourseMeta) -> bool,
+            &by_name,
+        ] {
+            for (ci, c) in courses.iter().enumerate() {
+                if owner[ci].is_some() {
+                    continue;
+                }
+                if let Some(ei) =
+                    (0..existing.len()).find(|&ei| !claimed[ei] && same(&existing[ei], c))
+                {
+                    claimed[ei] = true;
+                    owner[ci] = Some(ei);
+                }
+            }
+        }
+
+        let newcomers: Vec<usize> = (0..courses.len())
+            .filter(|&ci| owner[ci].is_none())
+            .collect();
+        let candidates: Vec<SlugCandidate> = newcomers
             .iter()
-            .map(|c| SlugCandidate {
-                slug: self.course_slug(c),
-                section: self.section(c),
-                id: c.id,
+            .map(|&ci| SlugCandidate {
+                slug: self.course_slug(&courses[ci]),
+                section: self.section(&courses[ci]),
+                id: courses[ci].id,
             })
             .collect();
-        disambiguate(&candidates)
+        let taken: BTreeSet<String> = existing.iter().map(|e| e.dir.clone()).collect();
+        let mut fresh = disambiguate(&taken, &candidates).into_iter();
+
+        owner
+            .iter()
+            .map(|o| match o {
+                Some(ei) => existing[*ei].dir.clone(),
+                None => fresh.next().unwrap_or_default(),
+            })
+            .collect()
     }
+}
+
+/// A course directory the library already has, with what is recorded about
+/// its course (from its `curso.json`, or whatever the migrator recovered).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExistingCourseDir {
+    /// The directory name under the library root.
+    pub dir: String,
+    /// The course it holds; `id` is `None` until a sync records it.
+    pub course: CourseMeta,
 }
 
 fn compile(key: &'static str, pattern: &str) -> Result<Option<Regex>, LayoutError> {
@@ -254,13 +313,16 @@ pub struct SlugCandidate {
 
 /// Make course slugs unique, returning them in input order.
 ///
-/// A slug shared by two or more candidates gets `-s<section>` on each of
-/// them (`-c<id>` when the section is unknown, nothing when both are). A slug
-/// used once is left alone, so adding a suffix never renames a course that
-/// had no collision. Any collision that survives the suffixes is settled with
-/// `-2`, `-3`, ... in input order — callers wanting a stable result across
-/// runs pass the courses in a stable order (e.g. sorted by id).
-pub fn disambiguate(candidates: &[SlugCandidate]) -> Vec<String> {
+/// `taken` holds names already in use (directories of courses not in
+/// `candidates`); none of the results is ever one of them. A slug that
+/// collides — with another candidate or with `taken` — gets `-s<section>`
+/// (`-c<id>` when the section is unknown, nothing when both are). A slug
+/// that collides with nothing is left alone. Whatever still collides is
+/// settled with the first free `-2`, `-3`, ... in input order, skipping any
+/// name that is taken or produced for another candidate — callers wanting a
+/// stable result across runs pass the candidates in a stable order (e.g.
+/// sorted by id).
+pub fn disambiguate(taken: &BTreeSet<String>, candidates: &[SlugCandidate]) -> Vec<String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for c in candidates {
         *counts.entry(c.slug.as_str()).or_default() += 1;
@@ -268,7 +330,9 @@ pub fn disambiguate(candidates: &[SlugCandidate]) -> Vec<String> {
     let suffixed: Vec<String> = candidates
         .iter()
         .map(|c| {
-            if counts.get(c.slug.as_str()).copied().unwrap_or(0) < 2 {
+            let collides =
+                counts.get(c.slug.as_str()).copied().unwrap_or(0) > 1 || taken.contains(&c.slug);
+            if !collides {
                 return c.slug.clone();
             }
             match (&c.section, c.id) {
@@ -283,20 +347,33 @@ pub fn disambiguate(candidates: &[SlugCandidate]) -> Vec<String> {
     for s in &suffixed {
         *totals.entry(s.as_str()).or_default() += 1;
     }
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    // Names nobody else may get: the taken ones, and every suffixed name
+    // that is already unique.
+    let mut used: BTreeSet<String> = taken.clone();
+    used.extend(
+        suffixed
+            .iter()
+            .filter(|s| totals.get(s.as_str()).copied().unwrap_or(0) == 1)
+            .cloned(),
+    );
     suffixed
         .iter()
         .map(|s| {
-            if totals.get(s.as_str()).copied().unwrap_or(0) < 2 {
+            let unique = totals.get(s.as_str()).copied().unwrap_or(0) == 1;
+            if unique && !taken.contains(s) {
                 return s.clone();
             }
-            let n = seen.entry(s.as_str()).or_default();
-            *n += 1;
-            if *n == 1 {
-                s.clone()
-            } else {
-                format!("{s}-{n}")
+            if !used.contains(s) {
+                used.insert(s.clone());
+                return s.clone();
             }
+            let mut n = 2usize;
+            while used.contains(&format!("{s}-{n}")) {
+                n += 1;
+            }
+            let name = format!("{s}-{n}");
+            used.insert(name.clone());
+            name
         })
         .collect()
 }
@@ -378,7 +455,8 @@ pub fn attachment_file(original: &str) -> String {
 /// `YYYY-MM-DD_<topic>[-parte-N].mp4`.
 ///
 /// The course name is removed from the topic (Zoom topics usually repeat
-/// it), and [`DEFAULT_RECORDING_TOPIC`] is used when nothing is left. Pass
+/// it), and [`DEFAULT_RECORDING_TOPIC`] is used when nothing is left — or
+/// put in front when only numbers are left (`clase-1`). Pass
 /// the Canvas course name, or the v1 course directory name — both work,
 /// since what is removed is the longest run of words the two share, as long
 /// as it is at least two words or the whole course name. `part` is the
@@ -392,6 +470,13 @@ pub fn recording_file(
     let topic = strip_course_name(&slugify(topic), &slugify(course_name));
     let topic = if topic.is_empty() {
         DEFAULT_RECORDING_TOPIC.to_string()
+    } else if topic
+        .split('-')
+        .all(|t| t.bytes().all(|b| b.is_ascii_digit()))
+    {
+        // Only a number is left (`MECANICA_1` minus the course name): keep
+        // it, but say what it numbers.
+        format!("{DEFAULT_RECORDING_TOPIC}-{topic}")
     } else {
         topic
     };
@@ -637,7 +722,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            unab().course_slugs(&courses),
+            unab().course_dirs(&[], &courses),
             [
                 "atdf106-electivo-s2520",
                 "atdf106-electivo-s2524",
@@ -646,46 +731,140 @@ mod tests {
         );
     }
 
+    fn existing(dir: &str, course: CourseMeta) -> ExistingCourseDir {
+        ExistingCourseDir {
+            dir: dir.into(),
+            course,
+        }
+    }
+
     #[test]
-    fn section_falls_back_to_name_then_disambiguation_falls_back_to_id() {
+    fn a_retaken_course_never_reuses_or_renames_the_archived_one() {
         let n = unab();
-        // No code at all: the NRC is still in the name.
+        let old = course(
+            1,
+            "202515_1033_MINERIA DE DATOS",
+            "ATDF105_202515_1033_EL_ON",
+        );
+        let new = course(
+            2,
+            "202615_2690_MINERIA DE DATOS",
+            "ATDF105_202615_2690_EL_ON",
+        );
+
+        // First run: only the 2025 course exists.
+        assert_eq!(
+            n.course_dirs(&[], std::slice::from_ref(&old)),
+            ["atdf105-mineria-de-datos"]
+        );
+        let lib = [existing("atdf105-mineria-de-datos", old.clone())];
+
+        // A later sync sees only active courses: the retake avoids the
+        // archived directory instead of landing in it.
+        assert_eq!(
+            n.course_dirs(&lib, std::slice::from_ref(&new)),
+            ["atdf105-mineria-de-datos-s2690"]
+        );
+        // Seeing both, the archived course keeps its name.
+        assert_eq!(
+            n.course_dirs(&lib, &[new.clone(), old.clone()]),
+            ["atdf105-mineria-de-datos-s2690", "atdf105-mineria-de-datos"]
+        );
+        // And once the retake has its directory, both are stable.
+        let lib = [
+            existing("atdf105-mineria-de-datos", old.clone()),
+            existing("atdf105-mineria-de-datos-s2690", new.clone()),
+        ];
+        assert_eq!(
+            n.course_dirs(&lib, &[old, new]),
+            ["atdf105-mineria-de-datos", "atdf105-mineria-de-datos-s2690"]
+        );
+    }
+
+    #[test]
+    fn a_directory_without_a_recorded_id_is_claimed_by_name_and_code() {
+        let n = unab();
+        let c = course(10, "202615_2520_ELECTIVO", "ATDF106_202615_2520_EL_ON");
+        let unidentified = CourseMeta {
+            id: None,
+            ..c.clone()
+        };
+        let lib = [existing("atdf106-electivo-s2520", unidentified)];
+        assert_eq!(n.course_dirs(&lib, &[c]), ["atdf106-electivo-s2520"]);
+    }
+
+    #[test]
+    fn section_falls_back_to_the_name_with_the_shipped_pattern() {
+        let n = unab();
+        // No code at all: the NRC is still in the real Canvas name.
         let from_name = CourseMeta {
             id: None,
-            name: "_202615_2520_ELECTIVO".into(),
+            name: "202615_2520_ELECTIVO".into(),
             code: None,
         };
         assert_eq!(n.section(&from_name).as_deref(), Some("2520"));
+        assert_eq!(
+            n.section(&course(1, "x", "ATDF106_202615_2524_EL_ON"))
+                .as_deref(),
+            Some("2524")
+        );
         assert_eq!(generic().section(&course(1, "x", "y")), None);
+    }
 
+    fn cand(slug: &str, section: Option<&str>, id: Option<u64>) -> SlugCandidate {
+        SlugCandidate {
+            slug: slug.into(),
+            section: section.map(str::to_string),
+            id,
+        }
+    }
+
+    fn all_distinct(names: &[String]) -> bool {
+        names.iter().collect::<BTreeSet<_>>().len() == names.len()
+    }
+
+    #[test]
+    fn disambiguation_falls_back_to_id_then_to_a_counter() {
         let cands = [
-            SlugCandidate {
-                slug: "a".into(),
-                section: None,
-                id: Some(1),
-            },
-            SlugCandidate {
-                slug: "a".into(),
-                section: None,
-                id: Some(2),
-            },
-            SlugCandidate {
-                slug: "b".into(),
-                section: None,
-                id: None,
-            },
-            SlugCandidate {
-                slug: "b".into(),
-                section: None,
-                id: None,
-            },
-            SlugCandidate {
-                slug: "c".into(),
-                section: Some("9".into()),
-                id: None,
-            },
+            cand("a", None, Some(1)),
+            cand("a", None, Some(2)),
+            cand("b", None, None),
+            cand("b", None, None),
+            cand("c", Some("9"), None),
         ];
-        assert_eq!(disambiguate(&cands), ["a-c1", "a-c2", "b", "b-2", "c"]);
+        assert_eq!(
+            disambiguate(&BTreeSet::new(), &cands),
+            ["a-c1", "a-c2", "b", "b-2", "c"]
+        );
+    }
+
+    #[test]
+    fn the_counter_skips_names_already_produced_or_taken() {
+        let none = BTreeSet::new();
+        let got = disambiguate(
+            &none,
+            &[
+                cand("b", None, None),
+                cand("b", None, None),
+                cand("b-2", None, None),
+            ],
+        );
+        assert_eq!(got, ["b", "b-3", "b-2"]);
+
+        let got = disambiguate(
+            &none,
+            &[
+                cand("x", Some("1"), Some(1)),
+                cand("x", Some("1"), Some(2)),
+                cand("x-s1-2", None, Some(3)),
+            ],
+        );
+        assert!(all_distinct(&got), "{got:?}");
+        assert_eq!(got, ["x-s1", "x-s1-3", "x-s1-2"]);
+
+        let taken: BTreeSet<String> = ["b".to_string(), "b-2".to_string()].into();
+        let got = disambiguate(&taken, &[cand("b", None, None), cand("b", None, None)]);
+        assert_eq!(got, ["b-3", "b-4"]);
     }
 
     #[test]
@@ -791,6 +970,12 @@ mod tests {
                 "Estadística"
             ),
             "2026-01-05_clase-4-parte-3.mp4"
+        );
+        // Only a number left after the course name: it is a class number.
+        let rec = parse_v1_recording("2025_10_01_202525_1149_MECANICA_1.mp4", &[]).unwrap();
+        assert_eq!(
+            recording_file(rec.date, &rec.topic, rec.part, "202525_1149_MECANICA"),
+            "2025-10-01_clase-1.mp4"
         );
         assert_eq!(
             recording_file(date(2026, 1, 5), "", None, ""),

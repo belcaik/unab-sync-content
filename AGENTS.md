@@ -185,7 +185,7 @@ caldir_root = "~/Documents/Caldir"   # root of the caldir tree u_crawler owns ex
 course_dir = "{code}-{name}" # placeholders {code}, {name}, {id}
 code_pattern = ""            # regex on course_code; group 1 fills {code}
 name_strip_pattern = ""      # regex removed from the name before {name}
-section_pattern = ""         # regex for the section/NRC, used for -s<nrc> on collisions
+section_pattern = ""         # regex for the section/NRC, used for -s<nrc> when a dir name is taken
 
 [zoom]
 enabled = true

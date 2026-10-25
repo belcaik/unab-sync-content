@@ -33,15 +33,16 @@ caldir_root = "~/Documents/Caldir"  # root of the caldir tree u_crawler owns exc
 course_dir = "{code}-{name}"
 code_pattern = ""               # regex on course_code; group 1 (or the match) fills {code}
 name_strip_pattern = ""         # regex; every match is removed from the name before {name}
-section_pattern = ""            # regex finding the section/NRC; only used to add -s<nrc>
-                                # when two courses would get the same directory name
+section_pattern = ""            # regex finding the section/NRC (in the code, then the name); only
+                                # used to add -s<nrc> when a course would get a directory name
+                                # that another course has, or already had, in this library
 #
 # Example (UNAB): code "ATDF105_202615_2690_EL_ON" + name "202615_2690_MINERIA DE DATOS"
 # become "atdf105-mineria-de-datos"; two sections of ATDF106 become
 # "atdf106-...-s2520" and "atdf106-...-s2524".
 # code_pattern = '^([A-Z]+[0-9]+)'
 # name_strip_pattern = '^[0-9]{6}[_\s]+[0-9]+[_\s]+'
-# section_pattern = '_[0-9]{6}_([0-9]+)_'
+# section_pattern = '(?:^|_)[0-9]{6}[_\s]+([0-9]+)[_\s]'
 
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely
