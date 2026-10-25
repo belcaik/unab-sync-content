@@ -146,6 +146,14 @@ Implementada en T0. Todo es puro (sin E/S) y devuelve **nombres relativos**: qui
 5. `Zoom/<id>` sin un ramo asociado se queda en su lugar, con un `warn!`. Un ramo sin `index.json`, como ATDF106-2520, se migra igual y queda con `canvas_id: null` hasta el próximo `sync`.
 6. Todo `rename` es sobre el mismo sistema de archivos. Ante `EXDEV` la ejecución se detiene y no copia.
 
+### Fixture sintética (T1)
+
+`tests/fixtures/v1/` escribe un árbol v1 determinista en un directorio vacío que le pasa el test (`write_v1_library`). No usa datos reales: los nombres son los ejemplos de este spec y de `layout.rs`, los ids son inventados y los mp4 son unos pocos bytes. Un test de integración lo incluye con `#[path = "fixtures/v1/mod.rs"] mod v1;`.
+
+La función devuelve el catálogo y el manifiesto `ruta relativa → SHA-1` de cada archivo. `hash_tree` vuelve a hashear el árbol: en un test de no-pérdida el multiset de hashes no cambia aunque cambien las rutas. Los archivos de `foreign` (`.obsidian/`, `.git/HEAD`, `Pasted image.png`) se quedan en la misma ruta.
+
+Los nombres v2 del catálogo salen de `layout` con la plantilla UNAB comentada en `assets/config.toml` (`unab_naming`, `course_dirs` con `existing` vacío, `parse_v1_recording` + `recording_file`, `attachment_file`). Los nombres v1 salen de `fsutil`, igual que los escritores. El árbol cubre las dos secciones de ATDF106 (2520 con `announcements/` y sin `index.json`), el par `…DISRUPCION_EMPRESARIAL.mp4` / `…_1.mp4`, `Sesion_sincronica_1`, cuatro ramos de 2025 sin `announcements/` (uno por cada nombre de grabación del hallazgo de la biblioteca), `nota-del-usuario.md` dentro de un módulo, `CodeR_S3.zip` y un `Zoom/424242/` huérfano. No hay `library.json`.
+
 ## Ejecución con agentes (tablero herdr)
 
 Todos los tickets se publican en herdr con `herdr-projects`. Cada agente trabaja en su propio worktree y rama `feat/layout-v2-<ticket>`, y yo hago el merge hacia `feat/layout-v2`. El revisor también cumple el rol de tester: corre `cargo test`, clippy en las dos variantes de features y el skill `code-review` (estándares + spec).

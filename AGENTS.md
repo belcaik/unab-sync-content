@@ -490,11 +490,13 @@ Documented so they are not rediscovered as surprises:
 Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
-byte-size formatting, char-safe truncation, and Zoom cookie expiry.
+byte-size formatting, char-safe truncation, Zoom cookie expiry, and the
+synthetic layout-v1 library (`tests/fixtures/v1/`, written under a temp dir;
+no real course data — see `docs/specs/layout-v2.md`).
 
 Worth adding: a mock-server integration test covering pagination across three
-pages, ETag skip, and `Range` resume — `tests/` currently only covers the Zoom
-database.
+pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and
+that v1 fixture.
 
 ---
 
