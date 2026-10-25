@@ -137,6 +137,24 @@ Implementada en T0. Todo es puro (sin E/S) y devuelve **nombres relativos**: qui
 | `2026_10_14_202625_1108_RESPONSABILIDAD_SOCIAL_SEMANA_3.mp4` | `2026-10-14_semana-3.mp4` |
 | `2026_07_02_Sesion_sincronica_3.mp4` | `2026-07-02_sesion-sincronica-3.mp4` |
 
+### API de `index.rs`
+
+Implementada en T5. Todo es puro (sin E/S ni red) y devuelve **texto**: quien llama escribe el archivo con `fsutil::atomic_write`. Todos los nombres de archivo y directorio salen de `layout.rs` — este módulo nunca inventa nombres. Los textos están en español (el vault es del usuario) y las fechas se escriben como `YYYY-MM-DD HH:MM UTC`.
+
+**Modelo en memoria.** `LibraryIndex { courses: Vec<CourseIndex> }`, construible tanto desde Canvas (sync, T6) como desde disco (migrate, sin red). `CourseIndex` lleva el `dir` final, un `layout::CourseMeta` (`canvas_id` puede ser `None` tras una migración offline), `term`, `section`, `zoom_ids` (los ids de las carpetas `Zoom/<id>` migradas al ramo) y las listas `modules`, `assignments`, `announcements`, `recordings`. `ModuleIndex` lleva `position`, `name`, `dir`, `pages: Vec<PageIndex>` y `assignments: Vec<AssignmentRef>` (referencias a tareas en `tareas/`). Los constructores `new` derivan el nombre del archivo desde `layout.rs` (`ModuleIndex::new`, `PageIndex::new`, `AssignmentIndex::new`, `AssignmentRef::new`, `AnnouncementIndex::new`); hay `From<&canvas::Assignment> for AssignmentIndex`. `AnnouncementIndex` no tiene constructor sin fecha: el nombre v2 es `YYYY-MM-DD_<slug>.md`, así que quien lee desde disco registra el nombre que encontró. El render siempre ordena (módulos por `position`, ramos por `dir`, tareas por vencimiento — sin fecha al final —, anuncios del más nuevo al más antiguo), así que la misma entrada produce el mismo texto.
+
+**Render**
+
+| Función | Archivo | Contenido |
+|---|---|---|
+| `render_course_readme(&CourseIndex)` | `<ramo>/README.md` | título + metadatos (`Código`, `Término`, `Sección`, `ID Canvas`), `## Módulos` ordenados, `## Tareas` con `— vence <fecha>`, `## Anuncios recientes` (tope `RECENT_ANNOUNCEMENTS = 10`, el resto se resume como "…y N más"), `## Grabaciones`. Secciones vacías se omiten. |
+| `render_module_readme(&ModuleIndex)` | `modulos/NN-x/README.md` | `## Páginas` (enlaces relativos al mismo directorio) y `## Tareas` (`../../tareas/`). |
+| `render_curso_json(&CourseIndex)` | `<ramo>/curso.json` | `{ canvas_id, course_code, name, term, section, zoom_ids }`, pretty JSON con `\n` final. `canvas_id: null` cuando el ramo se migró sin red. |
+| `render_index_md(&LibraryIndex, today: NaiveDate)` | `<root>/INDEX.md` | `## Ramos` (nombre, código, término) y `## Próximas entregas` (tareas con `vence >= today`, de todas las ramas, más próximas primero). `today` es parámetro para que el render sea puro y testeable. |
+| `render_agents_md()` | `<root>/AGENTS.md` | texto estático (incluye `LAYOUT_VERSION`) que explica a un agente cómo navegar el árbol v2; marca la biblioteca como de solo lectura para agentes. |
+
+Los tests comparan el texto completo (snapshots en línea) de cada render, incluido el caso offline `canvas_id: null`, el tope de anuncios, el escape de `[]` en textos de enlace y el filtro de próximas entregas en el límite (`vence` hoy incluye).
+
 ### Reglas del migrador (invariantes que se testean)
 
 1. No existe ninguna operación de borrado. Las únicas son `rename`, `mkdir` y la escritura atómica de `.md` con respaldo previo. Las carpetas viejas vacías se dejan en su lugar y se reportan.
