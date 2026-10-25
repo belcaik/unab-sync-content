@@ -334,7 +334,9 @@ src/
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
   index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   migrate/
-    mod.rs          # offline migration; only rewrite is implemented (no detect/plan/apply, no CLI)
+    mod.rs          # read-only scan into an Inventory; rewrite is the only writer (no rename executor, no CLI)
+    detect.rs       # pure: v1 / v2 / empty, from the inventory
+    plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
     rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
@@ -510,9 +512,11 @@ byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
 round-trip and upsert, Canvas `/files/<id>` markdown rewrite,
 `migrate::rewrite` (generated-path gate, backup, resume, a leading horizontal
 rule left in the body, refusal of an existing `.part`, and on Unix the
-hardlink inode), layout v2 index rendering, and the synthetic layout-v1
+hardlink inode), layout v2 index rendering, the synthetic layout-v1
 library (`tests/fixtures/v1/`, written under a temp dir; no real course data —
-see `docs/specs/layout-v2.md`).
+see `docs/specs/layout-v2.md`), and the migration plan over that library
+(`tests/migrate_plan.rs`: golden snapshot in `tests/golden/migrate_plan_v1.txt`,
+regenerated with `U_CRAWLER_BLESS=1`; no-loss and second-run-is-empty checks).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and
