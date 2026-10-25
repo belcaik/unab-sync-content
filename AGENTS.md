@@ -331,6 +331,7 @@ src/
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
   layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
+  index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
