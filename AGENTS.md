@@ -43,6 +43,8 @@ recordings that session can reach.
 * **Config:** TOML (`directories`, `toml`)
 * **Parsing:** `serde`, `serde_json`, `regex`, `url`, `html2md`
 * **Storage:** `rusqlite` (Zoom session store), JSON (`state.json` per course)
+* **Migration:** `blake3` (`pure`) for collision checks; `rustix` (Linux only)
+  for `renameat2(RENAME_NOREPLACE)`, so a migration rename never replaces a file
 * **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml).
   Gated behind the default-on `zoom` cargo feature, along with the rest of the
   Zoom flow (`rusqlite`, `cookie`, `cookie_store`, `reqwest_cookie_store`,
@@ -336,6 +338,7 @@ src/
     mod.rs          # read-only library scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs)
     detect.rs       # pure: v1 / v2 / empty, from the inventory
     plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
+    apply.rs        # executor: write-ahead journal (.u_crawler/migrations/<ts>.jsonl), rename without replace, BLAKE3 collisions, resume, undo
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
@@ -500,7 +503,11 @@ synthetic layout-v1 library (`tests/fixtures/v1/`, written under a temp dir;
 no real course data — see `docs/specs/layout-v2.md`), and the migration plan
 over that library (`tests/migrate_plan.rs`: golden snapshot in
 `tests/golden/migrate_plan_v1.txt`, regenerated with `U_CRAWLER_BLESS=1`;
-no-loss and second-run-is-empty checks).
+no-loss and second-run-is-empty checks), and its execution
+(`tests/migrate_apply.rs`: a cut at several points resumes from the journal to
+the same tree, undo restores the manifest byte for byte, a second run is a
+no-op, identical/different collisions, and a `cp -al` clone whose markdown is
+rewritten leaves the original untouched).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and

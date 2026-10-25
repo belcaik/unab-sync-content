@@ -69,7 +69,7 @@ Los números de módulo salen de la `position` de Canvas cuando está disponible
 - **Nuevo `src/migrate/`**:
   - `detect.rs`: reconoce el layout v1. Sus señales son la carpeta `Zoom/` con subcarpetas numéricas, `Modules/<id>_`, `NN-ASSIGN-` y la ausencia de `library.json`.
   - `plan.rs`: planificador **puro**. Recibe un inventario del árbol (más metadatos opcionales de Canvas) y devuelve un `Plan { moves, edits, duplicates, conflicts, unresolved }`.
-  - `apply.rs`: ejecutor. Escribe primero la línea del diario y después ejecuta `rename(2)`. Solo trabaja dentro del mismo sistema de archivos y se detiene si `rename` devuelve `EXDEV`. Reanuda desde el diario y revierte con `--undo`. Para el BLAKE3 usa la crate `blake3`.
+  - `apply.rs`: ejecutor. Escribe primero la línea del diario y después ejecuta `rename(2)`. Solo trabaja dentro del mismo sistema de archivos y se detiene si `rename` devuelve `EXDEV`. Reanuda desde el diario y revierte con `--undo`. Para el BLAKE3 usa la crate `blake3`. API en [API de `migrate::apply`](#api-de-migrateapply).
   - `rewrite.rs`: inserta el frontmatter y reescribe los enlaces de los `.md` generados. Escribe siempre con un rename atómico (`fsutil::atomic_write`), nunca en el mismo archivo, para que un clon con hardlinks (`cp -al`) no altere el original.
 - **Escritores que cambian para usar `layout.rs`**:
   - `src/syncer.rs:246,342` (Modules/Attachments). Las tareas pasan a `tareas/`.
@@ -190,6 +190,19 @@ Lo demás es ajeno y viaja con su carpeta **conservando su nombre**: una nota en
 - **Vacío.** `Plan::is_empty()` mira `moves`, `edits`, `duplicates` y `conflicts`; `unresolved` es informe. Una biblioteca ya migrada (con su Zoom huérfano) planifica vacío. El test hace la migración con renames sobre la fixture en un tempdir, vuelve a escanear y comprueba plan vacío, el mismo multiconjunto de hashes y los archivos ajenos intactos.
 
 El golden snapshot está en `tests/golden/migrate_plan_v1.txt`; `U_CRAWLER_BLESS=1 cargo test --test migrate_plan` lo regenera.
+
+### API de `migrate::apply`
+
+Implementada en T3. Es síncrona (como `scan`); quien la llama desde `tokio` usa `spawn_blocking`. `Roots { library, caldir }` da las dos raíces; el diario vive en la biblioteca.
+
+- **`apply(&Plan, &Roots, ts) -> Result<Report, ApplyError>`** ejecuta un plan con un diario nuevo `<root>/.u_crawler/migrations/<ts>.jsonl` (`new_timestamp(now)` da `YYYYMMDDTHHMMSSmmmZ`, UTC). Orden: `moves` (biblioteca y después caldir), colisiones (`duplicates` y luego `conflicts`) y por último un `curso.json` por ramo cuyo directorio exista y no lo tenga. Un plan sin nada que hacer no crea diario. Un `ts` ya usado da `JournalExists`.
+- **Diario.** Una línea JSON por entrada, escrita y con `fsync` **antes** de la operación. La primera es `begin` con la intención completa (`Intent { moves, collisions, courses }`); después vienen `mkdir` (un nivel por línea), `rename` y `write` (el `curso.json`, escrito en un temporal y renombrado), y cierra `done`. Una última línea cortada se ignora al leer, y al reanudar se empieza una línea nueva.
+- **Renames.** En Linux, `renameat2(RENAME_NOREPLACE)` (crate `rustix`); en otros sistemas, o si el FS no soporta la bandera, se comprueba el destino antes. `EXDEV` detiene la ejecución con `CrossDevice` sin copiar nada. Una ruta que pasa por un symlink (`Symlink`) o que tiene `..`/`.` (`BadPath`) se rechaza.
+- **Colisiones.** Para cada origen, en orden: si el destino está libre, se mueve. Si existe, se compara tamaño + BLAKE3 (crate `blake3`, feature `pure`). Igual: el origen se queda y va a `Report::duplicates`. Distinto: el origen va a `conflict_name(to, hash8)` = `nombre.conflicto-<hash8>.ext` (hash del origen, antes de la última extensión); si ese nombre ya tiene otro contenido, `ConflictNameTaken`. Un `Move` cuyo destino apareció después del plan se trata igual: nunca se pisa.
+- **Reanudación: `pending(root)` + `resume(&Roots, ts)`.** `resume` ejecuta la intención guardada en `begin`, **no** un plan nuevo: un plan hecho sobre un árbol a medio migrar no es el mismo (con `X.mp4` ya movido, `X_1.mp4` deja de ser la parte 2 y recibiría otro nombre; un ramo vaciado antes que su `Zoom/` dejaría la carpeta huérfana). Como `rename` es atómico, cada operación registrada ocurrió o no, y el disco lo dice: un origen que ya no está y que el diario renombró se salta.
+- **`undo(&Roots, ts) -> UndoReport`** recorre el diario al revés. Cada `rename` se revierte si el destino está y el origen no (antes escribe `revert` en el mismo diario); si están los dos, `UndoBlocked`; si no está ninguno, se reporta en `missing`. Cada `curso.json` escrito se aparta a `.u_crawler/migrations/<ts>.undo/<ruta>` (`set-aside`), nunca se borra. Los directorios creados se quedan, vacíos. Cierra con `undone`. Se puede repetir tras un corte; sobre un diario ya deshecho no hace nada. Se niega (`NewerJournal`) si hay una migración posterior sin deshacer. Tras `undo`, el árbol (fuera de `.u_crawler/`) vuelve byte a byte al manifiesto de la fixture y planifica igual que antes.
+- **Fuera de alcance.** `apply` no reescribe `.md` (`Plan::edits` es de `migrate::rewrite`, T4) ni escribe `library.json`: lo hace quien orquesta (`ensure_v2`, T7) después de `apply`, la reescritura y los índices. Orden esperado en T7: `pending` → `resume`; luego `scan` → `plan` → `apply` con un `ts` nuevo.
+- `apply_with_hook` (oculta en la documentación) llama a un gancho después de sincronizar cada línea y antes de la operación; los tests lo usan para simular un corte en el peor momento.
 
 ### Reglas del migrador (invariantes que se testean)
 

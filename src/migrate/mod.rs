@@ -11,10 +11,15 @@
 //!   [`plan::Plan`]: moves, markdown edits, destination collisions and what
 //!   it could not place. It is pure and deterministic.
 //!
-//! Nothing here deletes, overwrites or even opens a file for writing. The
-//! executor that applies a plan (journal, `rename(2)`, BLAKE3 for collisions)
-//! is a separate step.
+//! - [`apply::apply`] carries a plan out: a write-ahead journal under
+//!   `.u_crawler/migrations/`, `rename(2)` without replacement, BLAKE3 for
+//!   collisions; [`apply::undo`] reverses a journal.
+//!
+//! Scanning and planning never open a file for writing. The executor renames
+//! and creates directories and `curso.json`; nothing here deletes, copies or
+//! overwrites a file.
 
+pub mod apply;
 pub mod detect;
 pub mod plan;
 
