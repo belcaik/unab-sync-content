@@ -271,13 +271,20 @@ fn resolve_courses(
 
     // Every name already at the root is taken, so a course never lands in a
     // folder it does not own. v1 course directories are not taken: each is
-    // emptied by its own migration, and a course may keep its name.
+    // emptied by its own migration, and a course may keep its name. Neither
+    // is a v2 course directory without its `curso.json` (it has
+    // `.u_crawler/state.json`): that is a migration cut short, and re-planning
+    // must send the course back into it rather than split it in two.
     let mut existing = inv.existing.clone();
     let owned: BTreeSet<&str> = existing.iter().map(|e| e.dir.as_str()).collect();
     let reserved: Vec<ExistingCourseDir> = inv
         .root_names()
         .into_iter()
         .filter(|n| !v1_dirs.contains(n) && !owned.contains(n))
+        .filter(|n| {
+            !inv.files
+                .contains_key(&format!("{n}/{}/{V1_STATE_FILE}", layout::META_DIR))
+        })
         .map(|n| ExistingCourseDir {
             dir: n.to_string(),
             course: CourseMeta::default(),
@@ -324,7 +331,8 @@ struct Source {
 }
 
 /// One course-matching rule of [`match_by_tokens`].
-type Tier<'a> = &'a dyn Fn(&CourseMeta, &BTreeSet<String>) -> bool;
+/// Its second argument is a topic's words, then those words minus the date's.
+type Tier<'a> = &'a dyn Fn(&CourseMeta, &(BTreeSet<String>, BTreeSet<String>)) -> bool;
 
 struct Planner<'a> {
     inv: &'a Inventory,
@@ -577,49 +585,86 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 
 /// The one course a `Zoom/<id>/` folder's recording names point at.
 ///
+/// Only courses with no known Canvas id take part: v1 named the folder after
+/// the course id, so a course whose id is known and is not `<id>` cannot own it.
+///
 /// Tiers, strongest first: the course section (NRC) as a word of a topic,
-/// the short code as a word, every word of the short name. The first tier
-/// that matches anything decides: one course is `Ok`, several are `Err`
-/// with their indices; no tier matching is `Err` of nothing.
+/// the short code as a word, every word of the short name. Each tier that
+/// matches anything narrows the candidates; a tier that matches only courses
+/// already ruled out means the names disagree, and the folder is ambiguous.
+/// One course left is `Ok`; several are `Err` with their indices; no tier
+/// matching is `Err` of nothing.
+///
+/// Numbers taken from the recording date (`2025`, `0610` for 2025-10-06)
+/// never count as a section: dated topics repeat them (`…_18_06_2025`).
 fn match_by_tokens(
     naming: &CourseNaming,
     courses: &[Resolved],
     names: &[&str],
 ) -> Result<usize, Vec<usize>> {
-    let topics: Vec<BTreeSet<String>> = names
+    let topics: Vec<(BTreeSet<String>, BTreeSet<String>)> = names
         .iter()
         .map(|name| {
-            let topic = layout::parse_v1_recording(name, names)
-                .map(|r| r.topic)
-                .unwrap_or_else(|| name.rsplit_once('.').map_or(*name, |(s, _)| s).to_string());
-            words(&topic).into_iter().collect()
+            let (topic, date) = match layout::parse_v1_recording(name, names) {
+                Some(r) => (r.topic, Some(r.date)),
+                None => (
+                    name.rsplit_once('.').map_or(*name, |(s, _)| s).to_string(),
+                    None,
+                ),
+            };
+            let all: BTreeSet<String> = words(&topic).into_iter().collect();
+            let dated: BTreeSet<String> = date
+                .map(|d| {
+                    [d.format("%Y"), d.format("%d%m"), d.format("%m%d")]
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let numbers = all.difference(&dated).cloned().collect();
+            (all, numbers)
         })
         .collect();
-    let by_section =
-        |c: &CourseMeta, t: &BTreeSet<String>| naming.section(c).is_some_and(|s| t.contains(&s));
-    let by_code = |c: &CourseMeta, t: &BTreeSet<String>| {
-        let code = layout::slugify(&naming.short_code(c));
-        !code.is_empty() && t.contains(&code)
+    let by_section = |c: &CourseMeta, t: &(BTreeSet<String>, BTreeSet<String>)| {
+        naming.section(c).is_some_and(|s| t.1.contains(&s))
     };
-    let by_name = |c: &CourseMeta, t: &BTreeSet<String>| {
+    let by_code = |c: &CourseMeta, t: &(BTreeSet<String>, BTreeSet<String>)| {
+        let code = layout::slugify(&naming.short_code(c));
+        !code.is_empty() && t.0.contains(&code)
+    };
+    let by_name = |c: &CourseMeta, t: &(BTreeSet<String>, BTreeSet<String>)| {
         let name = words(&naming.short_name(c));
-        !name.is_empty() && name.iter().all(|w| t.contains(w))
+        !name.is_empty() && name.iter().all(|w| t.0.contains(w))
     };
     let tiers: [Tier; 3] = [&by_section, &by_code, &by_name];
+    let mut candidates: Option<BTreeSet<usize>> = None;
     for tier in tiers {
-        let hits: Vec<usize> = courses
+        let hits: BTreeSet<usize> = courses
             .iter()
             .enumerate()
+            .filter(|(_, c)| c.planned.course.id.is_none())
             .filter(|(_, c)| topics.iter().any(|t| tier(&c.planned.course, t)))
             .map(|(i, _)| i)
             .collect();
-        match hits.as_slice() {
-            [] => continue,
-            [only] => return Ok(*only),
-            _ => return Err(hits),
+        if hits.is_empty() {
+            continue;
         }
+        candidates = Some(match candidates {
+            None => hits,
+            Some(prev) => {
+                let both: BTreeSet<usize> = prev.intersection(&hits).copied().collect();
+                if both.is_empty() {
+                    return Err(prev.union(&hits).copied().collect());
+                }
+                both
+            }
+        });
     }
-    Err(Vec::new())
+    let candidates: Vec<usize> = candidates.unwrap_or_default().into_iter().collect();
+    match candidates.as_slice() {
+        [only] => Ok(*only),
+        _ => Err(candidates),
+    }
 }
 
 /// The words of a name, as slugs.
@@ -1160,6 +1205,70 @@ mod tests {
         );
         assert!(plan.edits.is_empty());
         assert_eq!(plan.courses[0].zoom_ids, [9]);
+    }
+
+    #[test]
+    fn a_course_with_another_canvas_id_never_takes_a_zoom_folder() {
+        // A retaken course: its old offering's folder names the same course.
+        let mut inv = inv(&[
+            (&format!("{MIN}/state.json"), 1),
+            ("Zoom/157107/2025_06_23_202515_1033_MINERIA_DE_DATOS.mp4", 1),
+        ]);
+        inv.course_ids.insert(MIN.into(), 9001);
+        let plan = plan(&inv, &unab(), &[]);
+        assert!(plan.courses[0].zoom_ids.is_empty());
+        assert!(plan.moves.iter().all(|m| !m.from.starts_with("Zoom/")));
+        assert_eq!(
+            plan.unresolved,
+            [Unresolved {
+                root: Root::Library,
+                path: "Zoom/157107".into(),
+                reason: Reason::OrphanZoom,
+            }]
+        );
+    }
+
+    #[test]
+    fn date_numbers_are_not_a_section_and_tiers_must_agree() {
+        let fis = "202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON";
+        let qui = "202515_2025_QUIMICA_QUIM100_202515_2025_EL_ON";
+        let inv = inv(&[
+            (&format!("{fis}/state.json"), 1),
+            (&format!("{qui}/state.json"), 1),
+            ("Zoom/8102/2025_06_18_Clase_FMMA015_18_06_2025.mp4", 1),
+            // The section says quimica, the code says fisica: ambiguous.
+            ("Zoom/8103/2026_06_19_Clase_FMMA015_NRC_2025.mp4", 1),
+        ]);
+        let plan = plan(&inv, &unab(), &[]);
+        assert_eq!(
+            moved(&plan, "Zoom/8102/2025_06_18_Clase_FMMA015_18_06_2025.mp4"),
+            Some("fmma015-fisica-general/grabaciones/2025-06-18_clase-fmma015-18-06-2025.mp4")
+        );
+        assert_eq!(
+            plan.unresolved,
+            [Unresolved {
+                root: Root::Library,
+                path: "Zoom/8103".into(),
+                reason: Reason::AmbiguousZoom(vec![
+                    "fmma015-fisica-general".into(),
+                    "quim100-quimica".into()
+                ]),
+            }]
+        );
+    }
+
+    #[test]
+    fn replanning_a_cut_migration_resumes_into_the_same_directory() {
+        let inv = inv(&[
+            ("atdf105-mineria-de-datos/.u_crawler/state.json", 1),
+            (&format!("{MIN}/Modules/1_Uno/01-A.md"), 1),
+        ]);
+        let plan = plan(&inv, &unab(), &[]);
+        assert_eq!(plan.courses[0].dir, "atdf105-mineria-de-datos");
+        assert_eq!(
+            moved(&plan, &format!("{MIN}/Modules/1_Uno/01-A.md")),
+            Some("atdf105-mineria-de-datos/modulos/01-uno/01-a.md")
+        );
     }
 
     #[test]
