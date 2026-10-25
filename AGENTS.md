@@ -365,7 +365,12 @@ Rules that hold today and should keep holding:
   copies the original bytes to `<root>/.u_crawler/backup/<ts>/` and then
   replaces the note with `fsutil::atomic_write` (a new inode, so a `cp -al`
   clone keeps the old one). A note that already matches is left alone and gets
-  no backup. There is no `migrate` CLI command. The frozen signatures are in
+  no backup. A leading `---` is frontmatter only when the interior is a
+  property list; html2md's `<hr>` (a blank line after the fence) and an
+  indented prose line between two rules stay in the body. An existing
+  non-symlink `.part` beside the note or the backup is refused (`PartExists`);
+  `atomic_write` itself is unchanged and downloads still truncate their own
+  `.part`. There is no `migrate` CLI command. The frozen signatures are in
   `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
@@ -503,7 +508,8 @@ URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
 round-trip and upsert, Canvas `/files/<id>` markdown rewrite,
-`migrate::rewrite` (generated-path gate, backup, resume, and on Unix the
+`migrate::rewrite` (generated-path gate, backup, resume, a leading horizontal
+rule left in the body, refusal of an existing `.part`, and on Unix the
 hardlink inode), layout v2 index rendering, and the synthetic layout-v1
 library (`tests/fixtures/v1/`, written under a temp dir; no real course data —
 see `docs/specs/layout-v2.md`).

@@ -2,9 +2,12 @@
 //!
 //! The block is the Obsidian properties list on a page, assignment,
 //! announcement or recording. Rendering and parsing are pure. [`upsert`]
-//! rewrites an existing block in place: known keys are updated, unknown keys
-//! and the body are left as they were, and a second call with the same value
-//! changes nothing.
+//! rewrites an existing property block in place: known keys are updated,
+//! unknown keys and the body are left as they were, and a second call with
+//! the same value changes nothing. A leading `---` that is not a property
+//! list — html2md's `<hr>`, or body text between two rules — stays in the
+//! body and the block is prepended. v1 notes never ship frontmatter, so that
+//! rule is content.
 //!
 //! Dates (`publicado`, `vence`, `disponible`) are opaque strings. Callers
 //! pass RFC 3339 when they have it; a value that is already written is not
@@ -112,8 +115,11 @@ pub fn render(fm: &Frontmatter) -> String {
 
 /// Read our keys from a leading frontmatter block.
 ///
-/// Returns [`None`] when the note has no frontmatter, or the block has none
-/// of our keys (a user's own properties). Unknown keys are ignored.
+/// Returns [`None`] when the note has no frontmatter, the leading `---` is
+/// not a property list (a blank line right after the fence, a line of prose,
+/// or indented text that is not a list item, nested key, or comment), or the
+/// block has none of our keys (a user's own properties). Unknown keys are
+/// ignored.
 ///
 /// # Errors
 ///
@@ -130,11 +136,13 @@ pub fn parse(markdown: &str) -> Result<Option<Frontmatter>, FrontmatterError> {
 
 /// Insert `fm`, or refresh our keys inside the frontmatter the note already has.
 ///
-/// A note that already starts with a closed `---` block keeps every key this
-/// module does not own, and keeps the body byte for byte. Our keys are
+/// A note that already starts with a closed property block keeps every key
+/// this module does not own, and keeps the body byte for byte. Our keys are
 /// rewritten to the canonical spelling; a missing one is appended; one whose
-/// value is now blank is removed. Calling `upsert` again with the same `fm`
-/// returns the same string.
+/// value is now blank is removed. A leading horizontal rule is not that
+/// block: the original bytes, including a `url:` line and anything indented
+/// under it, stay in the body and `fm` is prepended. Calling `upsert` again
+/// with the same `fm` returns the same string.
 ///
 /// # Examples
 ///
@@ -173,11 +181,19 @@ pub(crate) fn strip_bom(markdown: &str) -> (&str, &str) {
     }
 }
 
-/// Split a leading `---` block into `(yaml interior, body)`.
+/// Split a leading property block into `(yaml interior, body)`.
 ///
 /// The interior keeps the newline that ended its last line. The body starts
 /// on the first byte after the closing fence's newline. A missing closer
 /// means this is not frontmatter.
+///
+/// The interior has to be a property list. html2md turns `<hr>` into a line
+/// `---` and then a blank line, and a v1 note never has frontmatter, so a
+/// pair of rules with body text between them is not a block: a blank line
+/// right after the opening fence, a line that is not a key or a comment, or
+/// an indented line that is not a list item, a nested key, or a comment.
+/// Those bytes stay in the body. `update_yaml` would otherwise replace a
+/// `url:` line and drop the indented lines under it.
 pub(crate) fn split_frontmatter(markdown: &str) -> Option<(&str, &str)> {
     let rest = if let Some(rest) = markdown.strip_prefix("---\r\n") {
         rest
@@ -198,8 +214,12 @@ pub(crate) fn split_frontmatter(markdown: &str) -> Option<(&str, &str)> {
             }
         }
         if line == "---" {
+            let yaml = &rest[..offset];
+            if !is_property_block(yaml) {
+                return None;
+            }
             let body_at = offset + line_len + nl_len;
-            return Some((&rest[..offset], &rest[body_at..]));
+            return Some((yaml, &rest[body_at..]));
         }
         if nl_len == 0 {
             return None;
@@ -540,6 +560,42 @@ fn is_indented(line: &str) -> bool {
     line.starts_with(' ') || line.starts_with('\t')
 }
 
+/// True when `yaml` is a list of properties we can update without eating body
+/// text. A blank line immediately after the opening fence is html2md's `<hr>`
+/// (`---\n\n…\n---`), not a property list. A later blank line between keys is
+/// fine.
+fn is_property_block(yaml: &str) -> bool {
+    if yaml.starts_with('\n') || yaml.starts_with("\r\n") {
+        return false;
+    }
+    yaml_lines(yaml).iter().all(|line| is_property_line(line))
+}
+
+fn is_property_line(line: &str) -> bool {
+    line.is_empty() || is_comment_line(line) || key_of(line).is_some() || is_yaml_continuation(line)
+}
+
+fn is_comment_line(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+/// Indented list item or nested key. Plain indented prose is body text;
+/// `update_yaml` would drop it when it follows one of our keys. Comments are
+/// classified by [`is_comment_line`] before this runs.
+fn is_yaml_continuation(line: &str) -> bool {
+    if !is_indented(line) {
+        return false;
+    }
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('-') {
+        return rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t');
+    }
+    match trimmed.split_once(':') {
+        Some((key, _)) => is_yaml_key(key),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +856,76 @@ vence: ~
         assert!(out.starts_with('\u{feff}'));
         assert_eq!(parse(&out).unwrap().unwrap().ramo, "curso");
         assert_eq!(upsert(&out, &fm), out);
+    }
+
+    fn page() -> Frontmatter {
+        Frontmatter {
+            ramo: "atdf105-mineria".into(),
+            tipo: DocKind::Page,
+            canvas_id: Some(42),
+            url: Some("https://x.instructure.com/courses/1/pages/intro".into()),
+            publicado: None,
+            vence: None,
+            disponible: None,
+        }
+    }
+
+    fn body_after_block(text: &str) -> &str {
+        let rest = text.strip_prefix("---\n").expect("opening fence");
+        rest.split_once("\n---\n").expect("closing fence").1
+    }
+
+    #[test]
+    fn a_horizontal_rule_around_prose_stays_in_the_body() {
+        // html2md::parse_html("<hr><p>url: ver abajo</p><p>Texto</p><hr><p>Fin</p>")
+        let input = "---\n\nurl: ver abajo\n\nTexto\n\n---\n\nFin";
+        assert_eq!(parse(input).unwrap(), None);
+        let fm = page();
+        let out = upsert(input, &fm);
+        assert_eq!(body_after_block(&out), input);
+        assert!(out.contains("url: \"https://x.instructure.com/courses/1/pages/intro\"\n"));
+        assert_eq!(out.matches("url: ver abajo").count(), 1);
+        assert!(body_after_block(&out).contains("Texto\n"));
+        assert_eq!(upsert(&out, &fm), out);
+        assert_eq!(parse(&out).unwrap(), Some(fm));
+    }
+
+    #[test]
+    fn an_indented_line_between_rules_stays_in_the_body() {
+        let input = "\
+---
+url: http://apuntes
+    linea sangrada importante
+vence: mañana
+---
+Cuerpo
+";
+        assert_eq!(parse(input).unwrap(), None);
+        let fm = page();
+        let out = upsert(input, &fm);
+        assert_eq!(body_after_block(&out), input);
+        assert!(body_after_block(&out).contains("    linea sangrada importante\n"));
+        assert!(body_after_block(&out).contains("url: http://apuntes\n"));
+        assert!(body_after_block(&out).contains("vence: mañana\n"));
+        assert!(!body_after_block(&out).contains("ramo:"));
+        assert_eq!(upsert(&out, &fm), out);
+    }
+
+    #[test]
+    fn a_tight_block_that_only_has_url_is_still_a_partial_block() {
+        assert_eq!(
+            parse("---\nurl: \"https://canvas.example/pages/intro\"\n---\n").unwrap_err(),
+            FrontmatterError::MissingRamo
+        );
+    }
+
+    #[test]
+    fn a_blank_line_between_keys_stays_inside_the_block() {
+        let input = "---\nramo: \"viejo\"\ntipo: page\n\ntags: examen\n---\nBody\n";
+        let fm = page();
+        let out = upsert(input, &fm);
+        assert!(out.contains("\n\ntags: examen\n"), "{out}");
+        assert_eq!(body_after_block(&out), "Body\n");
+        assert_eq!(parse(&out).unwrap().unwrap().ramo, "atdf105-mineria");
     }
 }
