@@ -168,7 +168,7 @@ async fn resolve_token(cfg: &Config) -> Option<String> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Course {
     pub id: u64,
     pub name: String,
@@ -179,6 +179,9 @@ pub struct Course {
 pub struct Module {
     pub id: u64,
     pub name: String,
+    /// 1-based order of the module in the course; names its `modulos/` directory.
+    #[serde(default)]
+    pub position: Option<u32>,
     #[serde(default)]
     pub items: Vec<ModuleItem>,
 }
@@ -208,6 +211,12 @@ pub struct FileObj {
 
 #[derive(Debug, Deserialize)]
 pub struct PageObj {
+    /// Canvas page id, written as the note's `canvas_id`.
+    #[serde(default)]
+    pub page_id: Option<u64>,
+    /// Canvas URL of the page, written as the note's `url`.
+    #[serde(default)]
+    pub html_url: Option<String>,
     pub title: Option<String>,
     pub body: Option<String>,
     pub updated_at: Option<String>,

@@ -381,6 +381,7 @@ fn state_bytes(code: &str) -> io::Result<Vec<u8>> {
             content_hash: None,
             last_error: None,
             error_count: None,
+            file_name: None,
         },
     );
     json_bytes(&state)

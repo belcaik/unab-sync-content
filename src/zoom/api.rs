@@ -301,11 +301,13 @@ impl ZoomClient {
                 // Entries without a play_url cannot be captured, so they are dropped
                 // here rather than filtered and then unwrapped.
                 for entry in entries {
+                    let file_id = entry.file_id();
                     let Some(play_url) = entry.play_url else {
                         continue;
                     };
                     out.push(ZoomRecordingFile {
                         meeting_id: meeting.meeting_id.clone(),
+                        file_id,
                         play_url,
                         download_url: entry.download_url.clone(),
                         file_type: entry.file_type.clone(),

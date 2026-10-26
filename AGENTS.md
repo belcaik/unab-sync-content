@@ -204,34 +204,86 @@ documented as working is worse than no configuration.
 
 ## Directory Layout (Downloads)
 
+Layout v2 (`docs/specs/layout-v2.md`). Every name comes from `layout.rs`;
+writers never format a path themselves.
+
 ```
 <download_root>/
-  <Course Name>_<Course Code>/
-    state.json                       # per-course sync state
-    Modules/
-      <module_id>_<Module Name>/
-        NN-<Page Title>.md           # page body as markdown
-        NN-ASSIGN-<Title>.md         # assignment description
-        Attachments/
-          <original-filename>
-    announcements/
-      <YYYY-MM-DD>_<slug>_<id>.md
+  INDEX.md                           # courses + upcoming deadlines (full sync runs only)
+  AGENTS.md                          # static: how to navigate the tree
+  <ramo>/                            # course dir, see "Course directories" below
+    README.md                        # modules, assignments, announcements, recordings
+    curso.json                       # canvas_id, course_code, name, term, section, zoom_ids
+    .u_crawler/state.json            # per-course sync state (file:, page:, assignment:,
+                                     #   announcement:, calendar:, calendar-window:, zoom:)
+    modulos/
+      NN-<module-slug>/              # NN = Canvas module position
+        README.md                    # links the module's pages and assignments
+        NN-<page-slug>.md            # NN = item position; frontmatter tipo: page
+        adjuntos/<attachment-slug>.<ext>
+    tareas/<assignment-slug>.md      # frontmatter tipo: tarea (vence, disponible)
+    anuncios/
+      <YYYY-MM-DD>_<slug>.md         # frontmatter tipo: anuncio
       index.json                     # links, media and zoom links per announcement
-      media/
-        <attachment files>
-
-<download_root>/Zoom/<course_id>/
-  <recording>.mp4
+      adjuntos/<attachment files>
+    grabaciones/
+      <YYYY-MM-DD>_<topic>[-parte-N].mp4
 ```
 
-There is no week-folding. Names are sanitized and transliterated to ASCII by
-`fsutil::sanitize_component`.
+Every generated note goes through `migrate::rewrite::apply`: YAML
+frontmatter (`ramo` = the course directory name) and Canvas `/files/<id>`
+links rewritten to the local copy, so a sync writes exactly what the
+migrator would. Files are downloaded before the note that links them is
+written; a file that failed keeps its Canvas link.
+
+**Course directories** (`library.rs`). A course owns the directory whose
+`curso.json` names its Canvas id (or, with `canvas_id: null`, its name and
+code). Newcomers are named by `layout::CourseNaming::course_dirs` over the
+whole active course list sorted by id — before `--course-id` or
+`ignored_courses` filtering, so a filtered run names a course the same way a
+full one does. Any other directory at the root is reserved and never given
+to a course, except one holding `.u_crawler/state.json` without `curso.json`
+(an interrupted run, which its course resumes). Whoever creates a course
+directory (`sync`, `announcements`, `calendar`, `zoom flow`) writes a minimal
+`curso.json` at once; the end of `sync` rewrites it in full, keeping the
+`zoom_ids` and `term` a migration recorded.
+
+**Name collisions inside a course.** Two assignments with the same title,
+or two announcements with the same date and title: `layout::unique_name`,
+in Canvas id order — the lower id keeps the plain name, the other gets
+`-<id>` (`tarea-12.md`), then `-<id>-2`… if that is taken too; the suffix
+survives slug truncation. Attachments that slug to the same path in one
+directory (`Guía 1.pdf`, `guia_1.PDF`) are settled by `download::Claims`:
+each file keeps the name recorded in its `file:<id>` entry
+(`ItemState::file_name`); a new one takes the plain name only when it is
+free this run and nothing is on disk there, else `<slug>-<id>.<ext>`, a
+name only that id ever writes. No file already named is moved or
+overwritten by another. An announcement without `posted_at` is dated
+`1970-01-01`, so its name is stable.
+
+**Recordings** (`zoom::headless::plan_recordings`, pure). Named
+`layout::recording_file(date, topic, part, course name)`; the date is the
+meeting's `start_time`, else the segment's `recording_start`. Segments of one
+meeting that would share a name are ordered by segment start and become
+`-parte-2`, `-parte-3`…; an undated recording keeps v1's `zoom-<meeting id>`
+fallback through `layout::attachment_file`. A recording is skipped when
+`state.json` has its `zoom:<file id>` key without an error, **or** when a
+file with its computed name is already in `grabaciones/` (the migrator
+cannot know recording ids offline); the second case is recorded under its
+key from then on. The file id is Zoom's `id` when the listing has one, else
+`<meeting id>:<recording start>` (else `<meeting id>:<play url>`).
+
+`INDEX.md` is rewritten only by a `sync` without `--course-id` (a filtered
+run has not seen the other courses' deadlines); `AGENTS.md`, the READMEs and
+`curso.json` are rewritten only when their text changed. Nothing writes
+`.u_crawler/library.json` yet — marking a library v2 is `migrate::ensure_v2`'s
+job (T7).
 
 ### Directory Layout (Calendar)
 
 ```
 <calendar.caldir_root>/
-  <Course Name>_<Course Code>/
+  <ramo>/
     deadlines/
       assignment-<assignment_id>.ics    # one VTODO per assignment with a due date
     windows/
@@ -239,7 +291,10 @@ There is no week-folding. Names are sanitized and transliterated to ASCII by
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`fsutil::course_dir`). `deadlines/` and `windows/` are sibling directories
+(`library::course_dirs`, so a Canvas rename no longer moves it). While a
+course's v1 directory (`fsutil::course_dir`) is still under `caldir_root`,
+`calendar` skips that course as failed (`calendar::unmigrated_caldir`)
+rather than write its UIDs into a second directory; the migrator renames it. `deadlines/` and `windows/` are sibling directories
 per course × semantics (spec D4), so a client can subscribe to one without
 the other; a third directory for recurring-class semantics has room to land
 later without moving anything under either. Filenames and UIDs derive from
@@ -333,7 +388,8 @@ src/
   recordings.rs     # zoom-link discovery report
   fsutil.rs         # sanitization, atomic write/rename
   frontmatter.rs    # YAML frontmatter for generated notes (render, parse, upsert)
-  layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load; no writer uses it yet)
+  layout.rs         # layout v2: pure metadata -> name functions (compiled from [layout] at config load)
+  library.rs        # which directory each course owns (curso.json), shared by every writer; index-file writes
   index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   migrate/
     mod.rs          # read-only scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs); no CLI yet
@@ -360,6 +416,8 @@ Rules that hold today and should keep holding:
 
 * **All HTTP goes through `HttpCtx`.** It is the only place rate limiting and
   retries live. A raw `reqwest::Client::send()` outside `http.rs` is a bug.
+* **Every writer gets its course directory from `library::course_dirs`** and
+  its names from `layout.rs`. Nobody formats a library path by hand.
 * **All Canvas file downloads go through `download::download_if_needed`,** under
   one state-key namespace (`file:{id}`), so a file reachable from both a module
   and an announcement is fetched once.
@@ -512,7 +570,10 @@ Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
-round-trip and upsert, Canvas `/files/<id>` markdown rewrite,
+round-trip and upsert, Canvas `/files/<id>` markdown rewrite, course
+directory resolution and index-file writes (`library`), assignment and
+announcement naming with collisions, recording naming / parts / `zoom:`
+dedupe (`zoom::headless`), the `zoom:` state key,
 `migrate::rewrite` (generated-path gate, backup, resume, a leading horizontal
 rule left in the body, refusal of an existing `.part`, and on Unix the
 hardlink inode), layout v2 index rendering, the synthetic layout-v1

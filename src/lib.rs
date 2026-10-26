@@ -19,6 +19,8 @@
 //! - [`migrate`] scans a layout v1 library and plans its move to v2 without
 //!   deleting or overwriting a file. [`migrate::rewrite`] is the writer: it
 //!   copies a generated note under `.u_crawler/backup/` and then replaces it.
+//! - [`library`] reads the library root's `curso.json` files and tells every
+//!   writer which directory a course owns, so they all agree.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -47,6 +49,8 @@ pub mod http;
 pub mod index;
 /// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
 pub mod layout;
+/// Which directory each course owns in the library (`curso.json`), shared by the writers.
+pub mod library;
 /// Extraction of links from Canvas HTML, and rewriting of Canvas file links in markdown.
 pub mod links;
 /// Log file setup.
