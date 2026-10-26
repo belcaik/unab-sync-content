@@ -38,6 +38,7 @@ pub async fn run_sync(
     let http = build_http_client(&cfg);
     let httpctx = HttpCtx::new(&cfg, http);
     let canvas = CanvasClient::from_config().await?;
+    crate::migrate::ensure::ensure_configured(&cfg, &naming, &canvas, dry_run).await?;
 
     let courses = canvas.list_courses().await?;
     // Named over the whole active list, before any filtering, so a

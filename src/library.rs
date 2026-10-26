@@ -195,6 +195,30 @@ async fn write_if_changed(path: &Path, contents: &str) -> io::Result<()> {
     }
 }
 
+/// [`write_if_changed`] for a file at the library root, which is not ours
+/// alone: a vault may already hold an `AGENTS.md` or `INDEX.md` of its own.
+/// One whose first line is not the first line of `contents` is left alone,
+/// with a warning. Returns whether the file now holds `contents`.
+async fn write_root_file(path: &Path, contents: &str) -> io::Result<bool> {
+    let header = contents.lines().next().unwrap_or_default();
+    match tokio::fs::read_to_string(path).await {
+        Ok(current) if current.lines().next() != Some(header) => {
+            tracing::warn!(path = %path.display(), "not written by u_crawler; left alone");
+            return Ok(false);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        // Not UTF-8 is not ours either.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            tracing::warn!(path = %path.display(), "not written by u_crawler; left alone");
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    }
+    write_if_changed(path, contents).await?;
+    Ok(true)
+}
+
 /// The recordings under `<course_dir>/grabaciones/`, read from disk: what
 /// the course README lists, whichever run downloaded them.
 ///
@@ -270,7 +294,8 @@ pub async fn write_course_files(course_dir: &Path, course: &CourseIndex) -> io::
 /// Write the library's `AGENTS.md` and, when `with_index` is set, its
 /// `INDEX.md`. The index lists `synced` plus every other course `lib` knows
 /// from its `curso.json`; only `synced` brings deadlines, which is why a run
-/// that did not see every course passes `with_index = false`.
+/// that did not see every course passes `with_index = false`. Either file is
+/// left alone when one already there does not start like ours.
 ///
 /// # Errors
 ///
@@ -281,7 +306,7 @@ pub async fn write_library_files(
     synced: Vec<CourseIndex>,
     with_index: bool,
 ) -> io::Result<()> {
-    write_if_changed(&root.join("AGENTS.md"), &index::render_agents_md()).await?;
+    write_root_file(&root.join("AGENTS.md"), &index::render_agents_md()).await?;
     if !with_index {
         return Ok(());
     }
@@ -300,11 +325,12 @@ pub async fn write_library_files(
         });
     }
     let library = LibraryIndex { courses };
-    write_if_changed(
+    write_root_file(
         &root.join("INDEX.md"),
         &index::render_index_md(&library, Utc::now().date_naive()),
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -480,6 +506,30 @@ mod tests {
             index.contains("[Ramo Archivado](archivado/README.md)"),
             "{index}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_root_file_of_the_vault_is_never_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "# Mis reglas\n").unwrap();
+        write_library_files(tmp.path(), &Library::default(), Vec::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("AGENTS.md")).unwrap(),
+            "# Mis reglas\n"
+        );
+        // Ours, and stale: refreshed.
+        std::fs::write(
+            tmp.path().join("INDEX.md"),
+            "# Índice de la biblioteca\nviejo\n",
+        )
+        .unwrap();
+        write_library_files(tmp.path(), &Library::default(), Vec::new(), true)
+            .await
+            .unwrap();
+        let index = std::fs::read_to_string(tmp.path().join("INDEX.md")).unwrap();
+        assert!(!index.contains("viejo"), "{index}");
     }
 
     #[tokio::test]

@@ -9,7 +9,10 @@
 # machine) generates the equivalent of this file interactively if you'd
 # rather not hand-edit it.
 
-download_root = "/home/appuser/Caldir"   # unused by `calendar`, but must be non-empty
+# `calendar` needs no library: pointed at the caldir tree (as here), it names
+# course folders from Canvas alone and keeps its state inside the caldir tree.
+# Old layout v1 calendar folders are renamed to their v2 names on the first run.
+download_root = "/home/appuser/Caldir"
 concurrency = 4
 max_rps = 2
 user_agent = ""
