@@ -13,12 +13,17 @@
 //! - [`rewrite`] copies a generated markdown note under `.u_crawler/backup/`
 //!   and then refreshes its YAML frontmatter and Canvas file links.
 //!
-//! [`scan`], [`detect`] and [`plan`] do not delete, overwrite or open a file
-//! for writing. [`rewrite`] is the only writer here, and it only replaces a
-//! note [`rewrite::generated_kind`] accepts, after the backup exists. The
-//! executor that applies a plan (journal, `rename(2)`, BLAKE3 for collisions)
-//! is a separate step. There is no `migrate` CLI.
+//! - [`apply::apply`] carries a plan out: a write-ahead journal under
+//!   `.u_crawler/migrations/`, `rename(2)` without replacement, BLAKE3 for
+//!   collisions; [`apply::undo`] reverses a journal.
+//!
+//! [`scan`], [`detect`] and [`plan`] never open a file for writing. The
+//! writers are [`apply`], which renames and creates directories and
+//! `curso.json` (nothing deleted, copied or overwritten), and [`rewrite`],
+//! which only replaces a note [`rewrite::generated_kind`] accepts, after
+//! the backup exists. There is no `migrate` CLI.
 
+pub mod apply;
 pub mod detect;
 pub mod plan;
 pub mod rewrite;

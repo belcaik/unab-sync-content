@@ -52,6 +52,7 @@ use crate::canvas::Course;
 use crate::fsutil;
 use crate::layout::{self, CourseMeta, CourseNaming, ExistingCourseDir};
 use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
@@ -65,8 +66,10 @@ pub struct CanvasCourse {
     pub module_positions: BTreeMap<u64, u32>,
 }
 
-/// The two trees a plan touches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// The two trees a plan touches. Journaled by [`super::apply`] as
+/// `"library"` / `"caldir"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Root {
     /// `download_root`.
     Library,
@@ -75,7 +78,8 @@ pub enum Root {
 }
 
 /// Whether a [`Move`] renames one file or a whole directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EntryKind {
     /// A regular file.
     File,
@@ -84,7 +88,7 @@ pub enum EntryKind {
 }
 
 /// One `rename(2)`. `to` does not exist and nothing else in the plan targets it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Move {
     /// The tree both paths are relative to.
     pub root: Root,
@@ -120,7 +124,7 @@ pub struct Edit {
 }
 
 /// Several sources for one destination, or a destination that already exists.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Collision {
     /// The tree the paths are relative to (always [`Root::Library`] today).
     pub root: Root,
