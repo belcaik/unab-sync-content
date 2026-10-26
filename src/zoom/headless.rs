@@ -592,6 +592,7 @@ fn downloaded(updated_at: Option<String>, size: Option<u64>) -> ItemState {
         content_hash: None,
         last_error: None,
         error_count: None,
+        file_name: None,
     }
 }
 

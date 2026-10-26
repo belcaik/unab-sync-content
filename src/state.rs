@@ -20,6 +20,11 @@ pub struct ItemState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub error_count: Option<u32>,
+    /// File name a downloaded Canvas file was given, so it keeps it while
+    /// another file with the same slug comes and goes (`download::Claims`).
+    /// Omitted when unset, so entries that never name a file keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
 }
 
 impl State {
@@ -66,6 +71,7 @@ impl State {
             content_hash: prev.and_then(|s| s.content_hash.clone()),
             last_error: Some(err.to_string()),
             error_count: Some(prev.and_then(|s| s.error_count).unwrap_or(0) + 1),
+            file_name: prev.and_then(|s| s.file_name.clone()),
         };
         self.items.insert(key, entry);
     }
@@ -83,6 +89,7 @@ mod tests {
             content_hash: None,
             last_error: None,
             error_count: None,
+            file_name: None,
         }
     }
 

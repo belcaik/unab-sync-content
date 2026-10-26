@@ -5,7 +5,7 @@
 
 use crate::canvas::{Assignment, CanvasClient, Module};
 use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
+use crate::download::{download_if_needed, Claims, Dest};
 use crate::frontmatter::{DocKind, Frontmatter};
 use crate::fsutil::{atomic_write, ensure_dir};
 use crate::http::{build_http_client, HttpCtx};
@@ -236,24 +236,21 @@ pub async fn run_sync(
 
 /// The file name under `tareas/` of every assignment in a course, by id.
 ///
-/// Assignments are named in id order, so the oldest of two with the same
-/// title keeps the plain name and the newer one gets its id appended; a new
-/// assignment never renames an existing file.
+/// Assignments are named in id order through [`layout::unique_name`], so
+/// the oldest of two with the same name keeps it, the newer one gets its id
+/// appended, and no two ever share a file; a new assignment never renames an
+/// existing one.
 fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
     let mut sorted: Vec<&Assignment> = assignments.iter().collect();
     sorted.sort_by_key(|a| a.id);
-    let mut used = HashSet::new();
-    let mut out = HashMap::with_capacity(sorted.len());
-    for a in sorted {
-        let title = a.name.as_deref().unwrap_or("");
-        let mut file = layout::assignment_file(title);
-        if !used.insert(file.clone()) {
-            file = layout::assignment_file(&format!("{title} {}", a.id));
-            used.insert(file.clone());
-        }
-        out.insert(a.id, file);
-    }
-    out
+    let mut used = BTreeSet::new();
+    sorted
+        .into_iter()
+        .map(|a| {
+            let name = layout::assignment_file(a.name.as_deref().unwrap_or(""));
+            (a.id, layout::unique_name(&mut used, name, a.id))
+        })
+        .collect()
 }
 
 /// A Canvas timestamp as the frontmatter writes it: RFC 3339, UTC, seconds.
@@ -295,6 +292,8 @@ struct ModuleCtx<'a> {
     /// Where each file downloaded here landed, relative to the course
     /// directory: the map the markdown link rewrite points at.
     files: BTreeMap<u64, PathBuf>,
+    /// Paths handed out under this module's `adjuntos/` ([`Claims`]).
+    claims: Claims,
 }
 
 impl ModuleCtx<'_> {
@@ -346,9 +345,21 @@ impl ModuleCtx<'_> {
         if let Some(parent) = dest.parent() {
             ensure_dir(parent).await?;
         }
-        match download_if_needed(self.httpctx, &f, Dest::Exact(&dest), state).await {
-            Ok(_) => {
-                info!(course_id, module_id, file_id, path = %dest.display(), file_ext = ext, "downloaded file");
+        match download_if_needed(
+            self.httpctx,
+            &f,
+            Dest::Exact(&dest),
+            state,
+            &mut self.claims,
+        )
+        .await
+        {
+            Ok(path) => {
+                info!(course_id, module_id, file_id, path = %path.display(), file_ext = ext, "downloaded file");
+                let rel = path
+                    .strip_prefix(self.course_dir)
+                    .map(Path::to_path_buf)
+                    .unwrap_or(rel);
                 self.files.insert(file_id, rel);
                 Ok(1)
             }
@@ -407,6 +418,7 @@ impl ModuleCtx<'_> {
                 content_hash: Some(hash),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         info!(course_id, module_id, path = %dest.display(), what, "wrote markdown");
@@ -478,6 +490,7 @@ impl CourseSync<'_> {
             verbose: self.verbose,
             processed: HashSet::new(),
             files: BTreeMap::new(),
+            claims: Claims::default(),
         };
         let mut counts = SyncCounts::default();
         let mut module_assignments = Vec::new();
@@ -647,6 +660,27 @@ mod tests {
         assert_eq!(got[&30], "semana-10-formativa-6.md");
         assert_eq!(got[&7], "tarea.md");
         assert_eq!(got[&12], "tarea-12.md");
+    }
+
+    #[test]
+    fn a_suffixed_name_is_checked_against_the_names_already_given() {
+        let got = assignment_files(&[
+            assignment(7, "Tarea"),
+            assignment(10, "Tarea 12"),
+            assignment(12, "Tarea"),
+        ]);
+        let names: HashSet<&String> = got.values().collect();
+        assert_eq!(names.len(), 3, "{got:?}");
+        assert_eq!(got[&10], "tarea-12.md");
+        assert_eq!(got[&12], "tarea-12-2.md");
+    }
+
+    #[test]
+    fn two_long_identical_titles_still_get_two_files() {
+        let title = "Informe ".repeat(20);
+        let got = assignment_files(&[assignment(100, &title), assignment(200, &title)]);
+        assert_ne!(got[&100], got[&200]);
+        assert!(got[&200].ends_with("-200.md"), "{got:?}");
     }
 
     #[test]

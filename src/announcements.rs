@@ -1,6 +1,6 @@
 use crate::canvas::{Announcement, CanvasClient, FileObj};
 use crate::config::Config;
-use crate::download::{download_if_needed, Dest};
+use crate::download::{download_if_needed, Claims, Dest};
 use crate::frontmatter::{DocKind, Frontmatter};
 use crate::fsutil::{atomic_write, ensure_dir};
 use crate::http::{build_http_client, HttpCtx};
@@ -15,7 +15,7 @@ use crate::status;
 use chrono::NaiveDate;
 use html2md::parse_html;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -207,7 +207,12 @@ impl<'a> AnnouncementSync<'a> {
     ///
     /// A failure is logged and yields `None`: one missing attachment must not
     /// abandon the announcement it came from.
-    async fn fetch_media(&self, file: &FileObj, state: &mut State) -> Option<String> {
+    async fn fetch_media(
+        &self,
+        file: &FileObj,
+        state: &mut State,
+        claims: &mut Claims,
+    ) -> Option<String> {
         match download_if_needed(
             self.httpctx,
             file,
@@ -216,6 +221,7 @@ impl<'a> AnnouncementSync<'a> {
                 name: &media_name(file),
             },
             state,
+            claims,
         )
         .await
         {
@@ -234,12 +240,13 @@ impl<'a> AnnouncementSync<'a> {
         &self,
         refs: Vec<MediaRef>,
         state: &mut State,
+        claims: &mut Claims,
     ) -> anyhow::Result<Vec<MediaRef>> {
         let mut out = Vec::with_capacity(refs.len());
         for mut m in refs {
             if let (true, Some(fid)) = (self.downloads_media(), m.file_id) {
                 match self.canvas.get_file(fid).await {
-                    Ok(f) => m.local_path = self.fetch_media(&f, state).await,
+                    Ok(f) => m.local_path = self.fetch_media(&f, state, claims).await,
                     Err(e) => {
                         warn!(course_id = self.course_id, file_id = fid, error = %e, "media metadata fetch failed");
                         state.record_error(crate::download::state_key(fid), &e);
@@ -256,13 +263,14 @@ impl<'a> AnnouncementSync<'a> {
         &self,
         attachments: &[FileObj],
         state: &mut State,
+        claims: &mut Claims,
     ) -> Vec<MediaRef> {
         let mut out = Vec::with_capacity(attachments.len());
         for att in attachments {
             // The reference is recorded either way; only the download is
             // conditional, so both cases share one construction.
             let local_path = if self.downloads_media() {
-                self.fetch_media(att, state).await
+                self.fetch_media(att, state, claims).await
             } else {
                 None
             };
@@ -320,6 +328,7 @@ impl<'a> AnnouncementSync<'a> {
                 content_hash: None,
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         Ok(())
@@ -332,6 +341,7 @@ impl<'a> AnnouncementSync<'a> {
         ann: Announcement,
         filename: &str,
         state: &mut State,
+        claims: &mut Claims,
     ) -> anyhow::Result<(AnnouncementRecord, CourseSummary)> {
         let title = ann
             .title
@@ -350,8 +360,12 @@ impl<'a> AnnouncementSync<'a> {
         if self.downloads_media() {
             ensure_dir(&self.media_dir).await?;
         }
-        let mut media = self.resolve_body_media(extracted.media, state).await?;
-        let attachments = self.resolve_attachments(&ann.attachments, state).await;
+        let mut media = self
+            .resolve_body_media(extracted.media, state, claims)
+            .await?;
+        let attachments = self
+            .resolve_attachments(&ann.attachments, state, claims)
+            .await;
         summary.media += attachments.len();
         media.extend(attachments);
 
@@ -429,6 +443,9 @@ impl<'a> AnnouncementSync<'a> {
         let mut records = Vec::with_capacity(announcements.len());
         let files = announcement_files(&announcements);
         let mut index = Vec::with_capacity(announcements.len());
+        // One set of claims for the whole course: every announcement shares
+        // `anuncios/adjuntos/`.
+        let mut claims = Claims::default();
 
         for ann in announcements {
             pb.inc(1);
@@ -446,7 +463,7 @@ impl<'a> AnnouncementSync<'a> {
                 posted: Some(posted),
                 file: filename.clone(),
             });
-            let (record, summary) = self.process(ann, &filename, state).await?;
+            let (record, summary) = self.process(ann, &filename, state, &mut claims).await?;
             totals += summary;
             records.push(record);
         }
@@ -467,32 +484,28 @@ impl<'a> AnnouncementSync<'a> {
 /// The posting date and file name under `anuncios/` of every announcement,
 /// by id.
 ///
-/// The name is [`layout::announcement_file`]. Announcements are named in id
-/// order, so the older of two with the same date and title keeps the plain
-/// name and the newer one gets its id appended. One without a `posted_at`
+/// The name is [`layout::announcement_file`], made unique in id order by
+/// [`layout::unique_name`]: the older of two with the same date and title
+/// keeps the plain name, the newer one gets its id appended. One without a `posted_at`
 /// (Canvas does not show students an unposted one) is dated 1970-01-01
 /// rather than today, so its name does not change from run to run.
 fn announcement_files(announcements: &[Announcement]) -> HashMap<u64, (NaiveDate, String)> {
     let mut sorted: Vec<&Announcement> = announcements.iter().collect();
     sorted.sort_by_key(|a| a.id);
-    let mut used = HashSet::new();
-    let mut out = HashMap::with_capacity(sorted.len());
-    for a in sorted {
-        let posted = a
-            .posted_at
-            .as_deref()
-            .and_then(|s| s.get(0..10))
-            .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-            .unwrap_or_default();
-        let title = a.title.as_deref().unwrap_or("");
-        let mut file = layout::announcement_file(posted, title);
-        if !used.insert(file.clone()) {
-            file = layout::announcement_file(posted, &format!("{title} {}", a.id));
-            used.insert(file.clone());
-        }
-        out.insert(a.id, (posted, file));
-    }
-    out
+    let mut used = BTreeSet::new();
+    sorted
+        .into_iter()
+        .map(|a| {
+            let posted = a
+                .posted_at
+                .as_deref()
+                .and_then(|s| s.get(0..10))
+                .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+                .unwrap_or_default();
+            let name = layout::announcement_file(posted, a.title.as_deref().unwrap_or(""));
+            (a.id, (posted, layout::unique_name(&mut used, name, a.id)))
+        })
+        .collect()
 }
 
 /// The preferred on-disk name for an announcement's media file.

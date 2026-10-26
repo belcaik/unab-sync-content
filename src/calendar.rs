@@ -768,6 +768,19 @@ pub fn plan(
     Plan { writes, deletes }
 }
 
+/// The course's layout v1 directory under `caldir_root`
+/// (`fsutil::course_dir`), when it is still there under a name other than
+/// its v2 `dir_name`.
+///
+/// Its `.ics` files carry the very UIDs [`plan`] would write into
+/// `<caldir_root>/<dir_name>/`, and `caldir push` would then see two files
+/// per UID — the collision shape of Radicale issue #101. Until the migrator
+/// renames the directory, [`run_calendar`] skips such a course instead.
+pub fn unmigrated_caldir(caldir_root: &Path, course: &Course, dir_name: &str) -> Option<PathBuf> {
+    let v1 = fsutil::course_dir(caldir_root, course);
+    (v1 != caldir_root.join(dir_name) && v1.is_dir()).then_some(v1)
+}
+
 /// Gate [`plan`] on both of a course's fetches having actually succeeded
 /// (spec ticket 10's safety requirement): "un ramo que falla al consultarse
 /// NO dispara el borrado de sus componentes". `plan` itself cannot make this
@@ -1025,6 +1038,16 @@ pub async fn run_calendar(
             results.push(CourseResult::Failed);
             continue;
         };
+        if let Some(v1) = unmigrated_caldir(&caldir_root, course, dir_name) {
+            tracing::error!(
+                course_id = course.id,
+                path = %v1.display(),
+                "caldir still has this course's layout v1 directory; migrate it first, \
+                 or the same UIDs would be written twice; skipping this course"
+            );
+            results.push(CourseResult::Failed);
+            continue;
+        }
         let course_dir = download_root.join(dir_name);
         let state_path = library::state_path(&course_dir);
         let mut state = State::load(&state_path).await;
@@ -1150,6 +1173,7 @@ fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
                 content_hash: Some(hash),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
     }
@@ -1180,6 +1204,26 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-08-23T00:00:00Z")
             .unwrap()
             .into()
+    }
+
+    #[test]
+    fn a_v1_caldir_directory_blocks_the_course_until_migrated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            None
+        );
+        std::fs::create_dir_all(root.join("Intro_to_Testing_TST101/deadlines")).unwrap();
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            Some(root.join("Intro_to_Testing_TST101"))
+        );
+        // A v2 name that happens to equal the v1 one is the same directory.
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "Intro_to_Testing_TST101"),
+            None
+        );
     }
 
     fn course() -> Course {
@@ -2174,6 +2218,7 @@ mod tests {
                     content_hash: Some(content_hash(&write.content)),
                     last_error: None,
                     error_count: None,
+                    file_name: None,
                 },
             );
         }
@@ -2205,6 +2250,7 @@ mod tests {
                 content_hash: Some(hash),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         state
@@ -3232,6 +3278,7 @@ mod tests {
                 content_hash: Some("stale-todo-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         prev.set(
@@ -3243,6 +3290,7 @@ mod tests {
                 content_hash: Some("stale-window-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
 
@@ -3322,6 +3370,7 @@ mod tests {
                 content_hash: Some("stale-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
 
@@ -3402,6 +3451,7 @@ mod tests {
                 content_hash: Some("whatever".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3427,6 +3477,7 @@ mod tests {
                 content_hash: Some("kept".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         state.set(
@@ -3438,6 +3489,7 @@ mod tests {
                 content_hash: Some("gone".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3470,6 +3522,7 @@ mod tests {
                 content_hash: Some("unrelated".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
             },
         );
 

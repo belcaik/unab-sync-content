@@ -464,6 +464,49 @@ pub fn announcement_file(posted: NaiveDate, title: &str) -> String {
     format!("{}_{}.md", ymd(posted), slug_or_untitled(title))
 }
 
+/// `name` (a file name this module produced, like `tarea.md` or
+/// `guia-1.pdf`) with `-<suffix>` put before its extension.
+///
+/// The stem is cut first when needed, so the suffix always survives and the
+/// stem never grows past the longer of [`MAX_SLUG_LEN`] and its own length.
+pub fn with_suffix(name: &str, suffix: &str) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let budget = MAX_SLUG_LEN
+        .max(stem.len())
+        .saturating_sub(suffix.len() + 1);
+    let mut end = stem.len().min(budget);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let stem = stem[..end].trim_end_matches(['-', '_']);
+    match ext {
+        Some(ext) => format!("{stem}-{suffix}.{ext}"),
+        None => format!("{stem}-{suffix}"),
+    }
+}
+
+/// `name` for the item `id`, made unique against `used` (and added to it):
+/// `name` itself when free, else [`with_suffix`] `<id>`, else `<id>-2`,
+/// `<id>-3`… Callers hand items over in id order, so the oldest item keeps
+/// the plain name and a newcomer never takes one already given out.
+pub fn unique_name(used: &mut BTreeSet<String>, name: String, id: u64) -> String {
+    let mut candidate = name.clone();
+    let mut n = 1u32;
+    while used.contains(&candidate) {
+        candidate = if n == 1 {
+            with_suffix(&name, &id.to_string())
+        } else {
+            with_suffix(&name, &format!("{id}-{n}"))
+        };
+        n += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
 /// An attachment under [`ATTACHMENTS_DIR`]: the stem slugified, the last
 /// extension lowercased and kept (`Guía 1.PDF` -> `guia-1.pdf`).
 pub fn attachment_file(original: &str) -> String {
@@ -603,6 +646,32 @@ pub fn parse_v1_recording(file_name: &str, siblings: &[&str]) -> Option<V1Record
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_suffix_goes_before_the_extension_and_survives_truncation() {
+        assert_eq!(with_suffix("tarea.md", "12"), "tarea-12.md");
+        assert_eq!(with_suffix("guia-1.pdf", "23"), "guia-1-23.pdf");
+        assert_eq!(with_suffix("leeme", "4"), "leeme-4");
+        let long = format!("{}.md", "a".repeat(MAX_SLUG_LEN));
+        let got = with_suffix(&long, "200");
+        assert!(got.ends_with("-200.md"), "{got}");
+        assert_eq!(got.len(), MAX_SLUG_LEN + ".md".len());
+    }
+
+    #[test]
+    fn unique_name_never_repeats_a_name() {
+        let mut used = BTreeSet::new();
+        // Assignments 7 "Tarea", 10 "Tarea 12", 12 "Tarea", in id order.
+        let a = unique_name(&mut used, assignment_file("Tarea"), 7);
+        let b = unique_name(&mut used, assignment_file("Tarea 12"), 10);
+        let c = unique_name(&mut used, assignment_file("Tarea"), 12);
+        assert_eq!((a.as_str(), b.as_str()), ("tarea.md", "tarea-12.md"));
+        assert_eq!(c, "tarea-12-2.md");
+        let long = "x".repeat(150);
+        let d = unique_name(&mut used, assignment_file(&long), 100);
+        let e = unique_name(&mut used, assignment_file(&long), 200);
+        assert_ne!(d, e);
+    }
 
     /// The commented UNAB example from `assets/config.toml`, read from the
     /// template itself so the two cannot drift apart.

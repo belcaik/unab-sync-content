@@ -249,9 +249,16 @@ directory (`sync`, `announcements`, `calendar`, `zoom flow`) writes a minimal
 `zoom_ids` and `term` a migration recorded.
 
 **Name collisions inside a course.** Two assignments with the same title,
-or two announcements with the same date and title: the lower Canvas id
-keeps the plain name, the other gets ` <id>` appended to its title before
-slugging (`tarea-12.md`). An announcement without `posted_at` is dated
+or two announcements with the same date and title: `layout::unique_name`,
+in Canvas id order — the lower id keeps the plain name, the other gets
+`-<id>` (`tarea-12.md`), then `-<id>-2`… if that is taken too; the suffix
+survives slug truncation. Attachments that slug to the same path in one
+directory (`Guía 1.pdf`, `guia_1.PDF`) are settled by `download::Claims`:
+each file keeps the name recorded in its `file:<id>` entry
+(`ItemState::file_name`); a new one takes the plain name only when it is
+free this run and nothing is on disk there, else `<slug>-<id>.<ext>`, a
+name only that id ever writes. No file already named is moved or
+overwritten by another. An announcement without `posted_at` is dated
 `1970-01-01`, so its name is stable.
 
 **Recordings** (`zoom::headless::plan_recordings`, pure). Named
@@ -284,7 +291,10 @@ job (T7).
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`library::course_dirs`, so a Canvas rename no longer moves it). `deadlines/` and `windows/` are sibling directories
+(`library::course_dirs`, so a Canvas rename no longer moves it). While a
+course's v1 directory (`fsutil::course_dir`) is still under `caldir_root`,
+`calendar` skips that course as failed (`calendar::unmigrated_caldir`)
+rather than write its UIDs into a second directory; the migrator renames it. `deadlines/` and `windows/` are sibling directories
 per course × semantics (spec D4), so a client can subscribe to one without
 the other; a third directory for recurring-class semantics has room to land
 later without moving anything under either. Filenames and UIDs derive from
