@@ -1261,6 +1261,7 @@ fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
     }
@@ -2331,6 +2332,7 @@ mod tests {
                     last_error: None,
                     error_count: None,
                     file_name: None,
+                    path: None,
                 },
             );
         }
@@ -2363,6 +2365,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
         state
@@ -3391,6 +3394,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
         prev.set(
@@ -3403,6 +3407,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
 
@@ -3483,6 +3488,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
 
@@ -3564,6 +3570,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3590,6 +3597,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
         state.set(
@@ -3602,6 +3610,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3635,6 +3644,7 @@ mod tests {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: None,
             },
         );
 

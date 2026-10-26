@@ -91,6 +91,11 @@ pub struct Intent {
     /// [`Plan::prune`]. Absent from journals written before it existed.
     #[serde(default)]
     pub prune: Vec<String>,
+    /// A relink run ([`begin_relink`]): it moves nothing, and only backs up
+    /// the notes and `state.json` files it rewrites. Absent (`false`) from
+    /// every other journal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relink: bool,
 }
 
 /// The `curso.json` a planned course gets.
@@ -130,6 +135,7 @@ impl From<&Plan> for Intent {
                 })
                 .collect(),
             prune: plan.prune.clone(),
+            relink: false,
         }
     }
 }
@@ -501,6 +507,50 @@ pub fn apply_with_hook(
         intent: intent.clone(),
     });
     run(&intent, roots, journal, before_op, BTreeSet::new())
+}
+
+/// Open a new journal `ts` for a relink run: a `begin` whose intent moves
+/// nothing and says [`Intent::relink`]. The relink backs up what it rewrites
+/// under `.u_crawler/backup/<ts>/`, so [`undo`] (with the notes'
+/// restore in `migrate::ensure`) can reverse it; [`finish_relink`] closes it.
+///
+/// # Errors
+///
+/// [`ApplyError::JournalExists`] when `ts` is taken, and I/O errors.
+pub fn begin_relink(library: &Path, ts: &str) -> Result<()> {
+    let mut journal = Journal::open(library, ts)?;
+    if journal.state.is_some() {
+        return Err(ApplyError::JournalExists(ts.to_string()));
+    }
+    journal.file = Some(journal.create_or_append()?);
+    journal.write_line(&Entry::Begin {
+        intent: Intent {
+            relink: true,
+            ..Intent::default()
+        },
+    })
+}
+
+/// Close the relink journal `ts` with `done`. Nothing to do when it is
+/// already closed.
+///
+/// # Errors
+///
+/// [`ApplyError::UnknownJournal`], and I/O errors.
+pub fn finish_relink(library: &Path, ts: &str) -> Result<()> {
+    let mut journal = Journal::open(library, ts)?;
+    match journal.state {
+        None => Err(ApplyError::UnknownJournal(ts.to_string())),
+        Some(JournalState::Open) => journal.record(&Entry::Done),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The journal is a relink run's ([`begin_relink`]).
+pub fn is_relink(entries: &[Entry]) -> bool {
+    entries
+        .iter()
+        .any(|e| matches!(e, Entry::Begin { intent } if intent.relink))
 }
 
 /// Finish the run an open journal `ts` recorded, from its [`Intent`].

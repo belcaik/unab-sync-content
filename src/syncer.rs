@@ -12,8 +12,8 @@ use crate::http::{build_http_client, HttpCtx};
 use crate::index::{AssignmentIndex, AssignmentRef, CourseIndex, ModuleIndex, PageIndex};
 use crate::layout::{self, CourseNaming};
 use crate::library;
-use crate::links::canvas_file_ids;
-use crate::migrate::rewrite;
+use crate::links::{canvas_file_ids, FileTarget, LinkMap};
+use crate::migrate::{relink, rewrite};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
 use crate::status;
@@ -21,7 +21,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use html2md::parse_html;
 use regex::Regex;
 use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::{info, warn};
@@ -47,6 +47,9 @@ pub async fn run_sync(
     let dirs = library::course_dirs(&naming, &lib, &courses);
     let ignored: std::collections::HashSet<String> =
         cfg.canvas.ignored_courses.iter().cloned().collect();
+    // Where every Canvas resource already is, so a note can link to another
+    // course's copies too; each course adds what it names and downloads.
+    let mut links = relink::disk_map(&root)?;
 
     let selected_courses: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
         if ignored.contains(&cid.to_string()) {
@@ -106,6 +109,7 @@ pub async fn run_sync(
         let assignment_files = assignment_files(&assignments_list);
         let assignments: std::collections::HashMap<u64, Assignment> =
             assignments_list.into_iter().map(|a| (a.id, a)).collect();
+        predict_links(&mut links, &dir_name, c.id, &modules, &assignment_files);
         let course_sync = CourseSync {
             canvas: &canvas,
             httpctx: &httpctx,
@@ -124,7 +128,7 @@ pub async fn run_sync(
                 .position
                 .unwrap_or_else(|| u32::try_from(i + 1).unwrap_or(u32::MAX));
             let synced_module = course_sync
-                .sync_module(m, position, &assignments, &mut state)
+                .sync_module(m, position, &assignments, &mut state, &mut links)
                 .await?;
             let counts = synced_module.counts;
             totals += counts;
@@ -153,7 +157,7 @@ pub async fn run_sync(
                 dry_run,
                 verbose,
             )
-            .run(&c.name, &mut state)
+            .run(&c.name, &mut state, &mut links)
             .await
             {
                 Ok(run) => {
@@ -243,7 +247,7 @@ pub async fn run_sync(
 /// (then `-3`…), and no two ever share a file — the same names the
 /// migrator gives two v1 assignments with one title. A name depends only on
 /// the lower ids, so a new assignment never renames an existing one.
-fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
+pub fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
     let mut sorted: Vec<&Assignment> = assignments.iter().collect();
     sorted.sort_by_key(|a| a.id);
     let wanted: Vec<String> = sorted
@@ -252,6 +256,88 @@ fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
         .collect();
     let names = layout::unique_names(&wanted, &|_| false);
     sorted.into_iter().map(|a| a.id).zip(names).collect()
+}
+
+/// Where this sync will write each page and assignment the modules list,
+/// put in `links` before any note is written, so a page can link to one
+/// written after it. A page is named from its module item's title here and
+/// from the page's own title when written (which replaces the entry); the
+/// two agree unless the page was renamed after it was added to the module.
+fn predict_links(
+    links: &mut LinkMap,
+    ramo: &str,
+    course_id: u64,
+    modules: &[Module],
+    assignment_files: &HashMap<u64, String>,
+) {
+    links.courses.insert(course_id, PathBuf::from(ramo));
+    for (i, m) in modules.iter().enumerate() {
+        let position = m
+            .position
+            .unwrap_or_else(|| u32::try_from(i + 1).unwrap_or(u32::MAX));
+        let module_rel = Path::new(ramo)
+            .join(layout::MODULES_DIR)
+            .join(layout::module_dir(position, &m.name));
+        for (idx, item) in m.items.iter().enumerate() {
+            let item_position = u32::try_from(idx + 1).unwrap_or(u32::MAX);
+            if let Some(slug) = item_page_slug(item, course_id) {
+                let title = item.title.clone().unwrap_or_else(|| slug.clone());
+                let path = module_rel.join(layout::page_file(item_position, &title));
+                links
+                    .pages
+                    .insert((course_id, slug.to_ascii_lowercase()), path.clone());
+                links.module_items.insert(item.id, path);
+                continue;
+            }
+            if item.kind.as_deref() != Some("Assignment") {
+                continue;
+            }
+            let Some((aid, file)) = item
+                .content_id
+                .and_then(|aid| Some((aid, assignment_files.get(&aid)?)))
+            else {
+                continue;
+            };
+            let path = Path::new(ramo).join(layout::ASSIGNMENTS_DIR).join(file);
+            links.assignments.insert(aid, path.clone());
+            links.module_items.insert(item.id, path);
+        }
+    }
+}
+
+/// The page a module item shows: its `page_url`, or the slug of an
+/// `html_url` that is a page of this course.
+fn item_page_slug(item: &crate::canvas::ModuleItem, course_id: u64) -> Option<String> {
+    item.page_url.clone().or_else(|| {
+        item.html_url
+            .as_deref()
+            .filter(|u| is_course_page_url(u, course_id))
+            .and_then(extract_page_slug)
+    })
+}
+
+/// `rel` with `/` separators, as `state.json` records paths.
+fn slash(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Record in `state` that `key` is at `rel` (relative to the course
+/// directory), creating the entry when there is none.
+fn record_path(state: &mut State, key: String, rel: &Path) {
+    let path = Some(slash(rel));
+    match state.items.get_mut(&key) {
+        Some(item) => item.path = path,
+        None => state.set(
+            key,
+            ItemState {
+                path,
+                ..ItemState::default()
+            },
+        ),
+    }
 }
 
 /// A Canvas timestamp as the frontmatter writes it: RFC 3339, UTC, seconds.
@@ -283,6 +369,8 @@ struct ModuleCtx<'a> {
     course_id: u64,
     module_id: u64,
     course_dir: &'a Path,
+    /// The course directory name: where `links` paths start.
+    ramo: &'a str,
     /// `modulos/NN-<slug>`, relative to the course directory.
     module_rel: PathBuf,
     dry_run: bool,
@@ -290,9 +378,10 @@ struct ModuleCtx<'a> {
     /// Canvas file ids already handled in this module. A file may be linked from
     /// a page, an assignment body and a module item all at once.
     processed: HashSet<u64>,
-    /// Where each file downloaded here landed, relative to the course
-    /// directory: the map the markdown link rewrite points at.
-    files: BTreeMap<u64, PathBuf>,
+    /// Where every Canvas resource is, relative to the library root: the
+    /// map the markdown link rewrite points at. Each file downloaded here
+    /// and each note written here is added.
+    links: &'a mut LinkMap,
     /// Paths handed out under this module's `adjuntos/` ([`Claims`]).
     claims: Claims,
 }
@@ -361,7 +450,10 @@ impl ModuleCtx<'_> {
                     .strip_prefix(self.course_dir)
                     .map(Path::to_path_buf)
                     .unwrap_or(rel);
-                self.files.insert(file_id, rel);
+                record_path(state, key, &rel);
+                self.links
+                    .files
+                    .insert(file_id, FileTarget::Path(Path::new(self.ramo).join(&rel)));
                 Ok(1)
             }
             Err(e) => {
@@ -399,6 +491,7 @@ impl ModuleCtx<'_> {
         let hash = sha1_hex(md.as_bytes());
 
         if state.get(&key).and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
+            record_path(state, key, rel);
             if !self.dry_run && self.verbose {
                 info!(course_id, module_id, path = %dest.display(), what, "unchanged; skipping");
             }
@@ -420,6 +513,7 @@ impl ModuleCtx<'_> {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: Some(slash(rel)),
             },
         );
         info!(course_id, module_id, path = %dest.display(), what, "wrote markdown");
@@ -468,6 +562,7 @@ impl CourseSync<'_> {
         position: u32,
         assignments: &HashMap<u64, Assignment>,
         state: &mut State,
+        links: &mut LinkMap,
     ) -> anyhow::Result<SyncedModule> {
         let course_id = self.course_id;
         let canvas = self.canvas;
@@ -486,11 +581,12 @@ impl CourseSync<'_> {
             course_id,
             module_id: m.id,
             course_dir: self.course_dir,
+            ramo: self.ramo,
             module_rel,
             dry_run,
             verbose: self.verbose,
             processed: HashSet::new(),
-            files: BTreeMap::new(),
+            links,
             claims: Claims::default(),
         };
         let mut counts = SyncCounts::default();
@@ -501,12 +597,7 @@ impl CourseSync<'_> {
             // A page is reachable either by its own page_url or via an html_url that
             // points at one. Both used to be separate match arms rendering identical
             // markdown; resolving the slug up front collapses them.
-            let page_slug = item.page_url.clone().or_else(|| {
-                item.html_url
-                    .as_deref()
-                    .filter(|u| is_course_page_url(u, course_id))
-                    .and_then(extract_page_slug)
-            });
+            let page_slug = item_page_slug(item, course_id);
 
             if let Some(slug) = page_slug {
                 let page = canvas.get_page(course_id, &slug).await?;
@@ -524,7 +615,13 @@ impl CourseSync<'_> {
                     url: page.html_url.clone(),
                     ..self.frontmatter(DocKind::Page)
                 };
-                let md = render_note(&html, &fm, &rel, &ctx.files);
+                let note = Path::new(self.ramo).join(&rel);
+                ctx.links
+                    .pages
+                    .insert((course_id, slug.to_ascii_lowercase()), note.clone());
+                ctx.links.module_items.insert(item.id, note);
+                record_path(state, relink::module_item_key(item.id), &rel);
+                let md = render_note(&html, &fm, &Path::new(self.ramo).join(&rel), ctx.links);
                 counts.pages += ctx
                     .write_markdown(
                         format!("page:{slug}"),
@@ -543,6 +640,12 @@ impl CourseSync<'_> {
                 Some("File") => {
                     if let Some(fid) = item.content_id {
                         counts.files += ctx.sync_file(fid, state).await?;
+                        if let Some(FileTarget::Path(path)) = ctx.links.files.get(&fid).cloned() {
+                            if let Ok(rel) = path.strip_prefix(self.ramo) {
+                                record_path(state, relink::module_item_key(item.id), rel);
+                            }
+                            ctx.links.module_items.insert(item.id, path);
+                        }
                     }
                 }
                 Some("Assignment") => {
@@ -571,7 +674,11 @@ impl CourseSync<'_> {
                         disponible: assign.unlock_at.map(rfc3339),
                         ..self.frontmatter(DocKind::Assignment)
                     };
-                    let md = render_note(&html, &fm, &rel, &ctx.files);
+                    let note = Path::new(self.ramo).join(&rel);
+                    ctx.links.assignments.insert(aid, note.clone());
+                    ctx.links.module_items.insert(item.id, note);
+                    record_path(state, relink::module_item_key(item.id), &rel);
+                    let md = render_note(&html, &fm, &Path::new(self.ramo).join(&rel), ctx.links);
                     counts.pages += ctx
                         .write_markdown(
                             format!("assignment:{aid}"),
@@ -603,12 +710,12 @@ impl CourseSync<'_> {
     }
 }
 
-/// The note for `html` at `rel` (relative to the course directory): the
-/// markdown body with its Canvas file links pointing at the local copies in
-/// `files`, under the frontmatter `fm` — exactly what `migrate::rewrite`
+/// The note for `html` at `rel` (relative to the library root): the
+/// markdown body with its Canvas links pointing at the local copies in
+/// `links`, under the frontmatter `fm` — exactly what `migrate::rewrite`
 /// produces, so a sync never undoes what a migration wrote.
-fn render_note(html: &str, fm: &Frontmatter, rel: &Path, files: &BTreeMap<u64, PathBuf>) -> String {
-    rewrite::apply(&parse_html(html), fm, rel, files)
+fn render_note(html: &str, fm: &Frontmatter, rel: &Path, links: &LinkMap) -> String {
+    rewrite::apply(&parse_html(html), fm, rel, links)
 }
 
 fn sha1_hex(data: &[u8]) -> String {
@@ -702,15 +809,18 @@ mod tests {
             )),
             disponible: None,
         };
-        let files = BTreeMap::from([(
+        let mut links = LinkMap::default();
+        links.files.insert(
             22,
-            PathBuf::from("modulos/01-informacion-general/adjuntos/guia-1.pdf"),
-        )]);
+            FileTarget::Path(PathBuf::from(
+                "ramo/modulos/01-informacion-general/adjuntos/guia-1.pdf",
+            )),
+        );
         let got = render_note(
             r#"<p><a href="https://x.instructure.com/courses/1/files/22?verifier=a">Guía</a></p>"#,
             &fm,
-            Path::new("tareas/semana-10.md"),
-            &files,
+            Path::new("ramo/tareas/semana-10.md"),
+            &links,
         );
         assert!(
             got.starts_with("---\nramo: \"atdf105-mineria-de-datos\"\ntipo: tarea\ncanvas_id: 30\nvence: \"2026-06-20T03:59:00Z\"\n---\n"),
@@ -720,6 +830,34 @@ mod tests {
             got.contains("](../modulos/01-informacion-general/adjuntos/guia-1.pdf)"),
             "{got}"
         );
+    }
+
+    #[test]
+    fn predicted_links_reach_pages_and_assignments_written_later() {
+        let modules: Vec<Module> = serde_json::from_value(serde_json::json!([
+            { "id": 1, "name": "Semana 1", "position": 2, "items": [
+                { "id": 70, "title": "Fase 1", "type": "Page", "page_url": "fase-1" },
+                { "id": 71, "title": "Entrega", "type": "Assignment", "content_id": 30 },
+                { "id": 72, "title": "Guía", "type": "File", "content_id": 5 }
+            ]}
+        ]))
+        .unwrap();
+        let files = HashMap::from([(30, "entrega.md".to_string())]);
+        let mut links = LinkMap::default();
+        predict_links(&mut links, "ramo", 9, &modules, &files);
+        let page = PathBuf::from("ramo/modulos/02-semana-1/01-fase-1.md");
+        assert_eq!(links.pages[&(9, "fase-1".to_string())], page);
+        assert_eq!(links.module_items[&70], page);
+        assert_eq!(
+            links.assignments[&30],
+            PathBuf::from("ramo/tareas/entrega.md")
+        );
+        assert_eq!(
+            links.module_items[&71],
+            PathBuf::from("ramo/tareas/entrega.md")
+        );
+        assert!(!links.module_items.contains_key(&72));
+        assert_eq!(links.courses[&9], PathBuf::from("ramo"));
     }
 
     #[test]

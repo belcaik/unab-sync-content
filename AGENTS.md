@@ -229,7 +229,8 @@ writers never format a path themselves.
     README.md                        # modules, assignments, announcements, recordings
     curso.json                       # canvas_id, course_code, name, canvas_name, term, section, zoom_ids
     .u_crawler/state.json            # per-course sync state (file:, page:, assignment:,
-                                     #   announcement:, calendar:, calendar-window:, zoom:)
+                                     #   announcement:, module-item:, calendar:,
+                                     #   calendar-window:, zoom:)
     modulos/
       NN-<module-slug>/              # NN = Canvas module position
         README.md                    # links the module's pages and assignments
@@ -245,10 +246,32 @@ writers never format a path themselves.
 ```
 
 Every generated note goes through `migrate::rewrite::apply`: YAML
-frontmatter (`ramo` = the course directory name) and Canvas `/files/<id>`
-links rewritten to the local copy, so a sync writes exactly what the
-migrator would. Files are downloaded before the note that links them is
-written; a file that failed keeps its Canvas link.
+frontmatter (`ramo` = the course directory name) and its Canvas links
+rewritten to the local copies, so a sync writes exactly what the migrator
+would. Files are downloaded before the note that links them is written; a
+file that failed keeps its Canvas link.
+
+**Canvas links → local copies** (`links::rewrite_canvas_links` over a
+`links::LinkMap`, paths relative to the library root). `links::canvas_ref`
+reads a link (absolute on any host, or root-relative) as a file
+(`/files/<id>` anywhere in the path: `preview`, `download`, `/api/v1/…`),
+a page (`/courses/<n>/pages/<slug>`), an assignment, an announcement
+(`discussion_topics`), a module item (`/courses/<n>/modules/items/<id>`)
+or a course home (`/courses/<n>`, → its `README.md`); the link becomes the
+path from the note, percent-encoded outside `[A-Za-z0-9._~/-]`, with
+Canvas's query and fragment dropped. `https://<canvas>/mailto:x` becomes
+`mailto:x`. Quizzes, `media_attachments_iframe`, `external_tools`,
+`equation_images`, a resource without a local copy, and anything in code
+stay as they are. The map spans every course, so a link into another
+course's directory works. `sync` builds it from disk at the start
+(`migrate::relink::disk_map`), adds each course's pages and assignments
+from the module listing before writing any note (a page can link to one
+written after it), and adds every file, page, assignment and announcement
+as it writes it. `sync` records where each item is in `state.json`
+(`ItemState::path`, relative to the course directory; `module-item:<id>`
+entries hold what an item shows), which is what lets later runs resolve
+links offline. An announcement whose rendered note differs from the file
+on disk is rewritten even when Canvas did not change it.
 
 **Course directories** (`library.rs`). A course owns the directory whose
 `curso.json` names its Canvas id (or, with `canvas_id: null`, its name and
@@ -304,8 +327,8 @@ run has not seen the other courses' deadlines); `AGENTS.md`, the READMEs and
 `curso.json` are rewritten only when their text changed. A root `AGENTS.md`
 or `INDEX.md` whose first line is not ours (the vault's own) is never
 overwritten (`library::write_root_file`). `.u_crawler/library.json`
-(`{"layout_version": 2}`) is written by the migration only, as its last step
-(see "Migration").
+(`{"layout_version": 2, "links_version": 1}`) is written by the migration
+only, as its last step (see "Migration").
 
 ### Directory Layout (Calendar)
 
@@ -444,13 +467,39 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    (`rewrite::rewrite_file`, backup under `.u_crawler/backup/<ts>/`, the
    journal's `<ts>`): `ramo` + `tipo`, and for an announcement `canvas_id`
    (from the v1 file name), `url` and `publicado` (from `index.json`), plus
-   Canvas `/files/<id>` links to the announcement media `index.json` lists.
+   every Canvas link the library's `LinkMap` resolves (see step 4).
    Pages and assignments keep their other keys until the next `sync`. The
    notes come from the journals, not the plan: without `library.json`, every
    finished journal is replayed (idempotent), so a cut between the renames
    and the rewrites is healed by the next run; with it, only this call's.
    A note that fails is logged and counted, never fatal.
-4. Every index file, from the disk (`library::write_indexes_from_disk`,
+4. Relink (`migrate::relink`): the `LinkMap` of the whole library is built
+   from disk (`relink::read_sources` → `relink::build`, pure), plus Canvas
+   with a client (`relink::learn`: module items, assignment file names, and
+   `GET /files/:id` for every linked file with no single local copy), and
+   every other generated note of a v2 course whose links it resolves is
+   rewritten, frontmatter untouched. What Canvas taught goes into each
+   course's `state.json` (`relink::state_updates`, via
+   `rewrite::rewrite_state`, backed up like a note). Both are backed up
+   under this run's journal, or, when the plan moved nothing, under a
+   journal of their own (`apply::begin_relink`: an intent with
+   `relink: true`, no moves), so `--undo <ts>` reverses them. Offline, the
+   map takes, most reliable first: a note's frontmatter (`url`, and
+   `canvas_id` for `tarea` / `anuncio`); `state.json` paths; the v1
+   `content_hash` of `page:` / `assignment:` entries, the SHA-1 of the note
+   v1 wrote, matched against each note's bytes and its backups; announcement
+   ids from `index.json` (`body_md_path`) or from the journal's rename of
+   a v1 `…_<id>.md`; announcement media from `index.json` (`local_path`,
+   as is or through the journal's rename); a `file:<id>` whose `size` (and
+   recorded `file_name`) matches one attachment of its course (several:
+   the link's own text must name one, as `layout::attachment_file` or slug,
+   else it stays remote); a `page:<slug>` whose slug names one page note
+   of its course (`NN-<slug>.md`, needs the course's Canvas id). Two notes
+   claiming one resource at the same level leave it remote (logged), as
+   does an ambiguous file (logged per note). Module items are not on disk
+   in v1: offline they stay remote until a `sync` or `migrate --canvas`
+   records them. The summary counts the links made local.
+5. Every index file, from the disk (`library::write_indexes_from_disk`,
    always, offline or not): a `README.md` per course and per module where
    there is none — one already there (a `sync`'s, or the user's) is never
    overwritten — each `curso.json` brought up to date (readable `name`,
@@ -462,13 +511,19 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    announcement titles from `index.json`; a module README lists its pages
    only (which module links which assignment is not on disk; `sync` adds
    it).
-5. `.u_crawler/library.json`, last: until it exists the library is not v2.
+6. `.u_crawler/library.json`, last, with `links_version`
+   (`relink::LINKS_VERSION`): until it exists the library is not v2; until
+   it has that version, the next writer command relinks it once.
 
 `ensure_v2` is the cheap gate the writer commands use: a root that does not
-exist is left alone; `library.json` present and no open journal returns at
-once without scanning or calling Canvas — unless a course or module lacks
-its `README.md` (`library::indexes_missing`, directory listings only), when
-step 4 runs (not in a dry run); otherwise it is `migrate`. A
+exist is left alone; `library.json` present with the current
+`links_version` and no open journal returns at once without scanning or
+calling Canvas — unless a course or module lacks its `README.md`
+(`library::indexes_missing`, directory listings only), when step 5 runs
+(not in a dry run); otherwise it is `migrate` (so a library migrated before
+the relink step is relinked by its next `sync`, with Canvas). `migrate
+--dry-run` on a library with nothing to move also reports how many links a
+real run would make local. A
 library root that overlaps `calendar.caldir_root` is never treated as a
 library (`MigrateError::Overlap` from `migrate`). `migrate` ignores the
 marker and always plans, so a v1 course copied into a v2 library is migrated
@@ -489,7 +544,11 @@ rewritten note back from its backup, setting the current bytes aside under
 a foreign one the next migration avoids; then removes the directories the
 run created that this left empty (`apply::remove_created_dirs`); then sets
 `library.json` aside the same way, so the next writer command migrates
-again (for example after a `[layout]` change). Root `AGENTS.md`/`INDEX.md`
+again (for example after a `[layout]` change). A relink journal moved
+nothing, so its undo restores the notes and `state.json` files and leaves
+`library.json` (and its `links_version`) alone: the writers do not relink
+it again. Undoing a migration journal that a later relink journal builds
+on is refused until that one is undone. Root `AGENTS.md`/`INDEX.md`
 stay. Every step is idempotent, so a cut undo is simply run again.
 
 ## Architecture
@@ -503,7 +562,7 @@ src/
   canvas.rs         # Canvas REST client (get_json / list_paginated)
   download.rs       # the one downloader: ETag, .part, Range resume, atomic rename
   state.rs          # per-course State, ItemState, record_error
-  links.rs          # HTML -> links, media refs, zoom URLs; Canvas /files/<id> markdown rewrite
+  links.rs          # HTML -> links, media refs, zoom URLs; Canvas link -> local copy markdown rewrite (LinkMap)
   syncer.rs         # CourseSync / ModuleCtx: the main sync flow
   announcements.rs  # AnnouncementSync
   calendar.rs       # calendar-sync: pure deadline planner (`plan`) + its I/O executor (`run_calendar`)
@@ -518,7 +577,8 @@ src/
     detect.rs       # pure: v1 / v2 / empty, from the inventory
     plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
     apply.rs        # executor: write-ahead journal (.u_crawler/migrations/<ts>.jsonl), rename without replace, BLAKE3 collisions, resume, undo
-    rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
+    rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown (and state.json)
+    relink.rs       # where each Canvas resource is on disk (LinkMap), Canvas enrichment, learned state.json paths
     ensure.rs       # the whole migration: resume, plan, apply, rewrite, root indexes, library.json; ensure_v2; undo
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
@@ -556,7 +616,8 @@ Rules that hold today and should keep holding:
   indented prose line between two rules stay in the body. An existing
   non-symlink `.part` beside the note or the backup is refused (`PartExists`);
   `atomic_write` itself is unchanged and downloads still truncate their own
-  `.part`. `migrate::ensure` is its only caller outside the writers. The frozen signatures are in
+  `.part`. `rewrite_state` gives a course's `.u_crawler/state.json` the
+  same backup-then-replace (the only non-markdown it writes). `migrate::ensure` is its only caller outside the writers. The frozen signatures are in
   `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
@@ -699,7 +760,11 @@ Present today (`cargo test`): Link-header parsing, retry/backoff classification,
 URL construction and percent-encoding, `window.appConf` parsing, link/media
 extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
-round-trip and upsert, Canvas `/files/<id>` markdown rewrite, course
+round-trip and upsert, Canvas link classification and markdown rewrite to
+local copies (every link shape, ambiguity settled by link text,
+percent-encoding, `mailto:` repair), the `LinkMap` built from disk and from
+Canvas answers (`migrate::relink`), `sync`'s predicted page and assignment
+paths, course
 directory resolution and index-file writes (`library`), assignment and
 announcement naming with collisions, recording naming / parts / `zoom:`
 dedupe (`zoom::headless`), the `zoom:` state key,
@@ -727,7 +792,14 @@ it migrates and marks the library, a second pass does nothing, every hash of
 the v1 manifest survives (rewritten notes in their backup), the calendar
 directory follows its course, a dry run touches nothing, a cut mid-apply or
 after the renames heals on the next run, undo restores the v1 tree byte for
-byte, and a caldir used as `download_root` is never marked).
+byte, and a caldir used as `download_root` is never marked), and the links
+(`tests/migrate_links.rs`: migrating the v1 fixture, whose page `Fase 4`
+carries every link shape measured in the real notes, leaves exactly the
+expected local links and no broken one; a v2 library whose notes still link
+to Canvas is repaired by the next writer (and counted by a dry run), a
+second pass does nothing, and undoing the relink journal restores it byte
+for byte while keeping it marked; a course without a Canvas id keeps its
+page links).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and

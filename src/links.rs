@@ -5,11 +5,13 @@
 //! ordinary link, inline media, or a Canvas-hosted file (which carries a numeric
 //! id the API can resolve).
 //!
-//! [`rewrite_canvas_file_links`] is the pure half of layout-v2 migration: a
-//! markdown link whose target contains `/files/<id>` becomes a path relative to
-//! the note, when that id is in the caller's map. Anything not downloaded, and
-//! anything inside code, stays as it was.
+//! [`rewrite_canvas_links`] is the pure half of pointing notes at the local
+//! copies: a markdown link [`canvas_ref`] reads as a Canvas file, page,
+//! assignment, announcement, module item or course becomes a path relative to
+//! the note, when the caller's [`LinkMap`] has it. Anything not downloaded,
+//! anything ambiguous, and anything inside code, stays as it was.
 
+use crate::layout;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -190,22 +192,226 @@ pub fn classify_by_filename(s: &str) -> MediaKind {
     }
 }
 
-/// Rewrite Canvas `/files/<id>` links in markdown to paths relative to `md_path`.
+/// A Canvas resource a link points at, read from its URL by [`canvas_ref`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CanvasRef {
+    /// `/files/<id>`, `/courses/<n>/files/<id>[/preview|/download]`,
+    /// `/api/v1[/courses/<n>]/files/<id>`.
+    File(u64),
+    /// `/courses/<course>/pages/<slug>`.
+    Page {
+        /// Course id in the URL.
+        course: u64,
+        /// The page's `url` slug, lowercased.
+        slug: String,
+    },
+    /// `/courses/<n>/assignments/<id>`.
+    Assignment(u64),
+    /// `/courses/<n>/discussion_topics/<id>` (announcements are discussion topics).
+    Announcement(u64),
+    /// `/courses/<n>/modules/items/<id>`.
+    ModuleItem(u64),
+    /// `/courses/<id>` itself.
+    Course(u64),
+    /// `https://<canvas>/mailto:x@y`, a `mailto:` Canvas made relative to its
+    /// own host. The value is the `mailto:` URL it should have been.
+    Mailto(String),
+}
+
+/// Where a Canvas resource is in the library: what [`rewrite_canvas_links`]
+/// points links at. Every path is relative to the library root.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkMap {
+    /// Canvas course id → course directory. A link to the course itself goes
+    /// to its `README.md`.
+    pub courses: BTreeMap<u64, PathBuf>,
+    /// Canvas file id → its local copy, or the copies it might be.
+    pub files: BTreeMap<u64, FileTarget>,
+    /// (course id, page slug) → page note.
+    pub pages: BTreeMap<(u64, String), PathBuf>,
+    /// Assignment id → note under `tareas/`.
+    pub assignments: BTreeMap<u64, PathBuf>,
+    /// Announcement (discussion topic) id → note under `anuncios/`.
+    pub announcements: BTreeMap<u64, PathBuf>,
+    /// Module item id → the page, assignment or file it shows.
+    pub module_items: BTreeMap<u64, PathBuf>,
+}
+
+/// Where a Canvas file is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileTarget {
+    /// This file.
+    Path(PathBuf),
+    /// One of these files, all of the right size: the link's own text has to
+    /// name exactly one of them ([`LinkMap::resolve`]), or the link stays remote.
+    Ambiguous(Vec<PathBuf>),
+}
+
+/// How [`LinkMap::resolve`] answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// The local copy, relative to the library root.
+    Local(PathBuf),
+    /// The link should become this URL (`mailto:`).
+    Url(String),
+    /// More than one local file could be it, and the link text names none.
+    Ambiguous,
+    /// No local copy.
+    Remote,
+}
+
+impl LinkMap {
+    /// Where `target` is, if anywhere. `label` is the link's text, the only
+    /// tie-break between same-size copies ([`FileTarget::Ambiguous`]): it
+    /// must name exactly one of them, as its original file name
+    /// ([`layout::attachment_file`]) or as its slug.
+    pub fn resolve(&self, target: &CanvasRef, label: &str) -> Resolution {
+        let found = match target {
+            CanvasRef::File(id) => match self.files.get(id) {
+                Some(FileTarget::Path(path)) => Some(path.clone()),
+                Some(FileTarget::Ambiguous(paths)) => {
+                    return match pick_by_label(paths, label) {
+                        Some(path) => Resolution::Local(path.clone()),
+                        None => Resolution::Ambiguous,
+                    }
+                }
+                None => None,
+            },
+            CanvasRef::Page { course, slug } => self.pages.get(&(*course, slug.clone())).cloned(),
+            CanvasRef::Assignment(id) => self.assignments.get(id).cloned(),
+            CanvasRef::Announcement(id) => self.announcements.get(id).cloned(),
+            CanvasRef::ModuleItem(id) => self.module_items.get(id).cloned(),
+            CanvasRef::Course(id) => self.courses.get(id).map(|dir| dir.join(COURSE_README)),
+            CanvasRef::Mailto(url) => return Resolution::Url(url.clone()),
+        };
+        match found {
+            Some(path) => Resolution::Local(path),
+            None => Resolution::Remote,
+        }
+    }
+}
+
+/// The course index every v2 course directory has.
+const COURSE_README: &str = "README.md";
+
+/// The one candidate `label` names, by original file name or by slug.
+fn pick_by_label<'a>(candidates: &'a [PathBuf], label: &str) -> Option<&'a PathBuf> {
+    let label = unescape_markdown(label);
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let as_file = layout::attachment_file(label);
+    let as_slug = layout::slugify(label);
+    let mut hits = candidates.iter().filter(|path| {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        name == as_file || (!as_slug.is_empty() && stem == as_slug)
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
+/// `label` without markdown backslash escapes (html2md writes `Guia\_1.PDF`).
+fn unescape_markdown(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The Canvas resource `url` points at, or `None` for anything without a
+/// local copy (quizzes, `media_attachments_iframe`, `external_tools`,
+/// `equation_images`, other sites…).
 ///
-/// `md_path` and every value in `files` are relative to the same root (the
-/// library root). A link is rewritten when its target contains a file id that
-/// `files` maps. The replacement is the path from the note's directory to that
-/// file, with `/` separators. Ids that are not in the map stay exactly as they
-/// were, query string included.
+/// Absolute `http(s)` URLs on any host and root-relative paths are read the
+/// same way; the query and fragment are ignored. A `/files/<id>` anywhere in
+/// the path is a file, as [`canvas_file_ids`] reads it.
+pub fn canvas_ref(url: &str) -> Option<CanvasRef> {
+    let url = destination_body(url);
+    let path_and_rest = if starts_with_http(url) {
+        let after_scheme = &url[url.find("//")? + 2..];
+        &after_scheme[after_scheme.find('/')?..]
+    } else if url.starts_with('/') && !url.starts_with("//") {
+        url
+    } else {
+        return None;
+    };
+    if let Some(mail) = path_and_rest.strip_prefix("/mailto:") {
+        return (!mail.is_empty()).then(|| CanvasRef::Mailto(format!("mailto:{mail}")));
+    }
+    let path = path_and_rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path_and_rest);
+    let segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .split('/')
+        .collect();
+    let id = |s: &str| -> Option<u64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    if let ["courses", course, rest @ ..] = segments.as_slice() {
+        if let Some(course) = id(course) {
+            match rest {
+                [] => return Some(CanvasRef::Course(course)),
+                ["pages", slug] if !slug.is_empty() => {
+                    return Some(CanvasRef::Page {
+                        course,
+                        slug: slug.to_ascii_lowercase(),
+                    })
+                }
+                ["assignments", item] => return id(item).map(CanvasRef::Assignment),
+                ["discussion_topics", item] => return id(item).map(CanvasRef::Announcement),
+                ["modules", "items", item] => return id(item).map(CanvasRef::ModuleItem),
+                _ => {}
+            }
+        }
+    }
+    canvas_file_ids(path).next().map(CanvasRef::File)
+}
+
+/// What one [`rewrite_canvas_links`] call did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkStats {
+    /// Links now pointing at a local copy.
+    pub local: usize,
+    /// `https://<canvas>/mailto:` links turned into `mailto:`.
+    pub mailto: usize,
+    /// Canvas file ids left remote because more than one local file could be them.
+    pub ambiguous: Vec<u64>,
+}
+
+/// Rewrite Canvas links in markdown to paths relative to `md_path`.
+///
+/// `md_path` and every path in `map` are relative to the same root (the
+/// library root). A link is rewritten when [`canvas_ref`] reads a resource
+/// from it that `map` has a local copy of ([`LinkMap::resolve`]); the
+/// replacement is the path from the note's directory to that copy, with `/`
+/// separators, and Canvas's query and fragment are dropped. A misplaced
+/// `https://<canvas>/mailto:` becomes the `mailto:` it was. Everything else
+/// stays exactly as it was.
 ///
 /// Fenced code and inline code are not rewritten. Inline links, images,
 /// autolinks, reference definitions and bare `http(s)` URLs are. A destination
 /// is read on the same line as its opening `[`.
-pub fn rewrite_canvas_file_links(
-    markdown: &str,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
-) -> String {
+pub fn rewrite_canvas_links(markdown: &str, md_path: &Path, map: &LinkMap) -> (String, LinkStats) {
+    let mut cx = Cx {
+        md_path,
+        map,
+        stats: LinkStats::default(),
+    };
     let mut out = String::with_capacity(markdown.len());
     let mut rest = markdown;
     let mut code: Option<usize> = None;
@@ -233,11 +439,20 @@ pub fn rewrite_canvas_file_links(
             }
         }
         let (line_len, nl_len) = line_bounds(rest);
-        out.push_str(&rewrite_line(&rest[..line_len], &mut code, md_path, files));
+        out.push_str(&rewrite_line(&rest[..line_len], &mut code, &mut cx));
         out.push_str(&rest[line_len..line_len + nl_len]);
         rest = &rest[line_len + nl_len..];
     }
-    out
+    cx.stats.ambiguous.sort_unstable();
+    cx.stats.ambiguous.dedup();
+    (out, cx.stats)
+}
+
+/// What the rewrite of one note carries along.
+struct Cx<'a> {
+    md_path: &'a Path,
+    map: &'a LinkMap,
+    stats: LinkStats,
 }
 
 fn line_bounds(s: &str) -> (usize, usize) {
@@ -280,12 +495,7 @@ fn close_fence(line: &str, ch: char, n: usize) -> bool {
     rest.len() >= n && rest.bytes().all(|b| b == ch as u8)
 }
 
-fn rewrite_line(
-    line: &str,
-    code: &mut Option<usize>,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
-) -> String {
+fn rewrite_line(line: &str, code: &mut Option<usize>, cx: &mut Cx<'_>) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
     if let Some(n) = *code {
@@ -319,7 +529,7 @@ fn rewrite_line(
         let interesting = matches!(byte, b'[' | b'!' | b'<' | b'h' | b'H');
         let bare_ok = (byte != b'h' && byte != b'H') || url_boundary(line, i);
         if interesting && bare_ok {
-            if let Some(found) = match_link(&line[i..], ref_def_slot(line, i), md_path, files) {
+            if let Some(found) = match_link(&line[i..], ref_def_slot(line, i), cx) {
                 match found.replacement {
                     Some(text) => out.push_str(&text),
                     None => out.push_str(&line[i..i + found.len]),
@@ -342,19 +552,14 @@ struct Found {
     replacement: Option<String>,
 }
 
-fn match_link(
-    s: &str,
-    allow_ref: bool,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
-) -> Option<Found> {
+fn match_link(s: &str, allow_ref: bool, cx: &mut Cx<'_>) -> Option<Found> {
     if s.starts_with('<') {
-        if let Some(found) = match_autolink(s, md_path, files) {
+        if let Some(found) = match_autolink(s, cx) {
             return Some(found);
         }
     }
     if starts_with_http(s) {
-        if let Some(found) = match_bare_url(s, md_path, files) {
+        if let Some(found) = match_bare_url(s, cx) {
             return Some(found);
         }
     }
@@ -365,10 +570,10 @@ fn match_link(
     }
     let label_end = parse_label(s, bracket)?;
     if s[label_end..].starts_with('(') {
-        return finish_inline(s, bang, bracket, label_end, md_path, files);
+        return finish_inline(s, bang, bracket, label_end, cx);
     }
     if allow_ref && !bang && s[label_end..].starts_with(':') {
-        return finish_ref(s, label_end, md_path, files);
+        return finish_ref(s, label_end, cx);
     }
     None
 }
@@ -378,8 +583,7 @@ fn finish_inline(
     bang: bool,
     bracket: usize,
     label_end: usize,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
+    cx: &mut Cx<'_>,
 ) -> Option<Found> {
     let dest_at = label_end + 1;
     let (dest_len, dest_raw) = parse_destination(&s[dest_at..])?;
@@ -388,19 +592,14 @@ fn finish_inline(
     let end = after_dest + close_len;
     let label = &s[bracket + 1..label_end - 1];
     let replacement =
-        local_dest(dest_raw, md_path, files).map(|dest| render_inline(bang, label, &dest, title));
+        local_link(dest_raw, label, cx).map(|link| render_inline(bang, label, &link.dest, title));
     Some(Found {
         len: end,
         replacement,
     })
 }
 
-fn finish_ref(
-    s: &str,
-    label_end: usize,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
-) -> Option<Found> {
+fn finish_ref(s: &str, label_end: usize, cx: &mut Cx<'_>) -> Option<Found> {
     let after_colon = &s[label_end + 1..];
     let lead = leading_ws(after_colon);
     if lead == 0 {
@@ -419,9 +618,9 @@ fn finish_ref(
         Some(&rest[..title_len])
     };
     let label = &s[1..label_end - 1];
-    let replacement = local_dest(dest_raw, md_path, files).map(|dest| match title {
-        Some(title) => format!("[{label}]: {dest} {title}"),
-        None => format!("[{label}]: {dest}"),
+    let replacement = local_link(dest_raw, label, cx).map(|link| match title {
+        Some(title) => format!("[{label}]: {} {title}", link.dest),
+        None => format!("[{label}]: {}", link.dest),
     });
     Some(Found {
         len: s.len(),
@@ -429,7 +628,7 @@ fn finish_ref(
     })
 }
 
-fn match_autolink(s: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Option<Found> {
+fn match_autolink(s: &str, cx: &mut Cx<'_>) -> Option<Found> {
     let rest = s.strip_prefix('<')?;
     let close = rest.find('>')?;
     let inner = &rest[..close];
@@ -437,14 +636,14 @@ fn match_autolink(s: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Op
         return None;
     }
     let replacement =
-        local_link(inner, md_path, files).map(|link| format!("[{}]({})", link.label, link.dest));
+        local_link(inner, "", cx).map(|link| format!("[{}]({})", link.label, link.dest));
     Some(Found {
         len: close + 2,
         replacement,
     })
 }
 
-fn match_bare_url(s: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Option<Found> {
+fn match_bare_url(s: &str, cx: &mut Cx<'_>) -> Option<Found> {
     if !starts_with_http(s) {
         return None;
     }
@@ -454,7 +653,7 @@ fn match_bare_url(s: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Op
     }
     let url = &s[..len];
     let replacement =
-        local_link(url, md_path, files).map(|link| format!("[{}]({})", link.label, link.dest));
+        local_link(url, "", cx).map(|link| format!("[{}]({})", link.label, link.dest));
     Some(Found { len, replacement })
 }
 
@@ -471,25 +670,50 @@ struct LocalLink {
     label: String,
 }
 
-fn local_link(url: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Option<LocalLink> {
-    let id = canvas_file_ids(destination_body(url)).next()?;
-    let target = files.get(&id)?;
-    let rel = relative_link(md_path, target)?;
-    if rel.chars().any(char::is_control) {
+/// The new destination of the link `url` with text `label`, counted in
+/// `cx.stats`, or `None` to leave it alone.
+fn local_link(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<LocalLink> {
+    let target = canvas_ref(url)?;
+    let link = match cx.map.resolve(&target, label) {
+        Resolution::Local(path) => {
+            let rel = relative_link(cx.md_path, &path)?;
+            if rel.chars().any(char::is_control) {
+                return None;
+            }
+            let label = match target {
+                CanvasRef::Course(_) => path.parent().map_or_else(String::new, file_label),
+                _ => file_label(&path),
+            };
+            LocalLink {
+                dest: markdown_destination(&rel),
+                label,
+            }
+        }
+        Resolution::Url(url) => {
+            if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                return None;
+            }
+            LocalLink {
+                label: escape_label(url.trim_start_matches("mailto:")),
+                dest: url,
+            }
+        }
+        Resolution::Ambiguous => {
+            if let CanvasRef::File(id) = target {
+                cx.stats.ambiguous.push(id);
+            }
+            return None;
+        }
+        Resolution::Remote => return None,
+    };
+    if link.dest == url.trim() {
         return None;
     }
-    let dest = markdown_destination(&rel);
-    if dest == url.trim() {
-        return None;
+    match target {
+        CanvasRef::Mailto(_) => cx.stats.mailto += 1,
+        _ => cx.stats.local += 1,
     }
-    Some(LocalLink {
-        dest,
-        label: file_label(target),
-    })
-}
-
-fn local_dest(url: &str, md_path: &Path, files: &BTreeMap<u64, PathBuf>) -> Option<String> {
-    local_link(url, md_path, files).map(|link| link.dest)
+    Some(link)
 }
 
 fn destination_body(raw: &str) -> &str {
@@ -535,23 +759,18 @@ fn path_parts(path: &Path) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// `rel` as a link destination: percent-encoded (UTF-8) outside
+/// `[A-Za-z0-9._~/-]`, which every markdown viewer, Obsidian included, decodes.
 fn markdown_destination(rel: &str) -> String {
-    let plain = rel
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '/' | '-'));
-    if plain {
-        return rel.to_string();
-    }
-    let mut inner = String::new();
-    for c in rel.chars() {
-        match c {
-            '\\' => inner.push_str("\\\\"),
-            '<' => inner.push_str("\\<"),
-            '>' => inner.push_str("\\>"),
-            c => inner.push(c),
+    let mut out = String::with_capacity(rel.len());
+    for byte in rel.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'/' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
         }
     }
-    format!("<{inner}>")
+    out
 }
 
 fn file_label(path: &Path) -> String {
@@ -903,6 +1122,18 @@ mod tests {
         assert_eq!(ids, vec![9001, 33, 7]);
     }
 
+    /// [`rewrite_canvas_links`] over a map with only `files`.
+    fn rw(input: &str, md: &Path, files: &BTreeMap<u64, PathBuf>) -> String {
+        let map = LinkMap {
+            files: files
+                .iter()
+                .map(|(id, path)| (*id, FileTarget::Path(path.clone())))
+                .collect(),
+            ..LinkMap::default()
+        };
+        rewrite_canvas_links(input, md, &map).0
+    }
+
     fn guia() -> BTreeMap<u64, PathBuf> {
         let mut files = BTreeMap::new();
         files.insert(
@@ -924,13 +1155,13 @@ mod tests {
 ![fig](https://canvas.example.com/api/v1/files/22/preview)
 [pagina](https://canvas.example.com/courses/22/pages/intro)
 ";
-        let out = rewrite_canvas_file_links(input, page(), &guia());
+        let out = rw(input, page(), &guia());
         assert!(out.contains("[guía](adjuntos/guia.pdf)\n"), "{out}");
         assert!(!out.contains("SECRET"), "{out}");
         assert!(out.contains("[otra](https://canvas.example.com/courses/1/files/99/download)\n"));
         assert!(out.contains("![fig](adjuntos/guia.pdf)\n"));
         assert!(out.contains("[pagina](https://canvas.example.com/courses/22/pages/intro)\n"));
-        assert_eq!(rewrite_canvas_file_links(&out, page(), &guia()), out);
+        assert_eq!(rw(&out, page(), &guia()), out);
     }
 
     #[test]
@@ -941,7 +1172,7 @@ mod tests {
 Bajar https://canvas.example.com/FILES/22/download.
 [guia]: https://canvas.example.com/courses/1/files/22/preview
 ";
-        let out = rewrite_canvas_file_links(input, page(), &guia());
+        let out = rw(input, page(), &guia());
         assert!(
             out.contains("[slides](adjuntos/guia.pdf \"Diapos\")\n"),
             "{out}"
@@ -952,28 +1183,27 @@ Bajar https://canvas.example.com/FILES/22/download.
             "{out}"
         );
         assert!(out.contains("[guia]: adjuntos/guia.pdf\n"), "{out}");
-        assert_eq!(rewrite_canvas_file_links(&out, page(), &guia()), out);
+        assert_eq!(rw(&out, page(), &guia()), out);
     }
 
     #[test]
     fn relative_link_climbs_out_of_the_note_directory() {
         let md = Path::new("course/anuncios/2026-06-17_hola.md");
         let input = "[g](https://canvas.example.com/files/22)\n";
-        let out = rewrite_canvas_file_links(input, md, &guia());
+        let out = rw(input, md, &guia());
         assert_eq!(out, "[g](../modulos/01-intro/adjuntos/guia.pdf)\n");
     }
 
     #[test]
-    fn spaces_in_the_local_name_use_an_angle_destination() {
+    fn spaces_in_the_local_name_are_percent_encoded() {
         let mut files = BTreeMap::new();
         files.insert(
             22,
             PathBuf::from("course/modulos/01-intro/adjuntos/guia (1).pdf"),
         );
-        let out =
-            rewrite_canvas_file_links("[g](https://canvas.example.com/files/22)\n", page(), &files);
-        assert_eq!(out, "[g](<adjuntos/guia (1).pdf>)\n");
-        assert_eq!(rewrite_canvas_file_links(&out, page(), &files), out);
+        let out = rw("[g](https://canvas.example.com/files/22)\n", page(), &files);
+        assert_eq!(out, "[g](adjuntos/guia%20%281%29.pdf)\n");
+        assert_eq!(rw(&out, page(), &files), out);
     }
 
     #[test]
@@ -984,13 +1214,13 @@ Bajar https://canvas.example.com/FILES/22/download.
 ```
 Usa `[a](https://canvas.example.com/files/22)` tal cual.
 ";
-        assert_eq!(rewrite_canvas_file_links(input, page(), &guia()), input);
+        assert_eq!(rw(input, page(), &guia()), input);
     }
 
     #[test]
     fn multiline_code_span_hides_the_link_until_it_closes() {
         let input = "``\n[a](https://canvas.example.com/files/22)\n``\n[b](https://canvas.example.com/files/22)\n";
-        let out = rewrite_canvas_file_links(input, page(), &guia());
+        let out = rw(input, page(), &guia());
         assert!(
             out.contains("``\n[a](https://canvas.example.com/files/22)\n``\n"),
             "{out}"
@@ -1001,17 +1231,191 @@ Usa `[a](https://canvas.example.com/files/22)` tal cual.
     #[test]
     fn crlf_around_a_rewritten_link_stays() {
         let input = "Hola\r\n[a](https://canvas.example.com/files/22)\r\n";
-        let out = rewrite_canvas_file_links(input, page(), &guia());
+        let out = rw(input, page(), &guia());
         assert_eq!(out, "Hola\r\n[a](adjuntos/guia.pdf)\r\n");
     }
 
     #[test]
     fn the_first_file_id_wins_and_an_unmapped_path_is_left_alone() {
         let input = "[g](https://canvas.example.com/files/1/files/22)\n";
-        assert_eq!(rewrite_canvas_file_links(input, page(), &guia()), input);
+        assert_eq!(rw(input, page(), &guia()), input);
         let mut files = guia();
         files.insert(1, PathBuf::from("course/modulos/01-intro/adjuntos/uno.pdf"));
-        let out = rewrite_canvas_file_links(input, page(), &files);
+        let out = rw(input, page(), &files);
         assert_eq!(out, "[g](adjuntos/uno.pdf)\n");
+    }
+
+    #[test]
+    fn canvas_ref_reads_every_canvas_link_shape() {
+        let host = "https://canvas.unab.cl";
+        let page = |course, slug: &str| CanvasRef::Page {
+            course,
+            slug: slug.into(),
+        };
+        let cases: Vec<(String, Option<CanvasRef>)> = vec![
+            (
+                format!("{host}/courses/1/files/22/preview?verifier=x&wrap=1"),
+                Some(CanvasRef::File(22)),
+            ),
+            (
+                format!("{host}/api/v1/courses/1/files/22"),
+                Some(CanvasRef::File(22)),
+            ),
+            (
+                format!("{host}/courses/1/files/22?wrap=1"),
+                Some(CanvasRef::File(22)),
+            ),
+            (
+                "/courses/1/files/22/download?download_frd=1".into(),
+                Some(CanvasRef::File(22)),
+            ),
+            (
+                "/courses/1/files/22/preview".into(),
+                Some(CanvasRef::File(22)),
+            ),
+            (
+                format!("{host}/courses/223175/pages/fase-1"),
+                Some(page(223175, "fase-1")),
+            ),
+            (
+                "/courses/223175/pages/Fase-1?module_item_id=5#top".into(),
+                Some(page(223175, "fase-1")),
+            ),
+            (
+                "/courses/1/modules/items/77".into(),
+                Some(CanvasRef::ModuleItem(77)),
+            ),
+            (
+                "/courses/1/assignments/30".into(),
+                Some(CanvasRef::Assignment(30)),
+            ),
+            (
+                "/courses/1/discussion_topics/501".into(),
+                Some(CanvasRef::Announcement(501)),
+            ),
+            (
+                format!("{host}/courses/9002"),
+                Some(CanvasRef::Course(9002)),
+            ),
+            (
+                format!("{host}/courses/9002/"),
+                Some(CanvasRef::Course(9002)),
+            ),
+            (
+                format!("{host}/mailto:docente@example.edu"),
+                Some(CanvasRef::Mailto("mailto:docente@example.edu".into())),
+            ),
+            (
+                "<https://canvas.unab.cl/courses/1/pages/a>".into(),
+                Some(page(1, "a")),
+            ),
+            (format!("{host}/courses/1/quizzes/12"), None),
+            (format!("{host}/media_attachments_iframe/333"), None),
+            (format!("{host}/courses/1/external_tools/187"), None),
+            (format!("{host}/equation_images/x%2By"), None),
+            (
+                format!("{host}/courses/1/assignments/30/submissions/4"),
+                None,
+            ),
+            (format!("{host}/courses/1/pages/a/edit"), None),
+            ("mailto:a@b.c".into(), None),
+            ("adjuntos/guia.pdf".into(), None),
+            ("//cdn.example.com/files/3".into(), None),
+        ];
+        for (url, want) in cases {
+            assert_eq!(canvas_ref(&url), want, "{url}");
+        }
+    }
+
+    fn full_map() -> LinkMap {
+        let mut map = LinkMap::default();
+        map.courses.insert(9001, PathBuf::from("mineria"));
+        map.courses.insert(9002, PathBuf::from("electivo"));
+        map.files.insert(
+            1,
+            FileTarget::Path(PathBuf::from(
+                "mineria/modulos/01-intro/adjuntos/rubrica.docx",
+            )),
+        );
+        map.files.insert(
+            2,
+            FileTarget::Ambiguous(vec![
+                PathBuf::from("mineria/modulos/01-intro/adjuntos/guia-1.pdf"),
+                PathBuf::from("mineria/modulos/02-semana/adjuntos/guia-2.pdf"),
+            ]),
+        );
+        map.pages.insert(
+            (9001, "fase-1".into()),
+            PathBuf::from("mineria/modulos/02-semana/01-fase-1.md"),
+        );
+        map.pages.insert(
+            (9002, "intro".into()),
+            PathBuf::from("electivo/modulos/01-avisos/01-intro.md"),
+        );
+        map.assignments
+            .insert(30, PathBuf::from("mineria/tareas/semana-10.md"));
+        map.announcements
+            .insert(501, PathBuf::from("mineria/anuncios/2026-06-17_hola.md"));
+        map.module_items
+            .insert(77, PathBuf::from("mineria/modulos/02-semana/01-fase-1.md"));
+        map
+    }
+
+    #[test]
+    fn every_kind_of_link_points_at_its_local_copy() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+[Fase 1](https://canvas.unab.cl/courses/9001/pages/fase-1) [Item](/courses/9001/modules/items/77)
+![](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)
+[Tarea](/courses/9001/assignments/30) [Aviso](https://canvas.unab.cl/courses/9001/discussion_topics/501#x)
+[Otro ramo](https://canvas.unab.cl/courses/9002/pages/intro) [Ramo](https://canvas.unab.cl/courses/9002)
+[Guia\\_1.PDF](https://canvas.unab.cl/courses/9001/files/2/download) [descarga](/courses/9001/files/2)
+[correo](https://canvas.unab.cl/mailto:docente@example.edu) [quiz](/courses/9001/quizzes/3)
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+[Fase 1](01-fase-1.md) [Item](01-fase-1.md)
+![](../01-intro/adjuntos/rubrica.docx)
+[Tarea](../../tareas/semana-10.md) [Aviso](../../anuncios/2026-06-17_hola.md)
+[Otro ramo](../../../electivo/modulos/01-avisos/01-intro.md) [Ramo](../../../electivo/README.md)
+[Guia\\_1.PDF](../01-intro/adjuntos/guia-1.pdf) [descarga](/courses/9001/files/2)
+[correo](mailto:docente@example.edu) [quiz](/courses/9001/quizzes/3)
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 8);
+        assert_eq!(stats.mailto, 1);
+        assert_eq!(stats.ambiguous, vec![2]);
+        let (again, stats) = rewrite_canvas_links(&out, note, &full_map());
+        assert_eq!(again, out);
+        assert_eq!(stats.local, 0);
+    }
+
+    #[test]
+    fn bare_and_autolinked_canvas_urls_get_a_label() {
+        let note = Path::new("mineria/anuncios/2026-06-17_hola.md");
+        let input = "Ver https://canvas.unab.cl/courses/9001/pages/fase-1. O <https://canvas.unab.cl/courses/9002>\n";
+        let (out, _) = rewrite_canvas_links(input, note, &full_map());
+        assert_eq!(
+            out,
+            "Ver [01-fase-1.md](../modulos/02-semana/01-fase-1.md). O [electivo](../../electivo/README.md)\n"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_file_is_settled_only_by_a_label_naming_one_copy() {
+        let map = full_map();
+        let r = CanvasRef::File(2);
+        let local = |p: &str| Resolution::Local(PathBuf::from(p));
+        assert_eq!(
+            map.resolve(&r, "Guía 2"),
+            local("mineria/modulos/02-semana/adjuntos/guia-2.pdf")
+        );
+        assert_eq!(
+            map.resolve(&r, "guia_1.PDF"),
+            local("mineria/modulos/01-intro/adjuntos/guia-1.pdf")
+        );
+        assert_eq!(map.resolve(&r, "guia"), Resolution::Ambiguous);
+        assert_eq!(map.resolve(&r, ""), Resolution::Ambiguous);
+        assert_eq!(map.resolve(&CanvasRef::File(3), "x"), Resolution::Remote);
     }
 }

@@ -15,8 +15,7 @@
 use crate::frontmatter::{self, DocKind, Frontmatter};
 use crate::fsutil;
 use crate::layout::{ANNOUNCEMENTS_DIR, ASSIGNMENTS_DIR, META_DIR, MODULES_DIR, RECORDINGS_DIR};
-use crate::links;
-use std::collections::BTreeMap;
+use crate::links::{self, LinkMap, LinkStats};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -26,16 +25,17 @@ const V1_MODULES_DIR: &str = "Modules";
 /// Directory name of announcements in a v1 library. `announcements` still writes this.
 const V1_ANNOUNCEMENTS_DIR: &str = "announcements";
 
-/// One note to rewrite. Paths in `files` are relative to `root`, like the note.
+/// One note to rewrite. Paths in `links` are relative to `root`, like the note.
 pub struct Rewrite<'a> {
     /// Library root. The backup is `<root>/.u_crawler/backup/<backup_ts>/`.
     pub root: &'a Path,
     /// Note to rewrite, absolute or relative to `root`.
     pub path: &'a Path,
     /// Properties to write. Replaces our keys; does not touch any other key.
-    pub frontmatter: &'a Frontmatter,
-    /// Canvas file id to a path relative to `root`.
-    pub files: &'a BTreeMap<u64, PathBuf>,
+    /// `None` leaves the frontmatter exactly as it is (links only).
+    pub frontmatter: Option<&'a Frontmatter>,
+    /// Where each Canvas resource is, relative to `root`.
+    pub links: &'a LinkMap,
     /// Single path segment naming this backup batch. `[A-Za-z0-9._-]` only.
     pub backup_ts: &'a str,
 }
@@ -49,6 +49,8 @@ pub enum RewriteOutcome {
     Rewritten {
         /// Copy of the bytes from before this call.
         backup: PathBuf,
+        /// Links this call pointed at a local copy.
+        local: usize,
     },
 }
 
@@ -109,27 +111,29 @@ pub fn generated_kind(rel: &Path) -> Option<DocKind> {
     None
 }
 
-/// Frontmatter plus local file links, without touching the filesystem.
+/// Frontmatter plus local links, without touching the filesystem.
 ///
-/// Link targets in the body are rewritten. The `url` property is not: it is
-/// the note's own Canvas URL and is written from `fm`. A leading `---` that
-/// is not a property block is body, so a Canvas file link between two
-/// horizontal rules is rewritten too.
-pub fn apply(
-    markdown: &str,
-    fm: &Frontmatter,
-    md_path: &Path,
-    files: &BTreeMap<u64, PathBuf>,
-) -> String {
+/// Link targets in the body are rewritten ([`relink`]). The `url` property
+/// is not: it is the note's own Canvas URL and is written from `fm`. A
+/// leading `---` that is not a property block is body, so a Canvas link
+/// between two horizontal rules is rewritten too.
+pub fn apply(markdown: &str, fm: &Frontmatter, md_path: &Path, links: &LinkMap) -> String {
+    frontmatter::upsert(&relink(markdown, md_path, links).0, fm)
+}
+
+/// The note with the Canvas links of its body pointing at the local copies
+/// `links` knows ([`links::rewrite_canvas_links`]). The frontmatter, BOM
+/// included, is left byte for byte.
+pub fn relink(markdown: &str, md_path: &Path, links: &LinkMap) -> (String, LinkStats) {
     let (bom, markdown) = frontmatter::strip_bom(markdown);
-    let rewritten = match frontmatter::split_frontmatter(markdown) {
+    let (rewritten, stats) = match frontmatter::split_frontmatter(markdown) {
         Some((yaml, body)) => {
-            let body = links::rewrite_canvas_file_links(body, md_path, files);
-            frontmatter::join_frontmatter(yaml, &body)
+            let (body, stats) = links::rewrite_canvas_links(body, md_path, links);
+            (frontmatter::join_frontmatter(yaml, &body), stats)
         }
-        None => links::rewrite_canvas_file_links(markdown, md_path, files),
+        None => links::rewrite_canvas_links(markdown, md_path, links),
     };
-    frontmatter::upsert(&format!("{bom}{rewritten}"), fm)
+    (format!("{bom}{rewritten}"), stats)
 }
 
 /// Back up `job.path` and rewrite it, or leave it alone.
@@ -158,15 +162,81 @@ pub async fn rewrite_file(job: &Rewrite<'_>) -> Result<RewriteOutcome, RewriteEr
     }
     let bytes = tokio::fs::read(&full).await?;
     let text = String::from_utf8(bytes).map_err(|_| RewriteError::NotUtf8(rel.clone()))?;
-    let new_text = apply(&text, job.frontmatter, &rel, job.files);
+    let (relinked, stats) = relink(&text, &rel, job.links);
+    if !stats.ambiguous.is_empty() {
+        tracing::info!(
+            path = %rel.display(),
+            file_ids = ?stats.ambiguous,
+            "Canvas file links left remote: more than one local file could be each"
+        );
+    }
+    let new_text = match job.frontmatter {
+        Some(fm) => frontmatter::upsert(&relinked, fm),
+        None => relinked,
+    };
     if new_text == text {
         return Ok(RewriteOutcome::Unchanged);
     }
-    let backup = root
-        .join(META_DIR)
-        .join("backup")
-        .join(job.backup_ts)
-        .join(&rel);
+    let backup = backup_then_write(&root, &rel, &text, &new_text, job.backup_ts).await?;
+    Ok(RewriteOutcome::Rewritten {
+        backup,
+        local: stats.local,
+    })
+}
+
+/// Back up and rewrite a course's `.u_crawler/state.json`, as
+/// [`rewrite_file`] does a note: what the migration learned from Canvas
+/// (paths) is kept for the next offline run, and `--undo` puts the bytes
+/// back with the notes. `rel` must be `<course>/.u_crawler/state.json`.
+///
+/// # Errors
+///
+/// As [`rewrite_file`]; [`RewriteError::NotGenerated`] for any other path.
+pub async fn rewrite_state(
+    root: &Path,
+    rel: &Path,
+    new_text: &str,
+    backup_ts: &str,
+) -> Result<RewriteOutcome, RewriteError> {
+    if !valid_timestamp(backup_ts) {
+        return Err(RewriteError::BadTimestamp);
+    }
+    let root = normalize(root);
+    let rel = relative_to_root(&root, rel)?;
+    let is_state = matches!(
+        utf8_components(&rel).as_deref(),
+        Some([course, META_DIR, "state.json"]) if !is_foreign_meta(course) && *course != ".."
+    );
+    if !is_state {
+        return Err(RewriteError::NotGenerated(rel));
+    }
+    let full = root.join(&rel);
+    ensure_no_symlink(&root, &rel).await?;
+    let meta = tokio::fs::symlink_metadata(&full).await?;
+    if !meta.is_file() {
+        return Err(RewriteError::NotAFile(full));
+    }
+    let bytes = tokio::fs::read(&full).await?;
+    let text = String::from_utf8(bytes).map_err(|_| RewriteError::NotUtf8(rel.clone()))?;
+    if new_text == text {
+        return Ok(RewriteOutcome::Unchanged);
+    }
+    let backup = backup_then_write(&root, &rel, &text, new_text, backup_ts).await?;
+    Ok(RewriteOutcome::Rewritten { backup, local: 0 })
+}
+
+/// Copy `text` (the current bytes of `<root>/<rel>`) to the backup of
+/// `backup_ts`, unless that backup already holds them, then write
+/// `new_text`. Returns the backup's path.
+async fn backup_then_write(
+    root: &Path,
+    rel: &Path,
+    text: &str,
+    new_text: &str,
+    backup_ts: &str,
+) -> Result<PathBuf, RewriteError> {
+    let full = root.join(rel);
+    let backup = root.join(META_DIR).join("backup").join(backup_ts).join(rel);
     if symlink_at(&backup).await? {
         return Err(RewriteError::Symlink(backup));
     }
@@ -186,7 +256,7 @@ pub async fn rewrite_file(job: &Rewrite<'_>) -> Result<RewriteOutcome, RewriteEr
         write_bytes(&backup, text.as_bytes()).await?;
     }
     write_bytes(&full, new_text.as_bytes()).await?;
-    Ok(RewriteOutcome::Rewritten { backup })
+    Ok(backup)
 }
 
 fn valid_timestamp(ts: &str) -> bool {
@@ -447,10 +517,12 @@ mod tests {
         }
     }
 
-    fn files_for(path: &str) -> BTreeMap<u64, PathBuf> {
-        let mut files = BTreeMap::new();
-        files.insert(22, PathBuf::from(path));
-        files
+    fn files_for(path: &str) -> LinkMap {
+        let mut links = LinkMap::default();
+        links
+            .files
+            .insert(22, links::FileTarget::Path(PathBuf::from(path)));
+        links
     }
 
     const ORIGINAL: &str =
@@ -627,8 +699,8 @@ Cuerpo
         let outcome = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "20261025T120000Z",
         })
         .await
@@ -639,7 +711,8 @@ Cuerpo
         assert_eq!(
             outcome,
             RewriteOutcome::Rewritten {
-                backup: backup.clone()
+                backup: backup.clone(),
+                local: 1,
             }
         );
         assert_eq!(std::fs::read(&backup).unwrap(), ORIGINAL.as_bytes());
@@ -653,8 +726,8 @@ Cuerpo
         let again = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "20261025T120000Z",
         })
         .await
@@ -686,8 +759,8 @@ Cuerpo
         rewrite_file(&Rewrite {
             root: &root,
             path: &clone_file,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -716,8 +789,8 @@ Cuerpo
         let outcome = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -725,7 +798,8 @@ Cuerpo
         assert_eq!(
             outcome,
             RewriteOutcome::Rewritten {
-                backup: backup.clone()
+                backup: backup.clone(),
+                local: 1,
             }
         );
         assert_eq!(std::fs::read(&backup).unwrap(), ORIGINAL.as_bytes());
@@ -748,8 +822,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -773,8 +847,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root,
             path: &note,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -787,8 +861,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root,
             path: &outside,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -798,8 +872,8 @@ Cuerpo
             rewrite_file(&Rewrite {
                 root,
                 path: &note,
-                frontmatter: &fm,
-                files: &files,
+                frontmatter: Some(&fm),
+                links: &files,
                 backup_ts: "../batch",
             })
             .await
@@ -819,8 +893,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -850,8 +924,8 @@ Cuerpo
         rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -866,8 +940,8 @@ Cuerpo
         let again = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-2",
         })
         .await
@@ -891,8 +965,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root: &root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -907,8 +981,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root: &root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "batch-1",
         })
         .await
@@ -931,8 +1005,8 @@ Cuerpo
         let err = rewrite_file(&Rewrite {
             root,
             path: &path,
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: &files,
             backup_ts: "t3",
         })
         .await

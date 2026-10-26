@@ -206,6 +206,7 @@ pub async fn download_if_needed(
             last_error: None,
             error_count: None,
             file_name,
+            path: None,
         },
     );
     Ok(dest)
@@ -269,6 +270,7 @@ mod tests {
             last_error: None,
             error_count: None,
             file_name: name.map(str::to_string),
+            path: None,
         }
     }
 
