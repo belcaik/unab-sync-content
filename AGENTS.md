@@ -262,10 +262,13 @@ directory (`sync`, `announcements`, `calendar`, `zoom flow`) writes a minimal
 `zoom_ids` and `term` a migration recorded.
 
 **Name collisions inside a course.** Two assignments with the same title,
-or two announcements with the same date and title: `layout::unique_name`,
-in Canvas id order — the lower id keeps the plain name, the other gets
-`-<id>` (`tarea-12.md`), then `-<id>-2`… if that is taken too; the suffix
-survives slug truncation. Attachments that slug to the same path in one
+or two announcements with the same date and title: `layout::unique_names`,
+in Canvas id order — the lower id keeps the plain name, the others get
+`-2`, `-3`… (`tarea-2.md`), the first number no other item wants as its
+plain name; the suffix survives slug truncation. The migrator numbers two
+v1 notes the same way (announcements by the id in their v1 name,
+assignments by their `NN` prefix), so a migrated note and the one `sync`
+writes next agree. Attachments that slug to the same path in one
 directory (`Guía 1.pdf`, `guia_1.PDF`) are settled by `download::Claims`:
 each file keeps the name recorded in its `file:<id>` entry
 (`ItemState::file_name`); a new one takes the plain name only when it is
@@ -398,8 +401,20 @@ cron, where nobody would notice until the data was gone.
 ## Migration
 
 Layout v1 → v2 (`docs/specs/layout-v2.md`, "Reglas del migrador" and "API
-de `migrate::ensure`"). Rename only: there is no delete, copy or overwrite
-anywhere in it.
+de `migrate::ensure`"). Rename only: there is no file delete, copy or
+overwrite anywhere in it. The one removal is `rmdir(2)` of the v1
+directories the moves emptied (`Plan::prune`: v1 course directories,
+mapped `Zoom/<id>`, then `Zoom/` if empty), bottom-up, each journaled as
+`rmdir` first; never `remove_dir_all`. A directory with anything left in it
+(a duplicate, a foreign file, a symlink) stays and is reported. `--undo`
+creates the removed directories again and removes the ones the run created
+once they are empty.
+
+Two v1 notes that are different Canvas items and want one v2 name (two
+announcements whose v1 names carry different ids, two `NN-ASSIGN-` files
+with one title and different `NN`) are numbered `-2`, `-3`… by
+`layout::unique_names`, never treated as a collision. Duplicate/conflict
+handling is only for sources of the same item (same id / `NN`).
 
 `migrate::ensure::migrate` (the `migrate` command) runs, in this order:
 
@@ -665,8 +680,11 @@ see `docs/specs/layout-v2.md`), the migration plan over that library
 (`tests/migrate_plan.rs`: golden snapshot in `tests/golden/migrate_plan_v1.txt`,
 regenerated with `U_CRAWLER_BLESS=1`; no-loss and second-run-is-empty checks),
 and its execution (`tests/migrate_apply.rs`: a cut at several points resumes
-from the journal to the same tree, undo restores the manifest byte for byte,
-a second run is a no-op, identical/different collisions, and a `cp -al` clone
+from the journal to the same tree and directories, undo restores the
+manifest byte for byte and the same set of directories, no empty v1
+directory is left after a migration while one holding a file is kept and
+reported, two distinct items with one name are numbered rather than
+collided, a second run is a no-op, identical/different collisions, and a `cp -al` clone
 whose markdown is rewritten leaves the original untouched), and the whole
 migration end to end, offline, as a `sync` runs it (`tests/migrate_ensure.rs`:
 it migrates and marks the library, a second pass does nothing, every hash of

@@ -52,7 +52,7 @@ fn the_fixture_is_detected_as_v1() -> Result<(), Box<dyn Error>> {
     zoom.sort_unstable();
     assert_eq!(signals.zoom_dirs, zoom);
     assert_eq!(signals.module_dirs, 9);
-    assert_eq!(signals.assignment_files, 1);
+    assert_eq!(signals.assignment_files, 3);
     assert_eq!(signals.announcement_dirs, 4);
     Ok(())
 }
@@ -138,6 +138,63 @@ fn foreign_files_travel_with_their_folder_or_stay() -> Result<(), Box<dyn Error>
         .any(|e| e.path.ends_with(v1::USER_NOTE_FILE)));
     assert!(plan.edits.iter().any(|e| e.kind == EditKind::Assignment
         && e.path == "atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md"));
+    Ok(())
+}
+
+/// Two Canvas items that want one v2 name are numbered in id / `NN` order,
+/// never reported as a duplicate or conflict.
+#[test]
+fn distinct_items_with_one_name_are_numbered() -> Result<(), Box<dyn Error>> {
+    let (_dir, lib, _inv, plan) = fixture()?;
+    let moves = library_moves(&plan);
+    let disrupcion = lib
+        .course_by_code("ATDF101_202605_2333_EL_ON")
+        .ok_or("missing disrupcion")?;
+    let mineria = lib
+        .course_by_code("ATDF105_202615_2690_EL_ON")
+        .ok_or("missing mineria")?;
+    let v1 = |course: &v1::V1Course, rest: &str| format!("{}/{rest}", course.v1_dir);
+    let v2 = |course: &v1::V1Course, rest: &str| format!("{}/{rest}", course.v2_dir);
+    let twin = v1::TWIN_ANNOUNCEMENT_ID;
+    let want = [
+        (
+            v1(
+                disrupcion,
+                "announcements/2026-03-01_Inicio_de_clases_801.md",
+            ),
+            v2(disrupcion, "anuncios/2026-03-01_inicio-de-clases.md"),
+        ),
+        (
+            v1(
+                disrupcion,
+                &format!("announcements/2026-03-01_Inicio_de_clases_{twin}.md"),
+            ),
+            v2(disrupcion, "anuncios/2026-03-01_inicio-de-clases-2.md"),
+        ),
+        (
+            v1(
+                mineria,
+                "Modules/200_Semana_1/04-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md",
+            ),
+            v2(mineria, "tareas/semana-11-sumativa-3-informe-de-caso-3.md"),
+        ),
+        (
+            v1(
+                mineria,
+                "Modules/200_Semana_1/06-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md",
+            ),
+            v2(
+                mineria,
+                "tareas/semana-11-sumativa-3-informe-de-caso-3-2.md",
+            ),
+        ),
+    ];
+    for (from, to) in &want {
+        assert!(lib.manifest.contains_key(from), "fixture lacks {from}");
+        assert_eq!(moves.get(from.as_str()), Some(&to.as_str()), "{from}");
+        assert!(plan.edits.iter().any(|e| &e.path == to), "no edit for {to}");
+    }
+    assert!(plan.duplicates.is_empty() && plan.conflicts.is_empty());
     Ok(())
 }
 

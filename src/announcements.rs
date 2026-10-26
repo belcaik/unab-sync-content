@@ -15,7 +15,7 @@ use crate::status;
 use chrono::NaiveDate;
 use html2md::parse_html;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -486,26 +486,34 @@ impl<'a> AnnouncementSync<'a> {
 /// by id.
 ///
 /// The name is [`layout::announcement_file`], made unique in id order by
-/// [`layout::unique_name`]: the older of two with the same date and title
-/// keeps the plain name, the newer one gets its id appended. One without a `posted_at`
+/// [`layout::unique_names`]: the older of two with the same date and title
+/// keeps the plain name, the newer one gets `-2` (then `-3`…), as the
+/// migrator names them. One without a `posted_at`
 /// (Canvas does not show students an unposted one) is dated 1970-01-01
 /// rather than today, so its name does not change from run to run.
 fn announcement_files(announcements: &[Announcement]) -> HashMap<u64, (NaiveDate, String)> {
     let mut sorted: Vec<&Announcement> = announcements.iter().collect();
     sorted.sort_by_key(|a| a.id);
-    let mut used = BTreeSet::new();
-    sorted
-        .into_iter()
+    let posted: Vec<NaiveDate> = sorted
+        .iter()
         .map(|a| {
-            let posted = a
-                .posted_at
+            a.posted_at
                 .as_deref()
                 .and_then(|s| s.get(0..10))
                 .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-                .unwrap_or_default();
-            let name = layout::announcement_file(posted, a.title.as_deref().unwrap_or(""));
-            (a.id, (posted, layout::unique_name(&mut used, name, a.id)))
+                .unwrap_or_default()
         })
+        .collect();
+    let wanted: Vec<String> = sorted
+        .iter()
+        .zip(&posted)
+        .map(|(a, d)| layout::announcement_file(*d, a.title.as_deref().unwrap_or("")))
+        .collect();
+    let names = layout::unique_names(&wanted, &|_| false);
+    sorted
+        .into_iter()
+        .zip(posted.into_iter().zip(names))
+        .map(|(a, entry)| (a.id, entry))
         .collect()
 }
 
@@ -547,7 +555,7 @@ mod tests {
             ann(4, "Aviso", Some("2026-06-17T18:00:00Z")),
         ]);
         assert_eq!(got[&4].1, "2026-06-17_aviso.md");
-        assert_eq!(got[&9].1, "2026-06-17_aviso-9.md");
+        assert_eq!(got[&9].1, "2026-06-17_aviso-2.md");
     }
 
     #[test]

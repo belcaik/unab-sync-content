@@ -4,9 +4,10 @@
 //! Every operation is first written to `<root>/.u_crawler/migrations/<ts>.jsonl`
 //! as one JSON line and `fsync`ed, and only then performed. The first line,
 //! [`Entry::Begin`], holds the whole [`Intent`]; after it come the operations,
-//! [`Entry::Mkdir`], [`Entry::Rename`] and [`Entry::Write`] (a `curso.json`
-//! that did not exist yet), and [`Entry::Done`] closes the run. There is no
-//! delete, no copy and no overwrite anywhere in this module:
+//! [`Entry::Mkdir`], [`Entry::Rename`], [`Entry::Rmdir`] (an empty v1
+//! directory) and [`Entry::Write`] (a `curso.json` that did not exist yet),
+//! and [`Entry::Done`] closes the run. There is no file delete, no copy and
+//! no overwrite anywhere in this module:
 //!
 //! - A rename never replaces its destination. On Linux it is
 //!   `renameat2(RENAME_NOREPLACE)`; elsewhere, and on a filesystem without
@@ -18,6 +19,12 @@
 //!   Different content: the source goes to `name.conflicto-<hash8>.ext`
 //!   ([`conflict_name`]) next to the destination.
 //! - A path that goes through a symlink is refused, so no move leaves its root.
+//! - Once everything is moved, the v1 directories of [`Intent::prune`] are
+//!   removed with `rmdir(2)` where they are empty, bottom-up, and so are
+//!   their empty parents (`Zoom/`). `rmdir` cannot remove a directory with
+//!   anything in it, and nothing is ever removed recursively: a directory
+//!   still holding a file (a duplicate left in place, a foreign file, a
+//!   symlink) stays and is reported in [`Report::kept_dirs`].
 //!
 //! **Resuming.** A run cut short leaves an open journal ([`pending`]).
 //! [`resume`] carries out the intent recorded in it, not a new plan: a plan
@@ -31,7 +38,9 @@
 //! its destination is there and its source is not; anything else is skipped,
 //! so an undo cut short can simply be run again. A `curso.json` the run wrote
 //! is set aside under `.u_crawler/migrations/<ts>.undo/`, never deleted.
-//! Directories the run created are left in place, empty.
+//! Each directory the run removed is created again, and each one it created
+//! is removed once it is empty again (one holding anything stays), so the
+//! tree comes back to its directories as well as its files.
 //!
 //! The executor does not rewrite markdown (`Plan::edits`, `migrate::rewrite`)
 //! and does not write `.u_crawler/library.json`: whoever orchestrates the
@@ -79,6 +88,9 @@ pub struct Intent {
     pub collisions: Vec<Collision>,
     /// One `curso.json` per planned course.
     pub courses: Vec<IntentCourse>,
+    /// [`Plan::prune`]. Absent from journals written before it existed.
+    #[serde(default)]
+    pub prune: Vec<String>,
 }
 
 /// The `curso.json` a planned course gets.
@@ -117,6 +129,7 @@ impl From<&Plan> for Intent {
                     zoom_ids: c.zoom_ids.clone(),
                 })
                 .collect(),
+            prune: plan.prune.clone(),
         }
     }
 }
@@ -145,6 +158,13 @@ pub enum Entry {
         from: String,
         /// Destination.
         to: String,
+    },
+    /// An empty directory was removed.
+    Rmdir {
+        /// Tree.
+        root: Root,
+        /// The directory.
+        path: String,
     },
     /// A generated file that did not exist was written (library root).
     Write {
@@ -215,6 +235,11 @@ pub struct Report {
     pub skipped: Vec<Placed>,
     /// Generated files written (`curso.json`), relative to the library root.
     pub written: Vec<String>,
+    /// Empty v1 directories removed, library root.
+    pub removed_dirs: Vec<String>,
+    /// [`Intent::prune`] directories left in place because something is
+    /// still in them.
+    pub kept_dirs: Vec<String>,
 }
 
 /// What [`undo`] did.
@@ -229,7 +254,11 @@ pub struct UndoReport {
     /// Logged renames whose destination is gone: skipped. `from` is the
     /// migrated path, `to` the original.
     pub missing: Vec<Placed>,
-    /// Directories the run created, left in place.
+    /// Directories the run removed, created again.
+    pub dirs_restored: usize,
+    /// Directories the run created, removed again.
+    pub dirs_removed: usize,
+    /// Directories the run created, left in place because something is in them.
     pub dirs_left: usize,
 }
 
@@ -438,9 +467,10 @@ pub fn pending(library: &Path) -> io::Result<Option<String>> {
 
 /// Carry `plan` out under a new journal `ts`.
 ///
-/// Moves first (library, then calendar), then collisions, then a `curso.json`
-/// for each planned course whose directory exists and has none. A plan with
-/// nothing to do creates no journal.
+/// Moves first (library, then calendar), then collisions, then the empty
+/// directories of [`Plan::prune`], then a `curso.json` for each planned
+/// course whose directory exists and has none. A plan with nothing to do
+/// creates no journal.
 ///
 /// # Errors
 ///
@@ -537,6 +567,9 @@ fn run(
             exec.file_to(c.root, from, &c.to)?;
         }
     }
+    for dir in &intent.prune {
+        exec.prune(dir)?;
+    }
     for course in &intent.courses {
         exec.curso_json(course)?;
     }
@@ -551,6 +584,8 @@ fn run(
         duplicates = report.duplicates.len(),
         skipped = report.skipped.len(),
         written = report.written.len(),
+        removed_dirs = report.removed_dirs.len(),
+        kept_dirs = report.kept_dirs.len(),
         resumed = report.resumed,
         "migration applied"
     );
@@ -647,7 +682,32 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
                     });
                 }
             }
-            Entry::Mkdir { .. } => report.dirs_left += 1,
+            Entry::Rmdir { root, path } => {
+                let dir = exec.resolve(*root, path)?;
+                if !exists(&dir)? {
+                    // Its parent is back already unless someone removed it
+                    // since; then it comes back too.
+                    fs::create_dir_all(&dir).at(&dir)?;
+                    report.dirs_restored += 1;
+                }
+            }
+            Entry::Mkdir { root, path } => {
+                let dir = exec.resolve(*root, path)?;
+                match fs::symlink_metadata(&dir) {
+                    Ok(m) if m.is_dir() && is_empty_dir(&dir)? => {
+                        fs::remove_dir(&dir).at(&dir)?;
+                        report.dirs_removed += 1;
+                    }
+                    Ok(_) => report.dirs_left += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(ApplyError::Io {
+                            path: dir,
+                            source: e,
+                        })
+                    }
+                }
+            }
             Entry::Begin { .. }
             | Entry::Revert { .. }
             | Entry::SetAside { .. }
@@ -660,6 +720,8 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
         reverted = report.reverted,
         set_aside = report.set_aside.len(),
         missing = report.missing.len(),
+        dirs_restored = report.dirs_restored,
+        dirs_removed = report.dirs_removed,
         dirs_left = report.dirs_left,
         "migration undone"
     );
@@ -997,6 +1059,71 @@ impl Exec<'_, '_> {
         Ok(())
     }
 
+    /// Remove every empty directory under the v1 directory `rel`, bottom-up,
+    /// `rel` itself included, then each empty parent up to the library root.
+    /// A directory with anything left in it is kept and reported.
+    fn prune(&mut self, rel: &str) -> Result<()> {
+        let dir = self.resolve(Root::Library, rel)?;
+        match fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => {}
+            // Gone already (a resumed run), or not ours to walk.
+            _ => return Ok(()),
+        }
+        if !self.prune_tree(rel)? {
+            tracing::warn!(path = rel, "v1 directory not empty; left in place");
+            self.report.kept_dirs.push(rel.to_string());
+            return Ok(());
+        }
+        let mut parent = rel;
+        while let Some((up, _)) = parent.rsplit_once('/') {
+            let dir = self.resolve(Root::Library, up)?;
+            if !exists(&dir)? || !is_empty_dir(&dir)? {
+                break;
+            }
+            self.rmdir(up)?;
+            parent = up;
+        }
+        Ok(())
+    }
+
+    /// Prune below `rel` and then `rel`. `true` when `rel` was removed.
+    fn prune_tree(&mut self, rel: &str) -> Result<bool> {
+        let dir = self.resolve(Root::Library, rel)?;
+        let mut children = Vec::new();
+        for entry in fs::read_dir(&dir).at(&dir)? {
+            let entry = entry.at(&dir)?;
+            // `file_type` does not follow symlinks: a symlink is content.
+            if entry.file_type().at(&entry.path())?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    children.push(format!("{rel}/{name}"));
+                }
+            }
+        }
+        children.sort();
+        for child in children {
+            self.prune_tree(&child)?;
+        }
+        if !is_empty_dir(&dir)? {
+            return Ok(false);
+        }
+        self.rmdir(rel)?;
+        Ok(true)
+    }
+
+    /// Journal and remove one empty directory. `rmdir(2)` refuses one that
+    /// is not empty, so nothing can be lost here.
+    fn rmdir(&mut self, rel: &str) -> Result<()> {
+        let dir = self.resolve(Root::Library, rel)?;
+        self.log(Entry::Rmdir {
+            root: Root::Library,
+            path: rel.to_string(),
+        })?;
+        tracing::debug!(path = rel, "rmdir");
+        fs::remove_dir(&dir).at(&dir)?;
+        self.report.removed_dirs.push(rel.to_string());
+        Ok(())
+    }
+
     /// Write `<dir>/curso.json` when the course directory exists and has none.
     fn curso_json(&mut self, course: &IntentCourse) -> Result<()> {
         let rel = format!("{}/{CURSO_JSON}", course.dir);
@@ -1037,6 +1164,10 @@ fn exists(path: &Path) -> Result<bool> {
             source: e,
         }),
     }
+}
+
+fn is_empty_dir(dir: &Path) -> Result<bool> {
+    Ok(fs::read_dir(dir).at(dir)?.next().is_none())
 }
 
 fn blake3_file(path: &Path) -> Result<blake3::Hash> {

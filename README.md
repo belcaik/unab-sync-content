@@ -181,8 +181,11 @@ Zoom/9001/2026_07_02_Sesion_sincronica_1.mp4            atdf105-mineria-de-datos
 layout, migrates it in place and logs a warning with a summary, then carries
 on. There is nothing to opt into. What the migration does, and does not do:
 
-- It only **renames**. No file is deleted, copied or overwritten. Two files
-  that want the same name are compared by content: identical ones leave the
+- It only **renames**. No file is deleted, copied or overwritten. Two
+  different Canvas items that want the same name (two announcements with
+  one date and title, two assignments with one title) are numbered in
+  Canvas order: `tarea.md`, `tarea-2.md`, as `sync` names them. Two copies
+  of the same item are compared by content: identical ones leave the
   second where it was (reported as a duplicate); different ones get
   `name.conflicto-<hash>.ext`.
 - Generated notes get YAML frontmatter and local links. The original of
@@ -190,7 +193,9 @@ on. There is nothing to opt into. What the migration does, and does not do:
 - Every step is first written to a journal, `.u_crawler/migrations/<timestamp>.jsonl`.
   A run that is cut short (power, `Ctrl-C`) is finished by the next one.
 - A `Zoom/<id>/` folder that cannot be matched to exactly one course stays
-  where it is, with a warning. Emptied v1 folders stay too, empty.
+  where it is, with a warning. The v1 folders it empties (and `Zoom/`, once
+  nothing is left in it) are removed with `rmdir`, which only removes an
+  empty folder; one that still holds any file stays and is reported.
 - The calendar folders under `calendar.caldir_root` are renamed with their
   course. File names and UIDs do not change, so `caldir push` sees no task
   deleted or created.

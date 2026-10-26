@@ -33,6 +33,10 @@
 //! - `CodeR_S3.zip` under `announcements/media/`, capitals intact.
 //! - `.obsidian/`, a loose root file, and a synthetic `.git/HEAD` at the library root.
 //! - `Zoom/424242/`, whose id matches no course and whose names match no course.
+//! - Two distinct Canvas items per kind that want one v2 name: announcements
+//!   801 and 802 of DISRUPCION, same day and title, identical bodies
+//!   ([`TWIN_ANNOUNCEMENT_ID`]); and two MINERIA assignments with one title,
+//!   items `04` and `06` of one module, different bodies ([`TWIN_ASSIGNMENT`]).
 //!
 //! There is no `.u_crawler/library.json`. That absence, plus `Zoom/<digits>/`,
 //! `Modules/<id>_` and `NN-ASSIGN-`, is the v1 signal.
@@ -62,6 +66,10 @@ pub const USER_NOTE_FILE: &str = "nota-del-usuario.md";
 pub const CAPITAL_MEDIA_FILE: &str = "CodeR_S3.zip";
 /// `Zoom/<id>` that no course's `index.json` and no recording token points at.
 pub const ORPHAN_ZOOM_ID: u64 = 424_242;
+/// The second of two DISRUPCION announcements with one date and title.
+pub const TWIN_ANNOUNCEMENT_ID: u64 = 802;
+/// The title two MINERIA assignments share (items `04` and `06`).
+pub const TWIN_ASSIGNMENT: &str = "Semana 11 Sumativa 3 Informe de caso 3";
 
 const CANVAS_HOST: &str = "https://canvas.example.edu";
 
@@ -398,7 +406,7 @@ struct ModulePlan {
     id: u64,
     name: &'static str,
     pages: &'static [PagePlan],
-    assignment: Option<PagePlan>,
+    assignments: &'static [PagePlan],
     /// Display name before `sanitize_filename_preserve_ext`, as Canvas would send it.
     attachment: Option<&'static str>,
     user_note: bool,
@@ -420,6 +428,8 @@ enum AnnPlan {
         title: &'static str,
         /// Original media file name, stored under `announcements/media/`.
         media: Option<&'static str>,
+        /// A second announcement with the same date, title and body, and this id.
+        twin: Option<u64>,
     },
 }
 
@@ -547,13 +557,17 @@ fn write_module(
             &markdown(page.title, code),
         )?;
     }
-    if let Some(assignment) = &module.assignment {
+    for assignment in module.assignments {
         let name = assignment_filename(assignment.position, assignment.title);
+        // The item number is in the body, so two assignments with one title
+        // differ in content as they do in Canvas.
+        let mut body = markdown(assignment.title, code);
+        body.extend_from_slice(format!("Item {:02}.\n", assignment.position).as_bytes());
         put(
             root,
             manifest,
             &join_rel(&[v1_dir, "Modules", &dirname, &name]),
-            &markdown(assignment.title, code),
+            &body,
         )?;
     }
     if let Some(original) = module.attachment {
@@ -584,24 +598,29 @@ fn write_announcements(
     plan: &CoursePlan,
     v1_dir: &str,
 ) -> io::Result<(bool, bool, Option<String>, Option<String>)> {
-    let (id, date, title, media, indexed) = match plan.announcements {
+    let (id, date, title, media, twin, indexed) = match plan.announcements {
         AnnPlan::Absent => return Ok((false, false, None, None)),
-        AnnPlan::Body { id, date, title } => (id, date, title, None, false),
+        AnnPlan::Body { id, date, title } => (id, date, title, None, None, false),
         AnnPlan::Indexed {
             id,
             date,
             title,
             media,
-        } => (id, date, title, media, true),
+            twin,
+        } => (id, date, title, media, twin, true),
     };
     require_date(date)?;
     let filename = announcement_filename(date, title, id);
-    put(
-        root,
-        manifest,
-        &join_rel(&[v1_dir, "announcements", &filename]),
-        &markdown(title, plan.code),
-    )?;
+    for name in
+        std::iter::once(filename).chain(twin.map(|twin| announcement_filename(date, title, twin)))
+    {
+        put(
+            root,
+            manifest,
+            &join_rel(&[v1_dir, "announcements", &name]),
+            &markdown(title, plan.code),
+        )?;
+    }
 
     let mut capital_media_rel = None;
     let mut media_refs = Vec::new();
@@ -627,7 +646,7 @@ fn write_announcements(
                 plan.code
             ))
         })?;
-        let record = AnnouncementRecord {
+        let record = |id: u64, media: Vec<MediaRef>| AnnouncementRecord {
             id,
             title: title.to_string(),
             posted_at: Some(format!("{date}T12:00:00Z")),
@@ -635,13 +654,18 @@ fn write_announcements(
                 "{CANVAS_HOST}/courses/{canvas_id}/discussion_topics/{id}"
             )),
             author: Some("Docente".to_string()),
-            body_md_path: Some(format!("announcements/{filename}")),
+            body_md_path: Some(format!(
+                "announcements/{}",
+                announcement_filename(date, title, id)
+            )),
             links: Vec::new(),
-            media: media_refs,
+            media,
             zoom_links: Vec::new(),
         };
+        let mut records = vec![record(id, media_refs)];
+        records.extend(twin.map(|twin| record(twin, Vec::new())));
         let rel = join_rel(&[v1_dir, "announcements", "index.json"]);
-        put(root, manifest, &rel, &json_bytes(&vec![record])?)?;
+        put(root, manifest, &rel, &json_bytes(&records)?)?;
         Some(rel)
     } else {
         None
@@ -760,7 +784,7 @@ const fn plain_module(id: u64, name: &'static str) -> ModulePlan {
         id,
         name,
         pages: INFO_PAGE,
-        assignment: None,
+        assignments: &[],
         attachment: None,
         user_note: false,
     }
@@ -771,10 +795,10 @@ const MINERIA_MODULES: &[ModulePlan] = &[
         id: 100,
         name: "Informacion General",
         pages: INFO_PAGE,
-        assignment: Some(PagePlan {
+        assignments: &[PagePlan {
             position: 2,
             title: "Semana 10 - Formativa 6",
-        }),
+        }],
         attachment: Some("Guia_1.PDF"),
         user_note: true,
     },
@@ -785,7 +809,16 @@ const MINERIA_MODULES: &[ModulePlan] = &[
             position: 1,
             title: "Contenidos",
         }],
-        assignment: None,
+        assignments: &[
+            PagePlan {
+                position: 4,
+                title: TWIN_ASSIGNMENT,
+            },
+            PagePlan {
+                position: 6,
+                title: TWIN_ASSIGNMENT,
+            },
+        ],
         attachment: None,
         user_note: false,
     },
@@ -802,6 +835,7 @@ const PLANS: &[CoursePlan] = &[
             date: "2026-06-17",
             title: "Bienvenidos al curso",
             media: Some(CAPITAL_MEDIA_FILE),
+            twin: None,
         },
         modules: MINERIA_MODULES,
         recordings: &["2026_07_02_Sesion_sincronica_1.mp4"],
@@ -829,6 +863,7 @@ const PLANS: &[CoursePlan] = &[
             date: "2026-04-02",
             title: "Aviso de seccion",
             media: None,
+            twin: None,
         },
         modules: &[plain_module(320, "Avisos")],
         recordings: &["2026_05_04_202615_2524_ELECTIVO.mp4"],
@@ -843,6 +878,7 @@ const PLANS: &[CoursePlan] = &[
             date: "2026-03-01",
             title: "Inicio de clases",
             media: None,
+            twin: Some(TWIN_ANNOUNCEMENT_ID),
         },
         modules: &[plain_module(400, "Inicio")],
         recordings: &[

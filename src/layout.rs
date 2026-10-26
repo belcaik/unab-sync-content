@@ -488,23 +488,41 @@ pub fn with_suffix(name: &str, suffix: &str) -> String {
     }
 }
 
-/// `name` for the item `id`, made unique against `used` (and added to it):
-/// `name` itself when free, else [`with_suffix`] `<id>`, else `<id>-2`,
-/// `<id>-3`… Callers hand items over in id order, so the oldest item keeps
-/// the plain name and a newcomer never takes one already given out.
-pub fn unique_name(used: &mut BTreeSet<String>, name: String, id: u64) -> String {
-    let mut candidate = name.clone();
-    let mut n = 1u32;
-    while used.contains(&candidate) {
-        candidate = if n == 1 {
-            with_suffix(&name, &id.to_string())
-        } else {
-            with_suffix(&name, &format!("{id}-{n}"))
-        };
-        n += 1;
-    }
-    used.insert(candidate.clone());
-    candidate
+/// The names a list of distinct items get when each wants `wanted[i]`, in
+/// the same order.
+///
+/// Callers hand items over in a stable order (Canvas id, or the v1 `NN`
+/// prefix when the migrator has no id). The first item that wants a name
+/// keeps it; every later one gets [`with_suffix`] `2`, `3`… — the first that
+/// no item wants as its plain name, no earlier item was given, and `taken`
+/// does not reject. So `Tarea`, `Tarea`, `Tarea 2` become `tarea.md`,
+/// `tarea-3.md`, `tarea-2.md`: an item named `-2` by its own title keeps
+/// it. `sync` and the migrator both name colliding assignments and
+/// announcements here, so a migrated note and the one `sync` writes next
+/// agree.
+pub fn unique_names(wanted: &[String], taken: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let plain: BTreeSet<&str> = wanted.iter().map(String::as_str).collect();
+    let mut given: BTreeSet<String> = BTreeSet::new();
+    wanted
+        .iter()
+        .map(|name| {
+            if given.insert(name.clone()) {
+                return name.clone();
+            }
+            let mut n = 2u32;
+            loop {
+                let candidate = with_suffix(name, &n.to_string());
+                if !plain.contains(candidate.as_str())
+                    && !given.contains(&candidate)
+                    && !taken(&candidate)
+                {
+                    given.insert(candidate.clone());
+                    return candidate;
+                }
+                n += 1;
+            }
+        })
+        .collect()
 }
 
 /// An attachment under [`ATTACHMENTS_DIR`]: the stem slugified, the last
@@ -659,18 +677,24 @@ mod tests {
     }
 
     #[test]
-    fn unique_name_never_repeats_a_name() {
-        let mut used = BTreeSet::new();
-        // Assignments 7 "Tarea", 10 "Tarea 12", 12 "Tarea", in id order.
-        let a = unique_name(&mut used, assignment_file("Tarea"), 7);
-        let b = unique_name(&mut used, assignment_file("Tarea 12"), 10);
-        let c = unique_name(&mut used, assignment_file("Tarea"), 12);
-        assert_eq!((a.as_str(), b.as_str()), ("tarea.md", "tarea-12.md"));
-        assert_eq!(c, "tarea-12-2.md");
+    fn unique_names_number_later_items_and_never_repeat() {
+        let names = |titles: &[&str]| -> Vec<String> {
+            titles.iter().map(|t| assignment_file(t)).collect()
+        };
+        let free = |_: &str| false;
+        // In id order: "Tarea", "Tarea 2", "Tarea", "Tarea".
+        let got = unique_names(&names(&["Tarea", "Tarea 2", "Tarea", "Tarea"]), &free);
+        assert_eq!(got, ["tarea.md", "tarea-2.md", "tarea-3.md", "tarea-4.md"]);
+        // A later item's own `-2` title still wins over the numbering.
+        let got = unique_names(&names(&["Tarea", "Tarea", "Tarea 2"]), &free);
+        assert_eq!(got, ["tarea.md", "tarea-3.md", "tarea-2.md"]);
+        // `taken` is skipped too; the plain name is not checked against it.
+        let got = unique_names(&names(&["Tarea", "Tarea"]), &|n| n == "tarea-2.md");
+        assert_eq!(got, ["tarea.md", "tarea-3.md"]);
         let long = "x".repeat(150);
-        let d = unique_name(&mut used, assignment_file(&long), 100);
-        let e = unique_name(&mut used, assignment_file(&long), 200);
-        assert_ne!(d, e);
+        let got = unique_names(&names(&[&long, &long]), &free);
+        assert_ne!(got[0], got[1]);
+        assert!(got[1].ends_with("-2.md"), "{}", got[1]);
     }
 
     /// The commented UNAB example from `assets/config.toml`, read from the
