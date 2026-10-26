@@ -240,7 +240,8 @@ pub async fn run_sync(
 /// Assignments are named in id order through [`layout::unique_names`], so
 /// the oldest of two with the same name keeps it, the newer one gets `-2`
 /// (then `-3`…), and no two ever share a file — the same names the
-/// migrator gives two v1 assignments with one title.
+/// migrator gives two v1 assignments with one title. A name depends only on
+/// the lower ids, so a new assignment never renames an existing one.
 fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
     let mut sorted: Vec<&Assignment> = assignments.iter().collect();
     sorted.sort_by_key(|a| a.id);
@@ -662,16 +663,19 @@ mod tests {
     }
 
     #[test]
-    fn a_numbered_name_never_takes_another_assignments_title() {
-        let got = assignment_files(&[
-            assignment(7, "Tarea"),
-            assignment(10, "Tarea"),
-            assignment(12, "Tarea 2"),
-        ]);
-        let names: HashSet<&String> = got.values().collect();
-        assert_eq!(names.len(), 3, "{got:?}");
-        assert_eq!(got[&12], "tarea-2.md");
-        assert_eq!(got[&10], "tarea-3.md");
+    fn a_new_assignment_never_renames_an_existing_twin() {
+        let twins = [assignment(7, "Tarea"), assignment(10, "Tarea")];
+        let before = assignment_files(&twins);
+        assert_eq!(before[&10], "tarea-2.md");
+        // Canvas adds "Tarea 2" later: the twin keeps its file.
+        let mut more = twins.to_vec();
+        more.push(assignment(20, "Tarea 2"));
+        let after = assignment_files(&more);
+        assert_eq!(after[&7], before[&7]);
+        assert_eq!(after[&10], before[&10]);
+        assert_eq!(after[&20], "tarea-2-2.md");
+        let names: HashSet<&String> = after.values().collect();
+        assert_eq!(names.len(), 3, "{after:?}");
     }
 
     #[test]

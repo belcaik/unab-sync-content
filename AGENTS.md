@@ -263,9 +263,10 @@ directory (`sync`, `announcements`, `calendar`, `zoom flow`) writes a minimal
 
 **Name collisions inside a course.** Two assignments with the same title,
 or two announcements with the same date and title: `layout::unique_names`,
-in Canvas id order — the lower id keeps the plain name, the others get
-`-2`, `-3`… (`tarea-2.md`), the first number no other item wants as its
-plain name; the suffix survives slug truncation. The migrator numbers two
+in Canvas id order — each keeps the plain name unless a lower id was given
+it, else gets the first free `-2`, `-3`… (`tarea-2.md`); a name depends only
+on lower ids, so a new item never renames an existing one (a later
+`Tarea 2` becomes `tarea-2-2.md`); the suffix survives slug truncation. The migrator numbers two
 v1 notes the same way (announcements by the id in their v1 name,
 assignments by their `NN` prefix), so a migrated note and the one `sync`
 writes next agree. Attachments that slug to the same path in one
@@ -403,7 +404,8 @@ cron, where nobody would notice until the data was gone.
 Layout v1 → v2 (`docs/specs/layout-v2.md`, "Reglas del migrador" and "API
 de `migrate::ensure`"). Rename only: there is no file delete, copy or
 overwrite anywhere in it. The one removal is `rmdir(2)` of the v1
-directories the moves emptied (`Plan::prune`: v1 course directories,
+directories the moves emptied (`Plan::prune`: v1 course directories — or their `Modules/` and
+`announcements/` when the v2 name is the same —
 mapped `Zoom/<id>`, then `Zoom/` if empty), bottom-up, each journaled as
 `rmdir` first; never `remove_dir_all`. A directory with anything left in it
 (a duplicate, a foreign file, a symlink) stays and is reported. `--undo`
@@ -413,7 +415,8 @@ once they are empty.
 Two v1 notes that are different Canvas items and want one v2 name (two
 announcements whose v1 names carry different ids, two `NN-ASSIGN-` files
 with one title and different `NN`) are numbered `-2`, `-3`… by
-`layout::unique_names`, never treated as a collision. Duplicate/conflict
+`layout::unique_names` over every item of the directory in id / `NN`
+order, never treated as a collision. Duplicate/conflict
 handling is only for sources of the same item (same id / `NN`).
 
 `migrate::ensure::migrate` (the `migrate` command) runs, in this order:

@@ -40,8 +40,9 @@
 //! Two v1 notes that are different Canvas items and want the same name —
 //! two announcements with one date and title (their v1 names carry
 //! different ids), two assignments with one title and different `NN`
-//! prefixes — are not a collision: [`layout::unique_names`] numbers them in
-//! id / `NN` order (`tarea.md`, `tarea-2.md`), as `sync` would.
+//! prefixes — are not a collision: [`layout::unique_names`] names every item
+//! of the directory in id / `NN` order (`tarea.md`, `tarea-2.md`), as `sync`
+//! does.
 //!
 //! Two sources of the same item with the same destination, or a destination
 //! that already exists, are a [`Collision`]: same sizes go to
@@ -204,7 +205,8 @@ pub struct Plan {
     /// Left in place.
     pub unresolved: Vec<Unresolved>,
     /// v1 directories (library root) the moves empty, sorted: every migrated
-    /// v1 course directory and every mapped `Zoom/<id>`. The executor
+    /// v1 course directory (its `Modules/` and `announcements/` when the v2
+    /// directory has the same name) and every mapped `Zoom/<id>`. The executor
     /// removes each empty directory under them, bottom-up, then their empty
     /// parents (`Zoom/`); anything with a file left in it stays.
     pub prune: Vec<String>,
@@ -238,8 +240,14 @@ pub fn plan(inv: &Inventory, naming: &CourseNaming, canvas: &[CanvasCourse]) -> 
     let zoom = planner.map_zoom(naming, &mut courses);
     for course in &courses {
         planner.course_files(course);
-        if course.planned.v1_dir != course.planned.dir {
-            planner.prune.push(course.planned.v1_dir.clone());
+        let v1 = &course.planned.v1_dir;
+        if *v1 == course.planned.dir {
+            // The v2 tree lives in it: only its v1 subdirectories are emptied.
+            for sub in [V1_MODULES_DIR, V1_ANNOUNCEMENTS_DIR] {
+                planner.prune.push(format!("{v1}/{sub}"));
+            }
+        } else {
+            planner.prune.push(v1.clone());
         }
     }
     for (folder, course) in &zoom {
@@ -552,34 +560,47 @@ impl Planner<'_> {
         }
     }
 
-    /// Give each Canvas item of a contested destination its own name: the
-    /// sources of one destination are grouped by [`Source::item`], the
-    /// lowest item keeps the destination, and the others get the names
-    /// [`layout::unique_names`] gives them, free in the plan and on disk.
-    /// Sources of one item stay together, a collision as before.
-    fn number_distinct_items(&mut self) {
-        let contested: Vec<String> = self
+    /// Name every Canvas item of a directory (`anuncios/`, `tareas/`) the
+    /// way `sync` does: all of them, in item order (id, or `NN`), through
+    /// [`layout::unique_names`]. A name it numbers is also kept free of
+    /// other files the plan puts there and of files already on disk. An item
+    /// is its [`Source::item`] and the name it wants, so the sources of one
+    /// item stay together, a collision as before.
+    fn number_items(&mut self) {
+        type Items = BTreeMap<(u64, String), Vec<Source>>;
+        let keyed: Vec<String> = self
             .candidates
             .iter()
-            .filter(|(_, sources)| {
-                let items: BTreeSet<Option<u64>> = sources.iter().map(|s| s.item).collect();
-                items.len() > 1
-            })
+            .filter(|(_, sources)| sources.iter().any(|s| s.item.is_some()))
             .map(|(to, _)| to.clone())
             .collect();
-        for to in contested {
+        let mut dirs: BTreeMap<String, Items> = BTreeMap::new();
+        for to in keyed {
             let Some(sources) = self.candidates.remove(&to) else {
                 continue;
             };
-            let mut items: BTreeMap<Option<u64>, Vec<Source>> = BTreeMap::new();
-            for source in sources {
-                items.entry(source.item).or_default().push(source);
-            }
             let (dir, name) = match to.rsplit_once('/') {
-                Some((dir, name)) => (format!("{dir}/"), name),
-                None => (String::new(), to.as_str()),
+                Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+                None => (String::new(), to.clone()),
             };
-            let wanted = vec![name.to_string(); items.len()];
+            let mut rest = Vec::new();
+            for source in sources {
+                match source.item {
+                    Some(item) => dirs
+                        .entry(dir.clone())
+                        .or_default()
+                        .entry((item, name.clone()))
+                        .or_default()
+                        .push(source),
+                    None => rest.push(source),
+                }
+            }
+            if !rest.is_empty() {
+                self.candidates.insert(to, rest);
+            }
+        }
+        for (dir, items) in dirs {
+            let wanted: Vec<String> = items.keys().map(|(_, name)| name.clone()).collect();
             let taken = |n: &str| {
                 let path = format!("{dir}{n}");
                 self.candidates.contains_key(&path) || self.inv.files.contains_key(&path)
@@ -595,7 +616,7 @@ impl Planner<'_> {
     }
 
     fn finish(mut self, courses: Vec<Resolved>) -> Plan {
-        self.number_distinct_items();
+        self.number_items();
         let inv = self.inv;
         // Every directory a file sits in, now or after the plan: a file can
         // never be renamed onto one.
@@ -1141,8 +1162,8 @@ mod tests {
         let tareas = "atdf105-mineria-de-datos/tareas";
         let want = [
             (&a1, format!("{anuncios}/2026-01-01_aviso.md")),
-            (&a2, format!("{anuncios}/2026-01-01_aviso-3.md")),
-            (&a9, format!("{anuncios}/2026-01-01_aviso-2.md")),
+            (&a2, format!("{anuncios}/2026-01-01_aviso-2.md")),
+            (&a9, format!("{anuncios}/2026-01-01_aviso-2-2.md")),
             (&t4, format!("{tareas}/informe-de-caso-3.md")),
             (&t6, format!("{tareas}/informe-de-caso-3-2.md")),
         ];
@@ -1150,6 +1171,17 @@ mod tests {
             assert_eq!(moved(&plan, from), Some(to.as_str()), "{from}");
             assert!(plan.edits.iter().any(|e| &e.path == to), "no edit for {to}");
         }
+    }
+
+    #[test]
+    fn a_course_keeping_its_name_prunes_only_its_v1_subdirectories() {
+        let inv = inv(&[
+            ("mineria/state.json", 1),
+            ("mineria/Modules/1_Uno/01-Pagina.md", 1),
+        ]);
+        let plan = plan(&inv, &unab(), &[]);
+        assert_eq!(plan.courses[0].dir, "mineria");
+        assert_eq!(plan.prune, ["mineria/Modules", "mineria/announcements"]);
     }
 
     #[test]
