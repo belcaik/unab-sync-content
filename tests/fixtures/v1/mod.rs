@@ -37,6 +37,15 @@
 //!   801 and 802 of DISRUPCION, same day and title, identical bodies
 //!   ([`TWIN_ANNOUNCEMENT_ID`]); and two MINERIA assignments with one title,
 //!   items `04` and `06` of one module, different bodies ([`TWIN_ASSIGNMENT`]).
+//! - Every shape of Canvas link the real notes carry (T10), in MINERIA's page
+//!   [`LINKS_PAGE`] ([`LINKS_BODY`]): file previews, downloads and API URLs,
+//!   pages, a module item, an assignment, an announcement, a page and the
+//!   home of another course, quizzes, iframes, external tools, equation
+//!   images, a `mailto:`, one Canvas mangled into `https://<canvas>/mailto:`,
+//!   a page of another Canvas host, and raw HTML (`<img … width=…>`) that
+//!   html2md keeps. Two attachments have the same size
+//!   ([`SAME_SIZE_FILES`]); `state.json` records each attachment's size
+//!   (no name, as v1 did) and each page's slug.
 //!
 //! There is no `.u_crawler/library.json`. That absence, plus `Zoom/<digits>/`,
 //! `Modules/<id>_` and `NN-ASSIGN-`, is the v1 signal.
@@ -70,6 +79,40 @@ pub const ORPHAN_ZOOM_ID: u64 = 424_242;
 pub const TWIN_ANNOUNCEMENT_ID: u64 = 802;
 /// The title two MINERIA assignments share (items `04` and `06`).
 pub const TWIN_ASSIGNMENT: &str = "Semana 11 Sumativa 3 Informe de caso 3";
+/// Title of the MINERIA page whose body is [`LINKS_BODY`].
+pub const LINKS_PAGE: &str = "Fase 4";
+/// Canvas ids of two attachments with the same size (`Guia_1.PDF`,
+/// `Guia_2.PDF`): only a link whose text names one can be pointed at it.
+pub const SAME_SIZE_FILES: [u64; 2] = [1001, 1002];
+/// The links of [`LINKS_PAGE`], one shape per line, as html2md wrote them.
+pub const LINKS_BODY: &str = "\
+- [Guia\\_1.PDF](https://canvas.example.edu/courses/9001/files/1001/preview?verifier=abc&wrap=1)
+- [descarga](/courses/9001/files/1002/download?download_frd=1)
+- ![Diagrama](https://canvas.example.edu/courses/9001/files/1003/preview)
+- [Rubrica final.docx](https://canvas.example.edu/api/v1/courses/9001/files/1004)
+- [rubrica](https://canvas.example.edu/courses/9001/files/1004?wrap=1)
+- [CodeR](/courses/9001/files/4242/preview)
+- [Fase 1](https://canvas.example.edu/courses/9001/pages/informacion-general)
+- [Contenidos](/courses/9001/pages/contenidos?module_item_id=7001)
+- [Item](https://canvas.example.edu/courses/9001/modules/items/7001)
+- [Tarea](https://canvas.example.edu/courses/9001/assignments/6001)
+- [Aviso](https://canvas.example.edu/courses/9001/discussion_topics/501)
+- [Otro ramo](https://canvas.example.edu/courses/9003/pages/informacion-general)
+- [Ramo](https://canvas.example.edu/courses/9002)
+- [Quiz](https://canvas.example.edu/courses/9001/quizzes/12)
+- [Video](https://canvas.example.edu/media_attachments_iframe/333)
+- [Zoom](https://canvas.example.edu/courses/9001/external_tools/187)
+- ![ecuacion](https://canvas.example.edu/equation_images/x%2By)
+- [correo](https://canvas.example.edu/mailto:docente@example.edu)
+- [correo bueno](mailto:docente@example.edu)
+- [otro tenant](https://otro.instructure.com/courses/9001/pages/contenidos)
+
+<p><img src=\"https://canvas.example.edu/courses/9001/files/1003/preview\" alt=\"Diagrama.png\" width=\"640\" height=\"480\"></p>
+
+```
+[en codigo](https://canvas.example.edu/courses/9001/pages/contenidos)
+```
+";
 
 const CANVAS_HOST: &str = "https://canvas.example.edu";
 
@@ -382,24 +425,69 @@ fn markdown(title: &str, code: &str) -> Vec<u8> {
     format!("# {title}\n\nTexto sintetico de {code}.\n").into_bytes()
 }
 
+/// The item number is in the body, so two assignments with one title differ
+/// in content as they do in Canvas.
+fn assignment_markdown(assignment: &PagePlan, code: &str) -> Vec<u8> {
+    let mut body = markdown(assignment.title, code);
+    body.extend_from_slice(format!("Item {:02}.\n", assignment.position).as_bytes());
+    body
+}
+
+fn page_markdown(page: &PagePlan, code: &str) -> Vec<u8> {
+    let mut body = markdown(page.title, code);
+    if page.links {
+        body.push(b'\n');
+        body.extend_from_slice(LINKS_BODY.as_bytes());
+    }
+    body
+}
+
 fn fake_bytes(kind: &str, name: &str) -> Vec<u8> {
     format!("synthetic-{kind}:{name}\n").into_bytes()
 }
 
-fn state_bytes(code: &str) -> io::Result<Vec<u8>> {
+fn state_bytes(plan: &CoursePlan) -> io::Result<Vec<u8>> {
     let mut state = State::default();
-    state.set(
-        format!("page:{code}"),
-        ItemState {
-            etag: None,
-            updated_at: Some("2026-01-15T00:00:00Z".to_string()),
-            size: Some(1),
-            content_hash: None,
-            last_error: None,
-            error_count: None,
-            file_name: None,
-        },
-    );
+    let entry = |size: Option<u64>, content_hash: Option<String>| ItemState {
+        etag: size.map(|_| "etag".to_string()),
+        updated_at: Some("2026-01-15T00:00:00Z".to_string()),
+        size,
+        content_hash,
+        last_error: None,
+        error_count: None,
+        file_name: None,
+        path: None,
+    };
+    state.set(format!("page:{}", plan.code), entry(Some(1), None));
+    // v1 recorded the SHA-1 of each note it wrote, and no path.
+    for module in plan.modules {
+        for page in module.pages {
+            let hash = sha1_hex(&page_markdown(page, plan.code));
+            state.set(
+                format!("page:{}", layout::slugify(page.title)),
+                entry(None, Some(hash)),
+            );
+        }
+        for assignment in module.assignments {
+            let hash = sha1_hex(&assignment_markdown(assignment, plan.code));
+            state.set(
+                format!("assignment:{}", assignment.id),
+                entry(None, Some(hash)),
+            );
+        }
+        for (id, original) in module.attachments {
+            let size = fake_bytes("file", original).len() as u64;
+            state.set(format!("file:{id}"), entry(Some(size), None));
+        }
+    }
+    if let AnnPlan::Indexed {
+        media: Some(original),
+        ..
+    } = plan.announcements
+    {
+        let size = fake_bytes("zip", original).len() as u64;
+        state.set(format!("file:{CODER_FILE_ID}"), entry(Some(size), None));
+    }
     json_bytes(&state)
 }
 
@@ -407,6 +495,11 @@ fn state_bytes(code: &str) -> io::Result<Vec<u8>> {
 struct PagePlan {
     position: u32,
     title: &'static str,
+    /// The body ends with [`LINKS_BODY`].
+    links: bool,
+    /// Canvas id of an assignment (its `assignment:<id>` state key); `0`
+    /// for a page, which v1 keyed by slug.
+    id: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -415,8 +508,9 @@ struct ModulePlan {
     name: &'static str,
     pages: &'static [PagePlan],
     assignments: &'static [PagePlan],
-    /// Display name before `sanitize_filename_preserve_ext`, as Canvas would send it.
-    attachment: Option<&'static str>,
+    /// Canvas id and display name before `sanitize_filename_preserve_ext`,
+    /// as Canvas would send it.
+    attachments: &'static [(u64, &'static str)],
     user_note: bool,
 }
 
@@ -511,7 +605,7 @@ fn write_course(
         root,
         manifest,
         &join_rel(&[&v1_dir, "state.json"]),
-        &state_bytes(plan.code)?,
+        &state_bytes(plan)?,
     )?;
 
     let mut user_note_rel = None;
@@ -562,23 +656,19 @@ fn write_module(
             root,
             manifest,
             &join_rel(&[v1_dir, "Modules", &dirname, &name]),
-            &markdown(page.title, code),
+            &page_markdown(page, code),
         )?;
     }
     for assignment in module.assignments {
         let name = assignment_filename(assignment.position, assignment.title);
-        // The item number is in the body, so two assignments with one title
-        // differ in content as they do in Canvas.
-        let mut body = markdown(assignment.title, code);
-        body.extend_from_slice(format!("Item {:02}.\n", assignment.position).as_bytes());
         put(
             root,
             manifest,
             &join_rel(&[v1_dir, "Modules", &dirname, &name]),
-            &body,
+            &assignment_markdown(assignment, code),
         )?;
     }
-    if let Some(original) = module.attachment {
+    for (_, original) in module.attachments {
         let name = fsutil::sanitize_filename_preserve_ext(original);
         put(
             root,
@@ -640,9 +730,9 @@ fn write_announcements(
             capital_media_rel = Some(rel);
         }
         media_refs.push(MediaRef {
-            url: format!("{CANVAS_HOST}/files/4242"),
+            url: format!("{CANVAS_HOST}/files/{CODER_FILE_ID}"),
             kind: MediaKind::CanvasFile,
-            file_id: Some(4242),
+            file_id: Some(CODER_FILE_ID),
             local_path: Some(format!("announcements/media/{name}")),
         });
     }
@@ -785,7 +875,12 @@ fn require_date(date: &str) -> io::Result<()> {
 const INFO_PAGE: &[PagePlan] = &[PagePlan {
     position: 1,
     title: "Informacion general",
+    links: false,
+    id: 0,
 }];
+
+/// Canvas id of `CodeR_S3.zip`, the MINERIA announcement attachment.
+const CODER_FILE_ID: u64 = 4242;
 
 const fn plain_module(id: u64, name: &'static str) -> ModulePlan {
     ModulePlan {
@@ -793,7 +888,7 @@ const fn plain_module(id: u64, name: &'static str) -> ModulePlan {
         name,
         pages: INFO_PAGE,
         assignments: &[],
-        attachment: None,
+        attachments: &[],
         user_note: false,
     }
 }
@@ -806,28 +901,48 @@ const MINERIA_MODULES: &[ModulePlan] = &[
         assignments: &[PagePlan {
             position: 2,
             title: "Semana 10 - Formativa 6",
+            links: false,
+            id: 6001,
         }],
-        attachment: Some("Guia_1.PDF"),
+        attachments: &[
+            (SAME_SIZE_FILES[0], "Guia_1.PDF"),
+            (1003, "Diagrama.png"),
+            (1004, "Rubrica final.docx"),
+        ],
         user_note: true,
     },
     ModulePlan {
         id: 200,
         name: "Semana 1",
-        pages: &[PagePlan {
-            position: 1,
-            title: "Contenidos",
-        }],
+        pages: &[
+            PagePlan {
+                position: 1,
+                title: "Contenidos",
+                links: false,
+                id: 0,
+            },
+            PagePlan {
+                position: 2,
+                title: LINKS_PAGE,
+                links: true,
+                id: 0,
+            },
+        ],
         assignments: &[
             PagePlan {
                 position: 4,
                 title: TWIN_ASSIGNMENT,
+                links: false,
+                id: 6004,
             },
             PagePlan {
                 position: 6,
                 title: TWIN_ASSIGNMENT,
+                links: false,
+                id: 6006,
             },
         ],
-        attachment: None,
+        attachments: &[(SAME_SIZE_FILES[1], "Guia_2.PDF")],
         user_note: false,
     },
 ];

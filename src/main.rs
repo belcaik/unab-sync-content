@@ -447,6 +447,9 @@ async fn handle_migrate(
             if dry.plan.is_empty() && dry.pending.is_none() {
                 println!("nothing to migrate in {}", library.display());
             }
+            if let Some(links) = dry.links.filter(|n| *n > 0) {
+                println!("{links} Canvas link(s) would point at local copies");
+            }
             println!("dry run: nothing was moved or written");
         }
         migrate::Outcome::Migrated(summary) => {

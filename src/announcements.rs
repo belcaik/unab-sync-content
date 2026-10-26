@@ -7,15 +7,15 @@ use crate::http::{build_http_client, HttpCtx};
 use crate::index::AnnouncementIndex;
 use crate::layout::{self, CourseNaming};
 use crate::library;
-use crate::links::{classify_by_filename, extract_links, MediaRef};
-use crate::migrate::rewrite;
+use crate::links::{classify_by_filename, extract_links, FileTarget, LinkMap, MediaRef};
+use crate::migrate::{relink, rewrite};
 use crate::progress::{progress_bar, spinner};
 use crate::state::{ItemState, State};
 use crate::status;
 use chrono::NaiveDate;
 use html2md::parse_html;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -59,6 +59,10 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
         return Ok(());
     }
 
+    let mut links = relink::disk_map(&root)?;
+    links
+        .hosts
+        .extend(crate::links::url_host(&cfg.canvas.base_url));
     let course_pb = progress_bar(selected.len() as u64, "Scanning announcements");
     let mut totals = CourseSummary::default();
     for course in selected {
@@ -90,7 +94,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
             dry_run,
             false,
         )
-        .run(&course.name, &mut state)
+        .run(&course.name, &mut state, &mut links)
         .await
         .map(|run| run.summary)
         .unwrap_or_else(|e| {
@@ -226,7 +230,13 @@ impl<'a> AnnouncementSync<'a> {
         )
         .await
         {
-            Ok(path) => Self::relative_media_path(&path),
+            Ok(path) => {
+                let rel = Self::relative_media_path(&path)?;
+                if let Some(item) = state.items.get_mut(&crate::download::state_key(file.id)) {
+                    item.path = Some(rel.clone());
+                }
+                Some(rel)
+            }
             Err(e) => {
                 warn!(course_id = self.course_id, file_id = file.id, error = %e, "media download failed");
                 state.record_error(crate::download::state_key(file.id), &e);
@@ -307,8 +317,18 @@ impl<'a> AnnouncementSync<'a> {
             (Some(prev), Some(posted)) => prev.updated_at.as_deref() == Some(posted),
             _ => false,
         };
+        let rel = format!("{}/{}", layout::ANNOUNCEMENTS_DIR, file_name(path));
 
-        if unchanged && path.exists() {
+        // Same post and same bytes: nothing to do. A body whose links now
+        // reach more local copies is written again.
+        if unchanged
+            && tokio::fs::read(path)
+                .await
+                .is_ok_and(|on_disk| on_disk == md.as_bytes())
+        {
+            if let Some(item) = state.items.get_mut(&key) {
+                item.path = Some(rel);
+            }
             if self.verbose {
                 info!(
                     course_id = self.course_id,
@@ -330,6 +350,7 @@ impl<'a> AnnouncementSync<'a> {
                 last_error: None,
                 error_count: None,
                 file_name: None,
+                path: Some(rel),
             },
         );
         Ok(())
@@ -343,6 +364,7 @@ impl<'a> AnnouncementSync<'a> {
         filename: &str,
         state: &mut State,
         claims: &mut Claims,
+        links: &mut LinkMap,
     ) -> anyhow::Result<(AnnouncementRecord, CourseSummary)> {
         let title = ann
             .title
@@ -380,10 +402,13 @@ impl<'a> AnnouncementSync<'a> {
                 "dry-run announcement"
             );
         } else {
-            let files: BTreeMap<u64, PathBuf> = media
-                .iter()
-                .filter_map(|m| Some((m.file_id?, PathBuf::from(m.local_path.as_ref()?))))
-                .collect();
+            for m in &media {
+                if let (Some(id), Some(local)) = (m.file_id, m.local_path.as_ref()) {
+                    links
+                        .files
+                        .insert(id, FileTarget::Path(Path::new(&self.ramo).join(local)));
+                }
+            }
             let fm = Frontmatter {
                 ramo: self.ramo.clone(),
                 tipo: DocKind::Announcement,
@@ -393,8 +418,10 @@ impl<'a> AnnouncementSync<'a> {
                 vence: None,
                 disponible: None,
             };
-            let rel = Path::new(layout::ANNOUNCEMENTS_DIR).join(filename);
-            let md = rewrite::apply(&parse_html(&html), &fm, &rel, &files);
+            let rel = Path::new(&self.ramo)
+                .join(layout::ANNOUNCEMENTS_DIR)
+                .join(filename);
+            let md = rewrite::apply(&parse_html(&html), &fm, &rel, links);
             self.write_body(&ann, &md, &body_path, state).await?;
         }
 
@@ -416,10 +443,15 @@ impl<'a> AnnouncementSync<'a> {
     }
 
     /// Mirrors every announcement in the course and writes the index.
+    ///
+    /// `links` is where the notes' Canvas links point (paths relative to the
+    /// library root): this course's announcements and media are added to it
+    /// as they are named and downloaded.
     pub async fn run(
         &self,
         course_name: &str,
         state: &mut State,
+        links: &mut LinkMap,
     ) -> anyhow::Result<AnnouncementsRun> {
         if !self.dry_run {
             ensure_dir(&self.ann_dir).await?;
@@ -443,6 +475,17 @@ impl<'a> AnnouncementSync<'a> {
         let mut totals = CourseSummary::default();
         let mut records = Vec::with_capacity(announcements.len());
         let files = announcement_files(&announcements);
+        links
+            .courses
+            .insert(self.course_id, PathBuf::from(&self.ramo));
+        for (id, (_, filename)) in &files {
+            links.announcements.insert(
+                *id,
+                Path::new(&self.ramo)
+                    .join(layout::ANNOUNCEMENTS_DIR)
+                    .join(filename),
+            );
+        }
         let mut index = Vec::with_capacity(announcements.len());
         // One set of claims for the whole course: every announcement shares
         // `anuncios/adjuntos/`.
@@ -464,7 +507,9 @@ impl<'a> AnnouncementSync<'a> {
                 posted: Some(posted),
                 file: filename.clone(),
             });
-            let (record, summary) = self.process(ann, &filename, state, &mut claims).await?;
+            let (record, summary) = self
+                .process(ann, &filename, state, &mut claims, links)
+                .await?;
             totals += summary;
             records.push(record);
         }
@@ -480,6 +525,13 @@ impl<'a> AnnouncementSync<'a> {
             index,
         })
     }
+}
+
+/// The last component of `path`, as text.
+fn file_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
 }
 
 /// The posting date and file name under `anuncios/` of every announcement,

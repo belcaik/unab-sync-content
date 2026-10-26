@@ -188,8 +188,19 @@ on. There is nothing to opt into. What the migration does, and does not do:
   of the same item are compared by content: identical ones leave the
   second where it was (reported as a duplicate); different ones get
   `name.conflicto-<hash>.ext`.
-- Generated notes get YAML frontmatter and local links. The original of
-  every note it rewrites is kept under `.u_crawler/backup/<timestamp>/`.
+- Generated notes get YAML frontmatter and local links: a link to a Canvas
+  file, page, assignment, announcement, module item or course that the
+  library has a copy of points at that copy (relative path, works in
+  Obsidian), in this course or another one; a `https://<canvas>/mailto:`
+  becomes a plain `mailto:`. What has no local copy, or is only known by its
+  size (a v1 attachment the link text does not name), keeps its Canvas link.
+  Raw HTML in a note (`<img … width=…>`) only gets its `src` changed. The original of every note it
+  rewrites is kept under `.u_crawler/backup/<timestamp>/`.
+- A library migrated by an earlier version, whose notes still link to
+  Canvas, is relinked once by the next writer command (or by
+  `u_crawler migrate`), under its own journal: `migrate --undo <timestamp>`
+  puts the notes back. Module items, and anything ambiguous offline, are
+  resolved with Canvas (`--canvas`, or the next `sync`).
 - Every step is first written to a journal, `.u_crawler/migrations/<timestamp>.jsonl`.
   A run that is cut short (power, `Ctrl-C`) is finished by the next one.
 - A `Zoom/<id>/` folder that cannot be matched to exactly one course stays
@@ -236,7 +247,9 @@ Every rename is reversed and every rewritten note is put back from its
 backup. The rewritten versions and the migration's `curso.json` and
 `README.md` files are set aside under `.u_crawler/migrations/<timestamp>.undo/`, not deleted. The
 `library.json` marker is set aside too, so the next writer command migrates
-again (for example after you change `[layout]`).
+again (for example after you change `[layout]`). Undoing a relink journal
+only puts the notes (and `state.json` files) back; the library stays v2 and
+is not relinked again on its own.
 
 ### Migrating a NAS library and a PC copy
 
@@ -392,11 +405,12 @@ previewing it, running it on another tree, or undoing it.
 | Flag | Description |
 |---|---|
 | `--root PATH` | Migrate this tree instead of `download_root`. The calendar tree is left alone (unless `PATH` is `download_root` itself). |
-| `--dry-run` | Print the full plan (courses, moves, notes to rewrite, collisions, what stays); touch nothing |
+| `--dry-run` | Print the full plan (courses, moves, notes to rewrite, collisions, what stays), or on a v2 library how many links would become local; touch nothing |
 | `--undo TS` | Undo the migration journal `TS` |
-| `--canvas` | Read official course names and module order from Canvas (needs the token) |
+| `--canvas` | Read official course names and module order from Canvas, and module items and file names for the links (needs the token) |
 
-Running it on a library that is already v2 does nothing and says so.
+Running it on a library that is already v2 only relinks the notes whose
+Canvas links now have a local copy, and otherwise does nothing and says so.
 
 ### `status`
 
@@ -513,7 +527,7 @@ specific to one institution and is unlikely to be right for yours.
 ├── INDEX.md                                  courses + upcoming deadlines
 ├── AGENTS.md                                 how to navigate the tree (for AI agents)
 ├── .u_crawler/
-│   ├── library.json                          {"layout_version": 2}
+│   ├── library.json                          {"layout_version": 2, "links_version": 1}
 │   ├── migrations/<timestamp>.jsonl          migration journals
 │   └── backup/<timestamp>/...                originals of notes the migration rewrote
 └── <course>/                                 e.g. atdf105-mineria-de-datos, from [layout]
@@ -535,7 +549,8 @@ specific to one institution and is unlikely to be right for yours.
 
 Every name is lowercase kebab-case ASCII, so `Introducción` becomes
 `introduccion`. Notes carry YAML frontmatter (`ramo`, `tipo`, `canvas_id`,
-`url`, and dates) and link the local copies of the Canvas files they mention.
+`url`, and dates) and link the local copies of the Canvas files, pages,
+assignments and announcements they mention.
 Two assignments or announcements that would share a name, or two files that
 slug to the same name in one folder, are told apart by their Canvas id; a
 recording split into several segments gets `-parte-2`, `-parte-3`.

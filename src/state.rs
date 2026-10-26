@@ -5,12 +5,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub items: BTreeMap<String, ItemState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemState {
     pub etag: Option<String>,
     pub updated_at: Option<String>,
@@ -25,6 +25,12 @@ pub struct ItemState {
     /// Omitted when unset, so entries that never name a file keep their bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+    /// Where the item is, relative to the course directory: a file's local
+    /// copy, a page, assignment or announcement note, or what a
+    /// `module-item:<id>` shows. What points Canvas links at the local copies
+    /// offline (`migrate::relink`). Omitted when unset, like `file_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl State {
@@ -72,6 +78,7 @@ impl State {
             last_error: Some(err.to_string()),
             error_count: Some(prev.and_then(|s| s.error_count).unwrap_or(0) + 1),
             file_name: prev.and_then(|s| s.file_name.clone()),
+            path: prev.and_then(|s| s.path.clone()),
         };
         self.items.insert(key, entry);
     }
@@ -90,6 +97,7 @@ mod tests {
             last_error: None,
             error_count: None,
             file_name: None,
+            path: None,
         }
     }
 

@@ -12,13 +12,22 @@
 //!    journal, when the plan has anything to do.
 //! 3. The generated notes each journal renamed get their frontmatter and
 //!    local links ([`rewrite::rewrite_file`], backup under
-//!    `.u_crawler/backup/<ts>/`, `<ts>` being the journal's).
-//! 4. Every index file, from what is now on disk
+//!    `.u_crawler/backup/<ts>/`, `<ts>` being the journal's). The links come
+//!    from one [`LinkMap`] of the whole library ([`relink::build`], plus
+//!    [`relink::learn`] with a Canvas client).
+//! 4. Every other generated note of a v2 course whose Canvas links that map
+//!    can now point at local copies is relinked (frontmatter untouched), and
+//!    what Canvas taught is written into `state.json`. Both are backed up
+//!    under this run's journal, or under a new relink journal when the plan
+//!    had nothing to do, so `--undo <ts>` puts them back.
+//! 5. Every index file, from what is now on disk
 //!    ([`library::write_indexes_from_disk`]): a `README.md` per course and
 //!    per module where there is none, each `curso.json` brought up to date
 //!    (readable name, term, section), `AGENTS.md` and `INDEX.md` at the root.
-//! 5. `.u_crawler/library.json` last. Until it exists the library is not v2,
-//!    so a cut anywhere above is picked up by the next run.
+//! 6. `.u_crawler/library.json` last, with `links_version`
+//!    ([`relink::LINKS_VERSION`]). Until it exists the library is not v2,
+//!    so a cut anywhere above is picked up by the next run; until it has
+//!    that version, the next writer relinks the notes once.
 //!
 //! Step 3 is driven by the journals, not by the plan, because a plan made
 //! after the moves no longer lists them. Without `library.json` the notes of
@@ -35,7 +44,8 @@
 
 use super::apply::{self, ApplyError, Entry, JournalState, Roots};
 use super::plan::{self, CanvasCourse, Plan, Root, Unresolved};
-use super::rewrite::{self, Rewrite, RewriteOutcome};
+use super::relink::{self, Sources};
+use super::rewrite::{self, Rewrite, RewriteError, RewriteOutcome};
 use super::{scan, Inventory, INDEX_JSON, LIBRARY_JSON};
 use crate::canvas::{CanvasClient, CanvasError, Course};
 use crate::config::Config;
@@ -43,6 +53,7 @@ use crate::frontmatter::{DocKind, Frontmatter};
 use crate::fsutil;
 use crate::layout::{self, CourseMeta, CourseNaming};
 use crate::library;
+use crate::links::LinkMap;
 use crate::status;
 use chrono::Utc;
 use serde::Deserialize;
@@ -84,6 +95,9 @@ pub enum MigrateError {
     /// Reading the library, or writing an index file, failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A `state.json` could not be backed up and rewritten.
+    #[error(transparent)]
+    Rewrite(#[from] RewriteError),
     /// Canvas metadata was asked for and could not be read.
     #[error("reading course metadata from Canvas: {0}")]
     Canvas(#[from] CanvasError),
@@ -115,6 +129,10 @@ pub struct DryRun {
     pub plan: Plan,
     /// `library.json` is already there.
     pub marked: bool,
+    /// Links a real run would point at local copies, counted when the plan
+    /// has nothing to move (a v1 library's notes are not at their v2 paths
+    /// yet, so their count would mean nothing).
+    pub links: Option<usize>,
 }
 
 /// What a migration did.
@@ -140,6 +158,10 @@ pub struct Summary {
     pub kept_dirs: Vec<String>,
     /// Generated notes given frontmatter and local links.
     pub rewritten: usize,
+    /// Canvas links now pointing at a local copy.
+    pub links: usize,
+    /// `state.json` files given what Canvas taught.
+    pub states: usize,
     /// Generated notes that could not be rewritten (see the log).
     pub rewrite_failed: usize,
     /// What the plan left in place, and why.
@@ -170,12 +192,13 @@ impl fmt::Display for Summary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "layout v2 migration: {} course(s), {} moved, {} notes rewritten, \
+            "layout v2 migration: {} course(s), {} moved, {} notes rewritten, {} local link(s), \
              {} duplicate(s) left in place, {} conflict(s) renamed, {} skipped, {} unresolved, \
              {} empty v1 dir(s) removed",
             self.courses,
             self.moved,
             self.rewritten,
+            self.links,
             self.duplicates,
             self.conflicts,
             self.skipped,
@@ -195,6 +218,9 @@ impl fmt::Display for Summary {
         }
         if self.indexes > 0 {
             write!(f, ", {} README(s) written", self.indexes)?;
+        }
+        if self.states > 0 {
+            write!(f, ", {} state.json updated from Canvas", self.states)?;
         }
         if let Some(ts) = &self.resumed {
             write!(f, "; resumed {ts}")?;
@@ -250,15 +276,34 @@ pub fn library_json_path(library: &Path) -> PathBuf {
 
 /// The text of `library.json`.
 pub fn library_json() -> String {
-    format!("{{\n  \"layout_version\": {}\n}}\n", layout::LAYOUT_VERSION)
+    format!(
+        "{{\n  \"layout_version\": {},\n  \"links_version\": {}\n}}\n",
+        layout::LAYOUT_VERSION,
+        relink::LINKS_VERSION
+    )
+}
+
+/// `library.json` says the notes were relinked with the current rules.
+/// A missing or unreadable file, or one from before `links_version`, does not.
+fn links_current(library: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct Marker {
+        #[serde(default)]
+        links_version: u32,
+    }
+    std::fs::read_to_string(library_json_path(library))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Marker>(&text).ok())
+        .is_some_and(|m| m.links_version >= relink::LINKS_VERSION)
 }
 
 /// Make sure the library is layout v2 before a writer touches it.
 ///
-/// Cheap when it already is: `library.json` present and no open journal
-/// means nothing is scanned and Canvas is not asked; only when a course or
-/// module lacks its `README.md` are the index files written from disk
-/// ([`library::write_indexes_from_disk`]; not in a dry run). A root that does not
+/// Cheap when it already is: `library.json` present, with the current
+/// `links_version`, and no open journal means nothing is scanned and Canvas
+/// is not asked; only when a course or module lacks its `README.md` are the
+/// index files written from disk ([`library::write_indexes_from_disk`]; not
+/// in a dry run). A library from before `links_version` is relinked once. A root that does not
 /// exist is left alone (the writer creates it). Otherwise this is
 /// [`migrate`], and a migration that moved or rewrote anything is logged
 /// with `warn!` and shown to the user.
@@ -285,7 +330,7 @@ pub async fn ensure_v2(
         return Ok(Outcome::NoLibrary);
     }
     let marked = tokio::fs::try_exists(library_json_path(target.library)).await?;
-    if marked && apply::pending(target.library)?.is_none() {
+    if marked && links_current(target.library) && apply::pending(target.library)?.is_none() {
         if !dry_run && library::indexes_missing(target.library, &library::read(target.library)?)? {
             let written = library::write_indexes_from_disk(target.library, target.naming).await?;
             tracing::info!(path = %target.library.display(), written = written.len(), "missing index files written");
@@ -294,12 +339,26 @@ pub async fn ensure_v2(
     }
     let outcome = migrate(target, canvas, dry_run).await?;
     match &outcome {
+        Outcome::Migrated(summary)
+            if summary.changed_files() && summary.courses == 0 && summary.resumed.is_none() =>
+        {
+            tracing::warn!(
+                path = %target.library.display(),
+                rewritten = summary.rewritten,
+                links = summary.links,
+                states = summary.states,
+                journal = ?summary.journal,
+                "Canvas links in the notes pointed at the local copies"
+            );
+            status!("{summary}");
+        }
         Outcome::Migrated(summary) if summary.changed_files() => {
             tracing::warn!(
                 path = %target.library.display(),
                 courses = summary.courses,
                 moved = summary.moved,
                 rewritten = summary.rewritten,
+                links = summary.links,
                 duplicates = summary.duplicates,
                 conflicts = summary.conflicts,
                 removed_dirs = summary.removed_dirs,
@@ -385,10 +444,22 @@ pub async fn migrate(
     if dry_run {
         let inv = scan_blocking(target).await?;
         let meta = canvas_metadata(canvas, &inv).await?;
+        let plan = plan::plan(&inv, target.naming, &meta);
+        let links = if plan.is_empty() && pending.is_none() {
+            let (sources, map) = link_map(library, canvas).await?;
+            Some(
+                relink_notes(library, &sources, &map, &mut Relink::DryRun)
+                    .await?
+                    .links,
+            )
+        } else {
+            None
+        };
         return Ok(Outcome::DryRun(DryRun {
             pending,
-            plan: plan::plan(&inv, target.naming, &meta),
+            plan,
             marked: was_marked,
+            links,
         }));
     }
 
@@ -425,23 +496,153 @@ pub async fn migrate(
         ran.push(ts);
     }
 
+    let (sources, map) = link_map(library, canvas).await?;
     let to_rewrite = if was_marked {
         ran.clone()
     } else {
         replayable(&apply::journals(library)?)
     };
     for ts in &to_rewrite {
-        rewrite_notes(library, ts, &mut summary).await?;
+        rewrite_notes(library, ts, &map, &mut summary).await?;
+    }
+    let mut batch = match &summary.journal {
+        Some(ts) => Relink::Journal(ts.clone()),
+        None => Relink::Lazy(None),
+    };
+    let relinked = relink_notes(library, &sources, &map, &mut batch).await?;
+    summary.rewritten += relinked.notes;
+    summary.links += relinked.links;
+    summary.rewrite_failed += relinked.failed;
+    if let Some(learned) = &sources.1 {
+        for (rel, text) in relink::state_updates(&sources.0, learned).map_err(io::Error::other)? {
+            let ts = batch.ts(library)?;
+            if let RewriteOutcome::Rewritten { .. } =
+                rewrite::rewrite_state(library, &rel, &text, &ts).await?
+            {
+                summary.states += 1;
+            }
+        }
+    }
+    if let Relink::Lazy(Some(ts)) = &batch {
+        apply::finish_relink(library, ts)?;
+        summary.journal = Some(ts.clone());
     }
 
     summary.indexes = library::write_indexes_from_disk(library, target.naming)
         .await?
         .len();
-    if !was_marked {
+    if !was_marked || !links_current(library) {
         fsutil::atomic_write(&library_json_path(library), library_json().as_bytes()).await?;
-        summary.marked = true;
+        summary.marked = !was_marked;
     }
     Ok(Outcome::Migrated(summary))
+}
+
+/// The library's [`LinkMap`]: from disk, plus what Canvas says when a
+/// client is given. Also returns what it was built from, and what Canvas
+/// taught (to persist).
+async fn link_map(
+    library: &Path,
+    canvas: Option<&CanvasClient>,
+) -> Result<((Sources, Option<relink::Learned>), LinkMap), MigrateError> {
+    let root = library.to_path_buf();
+    let sources = tokio::task::spawn_blocking(move || relink::read_sources(&root)).await??;
+    let mut map = relink::build(&sources);
+    let learned = match canvas {
+        Some(client) => {
+            map.hosts
+                .extend(client.base.host_str().map(str::to_ascii_lowercase));
+            let learned = relink::learn(client, &sources, &map).await;
+            learned.apply(&sources, &mut map);
+            Some(learned)
+        }
+        None => None,
+    };
+    Ok(((sources, learned), map))
+}
+
+/// Which backup batch the relink step writes under.
+enum Relink {
+    /// Count only; write nothing.
+    DryRun,
+    /// This run's migration journal.
+    Journal(String),
+    /// A relink journal of its own, opened before the first write.
+    Lazy(Option<String>),
+}
+
+impl Relink {
+    /// The batch to back a file up under, opening a relink journal first if
+    /// this run has none. A dry run has no batch: an error.
+    fn ts(&mut self, library: &Path) -> Result<String, MigrateError> {
+        match self {
+            Relink::DryRun => Err(io::Error::other("dry run writes nothing").into()),
+            Relink::Journal(ts) | Relink::Lazy(Some(ts)) => Ok(ts.clone()),
+            Relink::Lazy(open) => {
+                let ts = fresh_timestamp(library);
+                apply::begin_relink(library, &ts)?;
+                *open = Some(ts.clone());
+                Ok(ts)
+            }
+        }
+    }
+}
+
+/// What [`relink_notes`] did, or would do.
+#[derive(Default)]
+struct Relinked {
+    notes: usize,
+    links: usize,
+    failed: usize,
+}
+
+/// Point the Canvas links of every generated note of a v2 course at the
+/// local copies `map` knows, leaving its frontmatter as it is. A note that
+/// fails is logged and counted.
+async fn relink_notes(
+    library: &Path,
+    sources: &(Sources, Option<relink::Learned>),
+    map: &LinkMap,
+    batch: &mut Relink,
+) -> Result<Relinked, MigrateError> {
+    let mut done = Relinked::default();
+    for course in &sources.0.courses {
+        for rel in course.notes.keys() {
+            let path = Path::new(&course.dir).join(rel);
+            let Ok(text) = tokio::fs::read_to_string(library.join(&path)).await else {
+                continue;
+            };
+            let (new_text, stats) = rewrite::relink(&text, &path, map);
+            if new_text == text {
+                continue;
+            }
+            if matches!(batch, Relink::DryRun) {
+                done.notes += 1;
+                done.links += stats.local;
+                continue;
+            }
+            let ts = batch.ts(library)?;
+            let job = Rewrite {
+                root: library,
+                path: &path,
+                frontmatter: None,
+                links: map,
+                backup_ts: &ts,
+            };
+            match rewrite::rewrite_file(&job).await {
+                Ok(RewriteOutcome::Rewritten { local, .. }) => {
+                    done.notes += 1;
+                    done.links += local;
+                }
+                Ok(RewriteOutcome::Unchanged) => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "note not relinked");
+                    done.failed += 1;
+                }
+            }
+        }
+    }
+    Ok(done)
 }
 
 /// The finished journals whose notes an unmarked library replays: those
@@ -507,11 +708,15 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
     .await?;
     report.dirs_removed += removed;
     report.dirs_left = left;
-    let unmarked = set_aside(
-        library,
-        &format!("{}/{LIBRARY_JSON}", layout::META_DIR),
-        &apply::undo_dir_rel(ts),
-    )?;
+    // A relink journal moved nothing: the library stays v2, and its
+    // `links_version` stays, so the next writer does not relink again.
+    let relink_only = apply::is_relink(&apply::read_journal(&apply::journal_path(library, ts))?);
+    let unmarked = !relink_only
+        && set_aside(
+            library,
+            &format!("{}/{LIBRARY_JSON}", layout::META_DIR),
+            &apply::undo_dir_rel(ts),
+        )?;
     Ok(UndoSummary {
         already_undone: false,
         restored,
@@ -657,16 +862,6 @@ struct IndexRecord {
     html_url: Option<String>,
     #[serde(default)]
     posted_at: Option<String>,
-    #[serde(default)]
-    media: Vec<IndexMedia>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct IndexMedia {
-    #[serde(default)]
-    file_id: Option<u64>,
-    #[serde(default)]
-    local_path: Option<String>,
 }
 
 /// What the notes of one course need, read once.
@@ -693,25 +888,17 @@ impl CourseContext {
             announcements: records.into_iter().map(|r| (r.id, r)).collect(),
         }
     }
-
-    /// Canvas file id → v2 path, for the media a v1 course directory
-    /// recorded (`local_path` is relative to that v1 directory).
-    fn files(&self, v1_dir: &str, renamed: &BTreeMap<&str, &str>) -> BTreeMap<u64, PathBuf> {
-        self.announcements
-            .values()
-            .flat_map(|r| &r.media)
-            .filter_map(|m| {
-                let v1 = format!("{v1_dir}/{}", m.local_path.as_deref()?);
-                Some((m.file_id?, PathBuf::from(*renamed.get(v1.as_str())?)))
-            })
-            .collect()
-    }
 }
 
 /// Give every generated note journal `ts` renamed its frontmatter and local
 /// links. A note that fails is logged and counted, never fatal: `sync`
 /// rewrites it again from Canvas.
-async fn rewrite_notes(library: &Path, ts: &str, summary: &mut Summary) -> io::Result<()> {
+async fn rewrite_notes(
+    library: &Path,
+    ts: &str,
+    map: &LinkMap,
+    summary: &mut Summary,
+) -> io::Result<()> {
     let entries = apply::read_journal(&apply::journal_path(library, ts))?;
     let renames: Vec<(&str, &str)> = entries
         .iter()
@@ -724,7 +911,6 @@ async fn rewrite_notes(library: &Path, ts: &str, summary: &mut Summary) -> io::R
             _ => None,
         })
         .collect();
-    let renamed: BTreeMap<&str, &str> = renames.iter().copied().collect();
     let mut contexts: BTreeMap<&str, CourseContext> = BTreeMap::new();
     for (from, to) in &renames {
         if rewrite::generated_kind(Path::new(from)).is_none() {
@@ -733,8 +919,7 @@ async fn rewrite_notes(library: &Path, ts: &str, summary: &mut Summary) -> io::R
         let Some(kind) = rewrite::generated_kind(Path::new(to)) else {
             continue;
         };
-        let (Some((course, _)), Some((v1_dir, _))) = (to.split_once('/'), from.split_once('/'))
-        else {
+        let Some((course, _)) = to.split_once('/') else {
             continue;
         };
         if !contexts.contains_key(course) {
@@ -751,22 +936,24 @@ async fn rewrite_notes(library: &Path, ts: &str, summary: &mut Summary) -> io::R
             disponible: None,
         };
         if kind == DocKind::Announcement {
-            fm.canvas_id = v1_announcement_id(from);
+            fm.canvas_id = relink::v1_announcement_id(from);
             if let Some(record) = fm.canvas_id.and_then(|id| ctx.announcements.get(&id)) {
                 fm.url = record.html_url.clone();
                 fm.publicado = record.posted_at.clone();
             }
         }
-        let files = ctx.files(v1_dir, &renamed);
         let job = Rewrite {
             root: library,
             path: Path::new(to),
-            frontmatter: &fm,
-            files: &files,
+            frontmatter: Some(&fm),
+            links: map,
             backup_ts: ts,
         };
         match rewrite::rewrite_file(&job).await {
-            Ok(RewriteOutcome::Rewritten { .. }) => summary.rewritten += 1,
+            Ok(RewriteOutcome::Rewritten { local, .. }) => {
+                summary.rewritten += 1;
+                summary.links += local;
+            }
             Ok(RewriteOutcome::Unchanged) => {}
             Err(e) => {
                 tracing::warn!(path = %to, error = %e, "generated note not rewritten");
@@ -775,12 +962,6 @@ async fn rewrite_notes(library: &Path, ts: &str, summary: &mut Summary) -> io::R
         }
     }
     Ok(())
-}
-
-/// The announcement id at the end of a v1 body name: `…_<id>.md`.
-fn v1_announcement_id(path: &str) -> Option<u64> {
-    let stem = path.rsplit('/').next()?.strip_suffix(".md")?;
-    stem.rsplit_once('_')?.1.parse().ok()
 }
 
 /// Put every note journal `ts` rewrote back to its backup, setting the
@@ -915,11 +1096,14 @@ mod tests {
     #[test]
     fn v1_announcement_id_reads_the_trailing_id() {
         assert_eq!(
-            v1_announcement_id("X_Y/announcements/2026-06-17_Bienvenidos_al_curso_5001.md"),
+            relink::v1_announcement_id("X_Y/announcements/2026-06-17_Bienvenidos_al_curso_5001.md"),
             Some(5001)
         );
-        assert_eq!(v1_announcement_id("X/announcements/sin_id.md"), None);
-        assert_eq!(v1_announcement_id("X/announcements/a_1.txt"), None);
+        assert_eq!(
+            relink::v1_announcement_id("X/announcements/sin_id.md"),
+            None
+        );
+        assert_eq!(relink::v1_announcement_id("X/announcements/a_1.txt"), None);
     }
 
     #[test]

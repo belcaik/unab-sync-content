@@ -31,6 +31,7 @@ pub mod apply;
 pub mod detect;
 pub mod ensure;
 pub mod plan;
+pub mod relink;
 pub mod rewrite;
 
 pub use ensure::{ensure_v2, migrate, undo, MigrateError, Outcome, Target};
