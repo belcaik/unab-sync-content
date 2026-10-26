@@ -192,8 +192,9 @@ on. There is nothing to opt into. What the migration does, and does not do:
   file, page, assignment, announcement, module item or course that the
   library has a copy of points at that copy (relative path, works in
   Obsidian), in this course or another one; a `https://<canvas>/mailto:`
-  becomes a plain `mailto:`. What has no local copy, or could be one of two
-  same-size files, keeps its Canvas link. The original of every note it
+  becomes a plain `mailto:`. What has no local copy, or is only known by its
+  size (a v1 attachment the link text does not name), keeps its Canvas link.
+  Raw HTML in a note (`<img … width=…>`) only gets its `src` changed. The original of every note it
   rewrites is kept under `.u_crawler/backup/<timestamp>/`.
 - A library migrated by an earlier version, whose notes still link to
   Canvas, is relinked once by the next writer command (or by

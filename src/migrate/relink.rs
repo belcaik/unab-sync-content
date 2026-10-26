@@ -77,6 +77,10 @@ pub struct CourseSource {
     pub has_state: bool,
     /// Every regular file of the course outside `.u_crawler/`, with its size.
     pub files: BTreeMap<String, u64>,
+    /// SHA-1 (hex) of each attachment whose size another attachment of the
+    /// course shares: same bytes are the same file, whichever copy a link
+    /// points at.
+    pub digests: BTreeMap<String, String>,
     /// Every generated note ([`rewrite::generated_kind`]) with its frontmatter.
     pub notes: BTreeMap<String, Note>,
     /// `(file id, local_path)` of the media `anuncios/index.json` lists.
@@ -84,6 +88,9 @@ pub struct CourseSource {
     /// `(announcement id, body_md_path)` of the records `anuncios/index.json`
     /// lists (v2: relative to the course; v1: `announcements/<name>`).
     pub index_notes: Vec<(u64, String)>,
+    /// Hosts of the Canvas URLs the course records (notes' `url`,
+    /// `index.json`'s `html_url`): where its Canvas lives.
+    pub hosts: BTreeSet<String>,
 }
 
 /// A generated note.
@@ -130,6 +137,8 @@ struct IndexRecord {
     #[serde(default)]
     body_md_path: Option<String>,
     #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
     media: Vec<IndexMedia>,
 }
 
@@ -159,6 +168,14 @@ pub fn read_sources(root: &Path) -> io::Result<Sources> {
             ..CourseSource::default()
         };
         list_files(&course_dir, "", &mut course.files)?;
+        let mut by_size: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for (rel, size) in course.attachments() {
+            by_size.entry(size).or_default().push(rel.to_string());
+        }
+        for rel in by_size.into_values().filter(|r| r.len() > 1).flatten() {
+            let bytes = std::fs::read(course_dir.join(&rel))?;
+            course.digests.insert(rel, sha1_hex(&bytes));
+        }
         let state_path = library::state_path(&course_dir);
         match std::fs::read(&state_path) {
             Ok(bytes) => match serde_json::from_slice::<State>(&bytes) {
@@ -178,6 +195,9 @@ pub fn read_sources(root: &Path) -> io::Result<Sources> {
             match serde_json::from_str::<Vec<IndexRecord>>(&text) {
                 Ok(records) => {
                     for record in records {
+                        course
+                            .hosts
+                            .extend(record.html_url.as_deref().and_then(links::url_host));
                         if let (Some(id), Some(body)) = (record.id, record.body_md_path) {
                             course.index_notes.push((id, body));
                         }
@@ -206,6 +226,12 @@ pub fn read_sources(root: &Path) -> io::Result<Sources> {
                 }
             };
             let (_, body) = frontmatter::strip_bom(&text);
+            let fm = frontmatter::parse(body).ok().flatten();
+            course.hosts.extend(
+                fm.as_ref()
+                    .and_then(|f| f.url.as_deref())
+                    .and_then(links::url_host),
+            );
             let mut hashes = BTreeSet::from([sha1_hex(text.as_bytes())]);
             for batch in &backups {
                 if let Ok(original) = std::fs::read(batch.join(dir).join(rel)) {
@@ -216,7 +242,7 @@ pub fn read_sources(root: &Path) -> io::Result<Sources> {
                 rel.clone(),
                 Note {
                     kind,
-                    frontmatter: frontmatter::parse(body).ok().flatten(),
+                    frontmatter: fm,
                     file_ids: links::canvas_file_ids(&text).collect(),
                     hashes,
                 },
@@ -359,6 +385,7 @@ pub fn build(sources: &Sources) -> LinkMap {
     let mut announcements = Votes::new();
     let mut module_items = Votes::new();
     for course in &sources.courses {
+        map.hosts.extend(course.hosts.iter().cloned());
         if let Some(id) = course.canvas_id {
             map.courses.insert(id, PathBuf::from(&course.dir));
         }
@@ -602,7 +629,7 @@ fn course_files(
         if out.contains_key(&id) {
             continue;
         }
-        if let Some(target) = by_size(&attachments, item) {
+        if let Some(target) = by_size(&attachments, &course.digests, item) {
             out.insert(
                 id,
                 match target {
@@ -619,27 +646,50 @@ fn course_files(
     out.into_iter().collect()
 }
 
-/// The attachment(s) a file entry can be, by its size and recorded name.
-fn by_size(attachments: &[(&str, u64)], item: &ItemState) -> Option<FileTarget> {
-    let size = item.size?;
-    let sized: Vec<&str> = attachments
-        .iter()
-        .filter(|(_, s)| *s == size)
-        .map(|(rel, _)| *rel)
-        .collect();
-    let named: Vec<&str> = match item.file_name.as_deref() {
-        Some(name) => sized
+/// The attachment(s) a file entry can be, by its recorded name and size.
+///
+/// With a recorded `file_name` (v2) only attachments with that name (and
+/// size) count: none means the copy is not on disk, and another file that
+/// happens to have the size is never taken for it. Several with the same
+/// bytes are copies of one file: the first is it. Without a name (v1), the
+/// size alone proves nothing: every attachment of that size is a candidate
+/// ([`FileTarget::Ambiguous`], even a single one), and a link reaches one
+/// only when its own text names it ([`LinkMap::resolve`]).
+fn by_size(
+    attachments: &[(&str, u64)],
+    digests: &BTreeMap<String, String>,
+    item: &ItemState,
+) -> Option<FileTarget> {
+    let candidates: Vec<&str> = match item.file_name.as_deref() {
+        Some(name) => attachments
             .iter()
-            .copied()
-            .filter(|rel| rel.rsplit('/').next() == Some(name))
+            .filter(|(rel, size)| {
+                rel.rsplit('/').next() == Some(name) && item.size.is_none_or(|s| s == *size)
+            })
+            .map(|(rel, _)| *rel)
             .collect(),
-        None => Vec::new(),
+        None => {
+            let size = item.size?;
+            attachments
+                .iter()
+                .filter(|(_, s)| *s == size)
+                .map(|(rel, _)| *rel)
+                .collect()
+        }
     };
-    let pool = if named.is_empty() { sized } else { named };
-    match pool.as_slice() {
-        [] => None,
-        [one] => Some(FileTarget::Path(PathBuf::from(one))),
-        many => Some(FileTarget::Ambiguous(
+    // Same bytes, same file: keep one copy of each content.
+    let mut seen = BTreeSet::new();
+    let distinct: Vec<&str> = candidates
+        .into_iter()
+        .filter(|rel| match digests.get(*rel) {
+            Some(digest) => seen.insert(digest.clone()),
+            None => true,
+        })
+        .collect();
+    match (item.file_name.is_some(), distinct.as_slice()) {
+        (_, []) => None,
+        (true, [one]) => Some(FileTarget::Path(PathBuf::from(one))),
+        (_, many) => Some(FileTarget::Ambiguous(
             many.iter().map(PathBuf::from).collect(),
         )),
     }
@@ -1002,9 +1052,10 @@ mod tests {
             files[&2],
             FileTarget::Path(p("modulos/02-semana/adjuntos/guia-2.pdf"))
         );
+        // A size alone (v1, no name) is only a candidate, even when unique.
         assert_eq!(
             files[&3],
-            FileTarget::Path(p("modulos/02-semana/adjuntos/rubrica.docx"))
+            FileTarget::Ambiguous(vec![p("modulos/02-semana/adjuntos/rubrica.docx")])
         );
         assert_eq!(
             files[&4],
@@ -1015,6 +1066,66 @@ mod tests {
             FileTarget::Path(p("anuncios/adjuntos/coder-s3.zip"))
         );
         assert!(!files.contains_key(&5));
+    }
+
+    #[test]
+    fn a_recorded_name_not_on_disk_is_never_matched_by_size() {
+        let mut c = course();
+        c.files
+            .insert("modulos/01-intro/adjuntos/otro-archivo.pdf".into(), 1234);
+        c.state.items.insert(
+            "file:500".into(),
+            entry(Some(1234), Some("guia-3.pdf"), None),
+        );
+        // v1, no name: the one file of that size is a candidate, not an answer.
+        c.state
+            .items
+            .insert("file:501".into(), entry(Some(1234), None, None));
+        let files: BTreeMap<u64, FileTarget> =
+            course_files(&c, &BTreeMap::new()).into_iter().collect();
+        assert!(!files.contains_key(&500));
+        let mut map = LinkMap::default();
+        map.files.insert(501, files[&501].clone());
+        assert_eq!(
+            map.resolve(&CanvasRef::File(501), "Guía 3"),
+            links::Resolution::Ambiguous
+        );
+        assert_eq!(
+            map.resolve(&CanvasRef::File(501), "otro archivo.pdf"),
+            links::Resolution::Local(PathBuf::from(
+                "ramo/modulos/01-intro/adjuntos/otro-archivo.pdf"
+            ))
+        );
+    }
+
+    #[test]
+    fn copies_with_the_same_bytes_are_one_file() {
+        let mut c = course();
+        for rel in [
+            "modulos/01-intro/adjuntos/guia.pdf",
+            "modulos/02-semana/adjuntos/guia.pdf",
+        ] {
+            c.files.insert(rel.into(), 777);
+            c.digests.insert(rel.into(), "same".into());
+        }
+        c.state
+            .items
+            .insert("file:600".into(), entry(Some(777), Some("guia.pdf"), None));
+        c.state
+            .items
+            .insert("file:601".into(), entry(Some(777), None, None));
+        let files: BTreeMap<u64, FileTarget> =
+            course_files(&c, &BTreeMap::new()).into_iter().collect();
+        let first = PathBuf::from("ramo/modulos/01-intro/adjuntos/guia.pdf");
+        assert_eq!(files[&600], FileTarget::Path(first.clone()));
+        // Without a name, still one candidate: the link text must name it.
+        assert_eq!(files[&601], FileTarget::Ambiguous(vec![first]));
+        // Different bytes with the recorded name: two files, ambiguous.
+        c.digests
+            .insert("modulos/02-semana/adjuntos/guia.pdf".into(), "other".into());
+        let files: BTreeMap<u64, FileTarget> =
+            course_files(&c, &BTreeMap::new()).into_iter().collect();
+        assert!(matches!(&files[&600], FileTarget::Ambiguous(v) if v.len() == 2));
     }
 
     #[test]

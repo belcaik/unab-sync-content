@@ -50,6 +50,9 @@ pub async fn run_sync(
     // Where every Canvas resource already is, so a note can link to another
     // course's copies too; each course adds what it names and downloads.
     let mut links = relink::disk_map(&root)?;
+    links
+        .hosts
+        .extend(crate::links::url_host(&cfg.canvas.base_url));
 
     let selected_courses: Vec<crate::canvas::Course> = if let Some(cid) = filter_course_id {
         if ignored.contains(&cid.to_string()) {

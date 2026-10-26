@@ -41,8 +41,9 @@
 //!   [`LINKS_PAGE`] ([`LINKS_BODY`]): file previews, downloads and API URLs,
 //!   pages, a module item, an assignment, an announcement, a page and the
 //!   home of another course, quizzes, iframes, external tools, equation
-//!   images, a `mailto:` and one Canvas mangled into
-//!   `https://<canvas>/mailto:`. Two attachments have the same size
+//!   images, a `mailto:`, one Canvas mangled into `https://<canvas>/mailto:`,
+//!   a page of another Canvas host, and raw HTML (`<img … width=…>`) that
+//!   html2md keeps. Two attachments have the same size
 //!   ([`SAME_SIZE_FILES`]); `state.json` records each attachment's size
 //!   (no name, as v1 did) and each page's slug.
 //!
@@ -88,7 +89,7 @@ pub const LINKS_BODY: &str = "\
 - [Guia\\_1.PDF](https://canvas.example.edu/courses/9001/files/1001/preview?verifier=abc&wrap=1)
 - [descarga](/courses/9001/files/1002/download?download_frd=1)
 - ![Diagrama](https://canvas.example.edu/courses/9001/files/1003/preview)
-- [Rubrica](https://canvas.example.edu/api/v1/courses/9001/files/1004)
+- [Rubrica final.docx](https://canvas.example.edu/api/v1/courses/9001/files/1004)
 - [rubrica](https://canvas.example.edu/courses/9001/files/1004?wrap=1)
 - [CodeR](/courses/9001/files/4242/preview)
 - [Fase 1](https://canvas.example.edu/courses/9001/pages/informacion-general)
@@ -104,6 +105,9 @@ pub const LINKS_BODY: &str = "\
 - ![ecuacion](https://canvas.example.edu/equation_images/x%2By)
 - [correo](https://canvas.example.edu/mailto:docente@example.edu)
 - [correo bueno](mailto:docente@example.edu)
+- [otro tenant](https://otro.instructure.com/courses/9001/pages/contenidos)
+
+<p><img src=\"https://canvas.example.edu/courses/9001/files/1003/preview\" alt=\"Diagrama.png\" width=\"640\" height=\"480\"></p>
 
 ```
 [en codigo](https://canvas.example.edu/courses/9001/pages/contenidos)

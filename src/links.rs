@@ -14,7 +14,7 @@
 use crate::layout;
 use regex::Regex;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -222,6 +222,10 @@ pub enum CanvasRef {
 /// points links at. Every path is relative to the library root.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkMap {
+    /// The Canvas hosts (lowercase) the library's links come from. An
+    /// absolute link on any other host is not Canvas and is left alone.
+    /// Empty: any host is taken for Canvas.
+    pub hosts: BTreeSet<String>,
     /// Canvas course id → course directory. A link to the course itself goes
     /// to its `README.md`.
     pub courses: BTreeMap<u64, PathBuf>,
@@ -382,6 +386,18 @@ pub fn canvas_ref(url: &str) -> Option<CanvasRef> {
     canvas_file_ids(path).next().map(CanvasRef::File)
 }
 
+/// The host of an absolute `http(s)` URL, lowercase, without port.
+pub fn url_host(url: &str) -> Option<String> {
+    let url = destination_body(url);
+    if !starts_with_http(url) {
+        return None;
+    }
+    let rest = &url[url.find("//")? + 2..];
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 /// What one [`rewrite_canvas_links`] call did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LinkStats {
@@ -411,6 +427,7 @@ pub fn rewrite_canvas_links(markdown: &str, md_path: &Path, map: &LinkMap) -> (S
         md_path,
         map,
         stats: LinkStats::default(),
+        in_tag: None,
     };
     let mut out = String::with_capacity(markdown.len());
     let mut rest = markdown;
@@ -453,7 +470,18 @@ struct Cx<'a> {
     md_path: &'a Path,
     map: &'a LinkMap,
     stats: LinkStats,
+    /// A raw HTML tag opened on an earlier line is still open, with this
+    /// attribute quote (if any) unclosed.
+    in_tag: Option<Option<char>>,
 }
+
+/// `src` / `href` attribute values of a raw HTML tag. Literal pattern, so
+/// `Regex::new` only fails if this string is edited into something invalid.
+static HTML_URL_ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(\s(?:src|href)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#).unwrap());
+/// `alt` / `title` of a raw HTML tag: its text, for [`LinkMap::resolve`].
+static HTML_LABEL_ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)\s(?:alt|title)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
 
 fn line_bounds(s: &str) -> (usize, usize) {
     match s.find('\n') {
@@ -498,6 +526,19 @@ fn close_fence(line: &str, ch: char, n: usize) -> bool {
 fn rewrite_line(line: &str, code: &mut Option<usize>, cx: &mut Cx<'_>) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
+    if let Some(mut quote) = cx.in_tag {
+        match tag_end(line, &mut quote) {
+            Some(end) => {
+                out.push_str(&rewrite_tag(&line[..end], cx));
+                i = end;
+                cx.in_tag = None;
+            }
+            None => {
+                cx.in_tag = Some(quote);
+                return rewrite_tag(line, cx);
+            }
+        }
+    }
     if let Some(n) = *code {
         match find_backtick_run(line, n) {
             Some(end) => {
@@ -526,6 +567,25 @@ fn rewrite_line(line: &str, code: &mut Option<usize>, cx: &mut Cx<'_>) -> String
             }
             continue;
         }
+        // An autolink starts with `http`, which `starts_html_tag` excludes.
+        if byte == b'<' && starts_html_tag(&line[i + 1..]) {
+            // Raw HTML html2md kept (`<img … width=…>`, `<iframe>`): only
+            // its `src` / `href` values are rewritten, never into markdown.
+            let mut quote = None;
+            match tag_end(&line[i + 1..], &mut quote) {
+                Some(end) => {
+                    let close = i + 1 + end;
+                    out.push_str(&rewrite_tag(&line[i..close], cx));
+                    i = close;
+                    continue;
+                }
+                None => {
+                    out.push_str(&rewrite_tag(&line[i..], cx));
+                    cx.in_tag = Some(quote);
+                    break;
+                }
+            }
+        }
         let interesting = matches!(byte, b'[' | b'!' | b'<' | b'h' | b'H');
         let bare_ok = (byte != b'h' && byte != b'H') || url_boundary(line, i);
         if interesting && bare_ok {
@@ -550,6 +610,56 @@ fn rewrite_line(line: &str, code: &mut Option<usize>, cx: &mut Cx<'_>) -> String
 struct Found {
     len: usize,
     replacement: Option<String>,
+}
+
+/// `s` (what follows a `<`) opens an HTML tag, closing tag, comment or
+/// declaration rather than an autolink or a lone `<`.
+fn starts_html_tag(s: &str) -> bool {
+    match s.chars().next() {
+        Some('/' | '!' | '?') => true,
+        Some(c) => c.is_ascii_alphabetic() && !starts_with_http(s),
+        None => false,
+    }
+}
+
+/// The end (exclusive) of the tag `s` is inside: one past its `>`, outside
+/// attribute quotes. `quote` carries an unclosed quote across lines.
+fn tag_end(s: &str, quote: &mut Option<char>) -> Option<usize> {
+    for (i, c) in s.char_indices() {
+        match *quote {
+            Some(q) if c == q => *quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => *quote = Some(c),
+            None if c == '>' => return Some(i + 1),
+            None => {}
+        }
+    }
+    None
+}
+
+/// A raw HTML tag with each `src` / `href` value that has a local copy
+/// (`alt` or `title` being the link text) replaced by its relative path (already percent-encoded, so it needs no
+/// HTML escaping). Everything else in the tag stays byte for byte.
+fn rewrite_tag(tag: &str, cx: &mut Cx<'_>) -> String {
+    let label = HTML_LABEL_ATTR_RE
+        .captures(tag)
+        .and_then(|cap| cap.get(1).or_else(|| cap.get(2)))
+        .map_or("", |m| m.as_str());
+    let mut out = String::with_capacity(tag.len());
+    let mut last = 0;
+    for cap in HTML_URL_ATTR_RE.captures_iter(tag) {
+        let Some(value) = cap.get(2).or_else(|| cap.get(3)) else {
+            continue;
+        };
+        let Some(link) = local_link(value.as_str(), label, cx) else {
+            continue;
+        };
+        out.push_str(&tag[last..value.start()]);
+        out.push_str(&link.dest);
+        last = value.end();
+    }
+    out.push_str(&tag[last..]);
+    out
 }
 
 fn match_link(s: &str, allow_ref: bool, cx: &mut Cx<'_>) -> Option<Found> {
@@ -673,6 +783,13 @@ struct LocalLink {
 /// The new destination of the link `url` with text `label`, counted in
 /// `cx.stats`, or `None` to leave it alone.
 fn local_link(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<LocalLink> {
+    if !cx.map.hosts.is_empty() {
+        if let Some(host) = url_host(url) {
+            if !cx.map.hosts.contains(&host) {
+                return None;
+            }
+        }
+    }
     let target = canvas_ref(url)?;
     let link = match cx.map.resolve(&target, label) {
         Resolution::Local(path) => {
@@ -1417,5 +1534,44 @@ Usa `[a](https://canvas.example.com/files/22)` tal cual.
         assert_eq!(map.resolve(&r, "guia"), Resolution::Ambiguous);
         assert_eq!(map.resolve(&r, ""), Resolution::Ambiguous);
         assert_eq!(map.resolve(&CanvasRef::File(3), "x"), Resolution::Remote);
+    }
+
+    #[test]
+    fn raw_html_attributes_get_a_path_never_a_markdown_link() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+<p><img src=\"https://canvas.unab.cl/courses/9001/files/1/preview\" alt=\"x\" width=\"300\" height=\"200\"></p>
+<iframe src='https://canvas.unab.cl/courses/9001/pages/fase-1' width=\"640\"
+  title=\"a > b\" height=\"480\"></iframe> y https://canvas.unab.cl/courses/9001/pages/fase-1
+<a href=\"https://canvas.unab.cl/courses/9001/quizzes/3\">quiz</a> <br/> <!-- https://canvas.unab.cl/courses/9002 -->
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+<p><img src=\"../01-intro/adjuntos/rubrica.docx\" alt=\"x\" width=\"300\" height=\"200\"></p>
+<iframe src='01-fase-1.md' width=\"640\"
+  title=\"a > b\" height=\"480\"></iframe> y [01-fase-1.md](01-fase-1.md)
+<a href=\"https://canvas.unab.cl/courses/9001/quizzes/3\">quiz</a> <br/> <!-- https://canvas.unab.cl/courses/9002 -->
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 3);
+        assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn links_to_another_host_are_not_canvas() {
+        let mut map = full_map();
+        map.hosts.insert("canvas.unab.cl".into());
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "[yt](https://www.youtube.com/courses/9001) [otro](https://otro.instructure.com/courses/9001/pages/fase-1) [ok](https://CANVAS.unab.cl/courses/9001/pages/fase-1) [rel](/courses/9001/pages/fase-1)\n";
+        let (out, _) = rewrite_canvas_links(input, note, &map);
+        assert_eq!(
+            out,
+            "[yt](https://www.youtube.com/courses/9001) [otro](https://otro.instructure.com/courses/9001/pages/fase-1) [ok](01-fase-1.md) [rel](01-fase-1.md)\n"
+        );
+        assert_eq!(
+            url_host("https://user@Canvas.unab.cl:443/x"),
+            Some("canvas.unab.cl".into())
+        );
+        assert_eq!(url_host("/courses/1"), None);
     }
 }

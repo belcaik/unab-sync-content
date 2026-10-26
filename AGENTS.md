@@ -261,8 +261,12 @@ or a course home (`/courses/<n>`, → its `README.md`); the link becomes the
 path from the note, percent-encoded outside `[A-Za-z0-9._~/-]`, with
 Canvas's query and fragment dropped. `https://<canvas>/mailto:x` becomes
 `mailto:x`. Quizzes, `media_attachments_iframe`, `external_tools`,
-`equation_images`, a resource without a local copy, and anything in code
-stay as they are. The map spans every course, so a link into another
+`equation_images`, a resource without a local copy, anything in code, and
+an absolute link on a host that is not the library's Canvas
+(`LinkMap::hosts`: from the notes' `url`, `index.json`, `canvas.base_url`)
+stay as they are. Raw HTML html2md keeps (`<img … width=…>`, `<iframe>`)
+never gets markdown inside it: only its `src` / `href` values become the
+relative path (`alt` / `title` as the link text). The map spans every course, so a link into another
 course's directory works. `sync` builds it from disk at the start
 (`migrate::relink::disk_map`), adds each course's pages and assignments
 from the module listing before writing any note (a page can link to one
@@ -490,10 +494,13 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    v1 wrote, matched against each note's bytes and its backups; announcement
    ids from `index.json` (`body_md_path`) or from the journal's rename of
    a v1 `…_<id>.md`; announcement media from `index.json` (`local_path`,
-   as is or through the journal's rename); a `file:<id>` whose `size` (and
-   recorded `file_name`) matches one attachment of its course (several:
-   the link's own text must name one, as `layout::attachment_file` or slug,
-   else it stays remote); a `page:<slug>` whose slug names one page note
+   as is or through the journal's rename); a `file:<id>` with a recorded
+   `file_name`: the attachment of its course with that name and size (none:
+   the copy is gone, and another file of that size is never taken for it;
+   several with the same bytes: the first); a `file:<id>` without a name
+   (v1): every attachment of that size is only a candidate, and a link
+   reaches one when its own text names it (`layout::attachment_file` or
+   slug), else it stays remote; a `page:<slug>` whose slug names one page note
    of its course (`NN-<slug>.md`, needs the course's Canvas id). Two notes
    claiming one resource at the same level leave it remote (logged), as
    does an ambiguous file (logged per note). Module items are not on disk

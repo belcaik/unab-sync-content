@@ -72,13 +72,15 @@ fn migrated(outcome: Outcome) -> Result<Summary, Box<dyn Error>> {
 }
 
 /// The body of [`LINKS_NOTE`] once migrated offline: what has a single
-/// local copy points at it, the rest stays as Canvas wrote it.
+/// local copy points at it, the rest stays as Canvas wrote it. v1 recorded
+/// no attachment names, so a file is reached by size only when the link's
+/// text names it (`[rubrica]` does not: `rubrica-final.docx`).
 const LOCAL_BODY: &str = "\
 - [Guia\\_1.PDF](../01-informacion-general/adjuntos/guia-1.pdf)
 - [descarga](/courses/9001/files/1002/download?download_frd=1)
 - ![Diagrama](../01-informacion-general/adjuntos/diagrama.png)
-- [Rubrica](../01-informacion-general/adjuntos/rubrica-final.docx)
-- [rubrica](../01-informacion-general/adjuntos/rubrica-final.docx)
+- [Rubrica final.docx](../01-informacion-general/adjuntos/rubrica-final.docx)
+- [rubrica](https://canvas.example.edu/courses/9001/files/1004?wrap=1)
 - [CodeR](../../anuncios/adjuntos/coder-s3.zip)
 - [Fase 1](../01-informacion-general/01-informacion-general.md)
 - [Contenidos](01-contenidos.md)
@@ -93,6 +95,9 @@ const LOCAL_BODY: &str = "\
 - ![ecuacion](https://canvas.example.edu/equation_images/x%2By)
 - [correo](mailto:docente@example.edu)
 - [correo bueno](mailto:docente@example.edu)
+- [otro tenant](https://otro.instructure.com/courses/9001/pages/contenidos)
+
+<p><img src=\"../01-informacion-general/adjuntos/diagrama.png\" alt=\"Diagrama.png\" width=\"640\" height=\"480\"></p>
 
 ```
 [en codigo](https://canvas.example.edu/courses/9001/pages/contenidos)
@@ -100,9 +105,10 @@ const LOCAL_BODY: &str = "\
 ";
 
 /// Local links resolved and not found: every relative markdown destination
-/// of every generated note, percent-decoded, must be a file.
+/// (and raw HTML `src` / `href`) of every generated note, percent-decoded,
+/// must be a file.
 fn broken_links(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
-    let link = Regex::new(r"\]\(([^)\s]+)")?;
+    let link = Regex::new(r#"\]\(([^)\s]+)|(?:src|href)="([^"]+)""#)?;
     let mut broken = Vec::new();
     for rel in v1::hash_tree(root)?.keys() {
         if generated_kind(Path::new(rel)).is_none() {
@@ -111,7 +117,9 @@ fn broken_links(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
         let text = fs::read_to_string(root.join(rel))?;
         let dir = Path::new(rel).parent().unwrap_or(Path::new(""));
         for cap in link.captures_iter(&text) {
-            let dest = &cap[1];
+            let Some(dest) = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()) else {
+                continue;
+            };
             if dest.contains(':') || dest.starts_with('/') || dest.starts_with('#') {
                 continue;
             }

@@ -550,6 +550,8 @@ async fn link_map(
     let mut map = relink::build(&sources);
     let learned = match canvas {
         Some(client) => {
+            map.hosts
+                .extend(client.base.host_str().map(str::to_ascii_lowercase));
             let learned = relink::learn(client, &sources, &map).await;
             learned.apply(&sources, &mut map);
             Some(learned)

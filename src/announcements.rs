@@ -60,6 +60,9 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     }
 
     let mut links = relink::disk_map(&root)?;
+    links
+        .hosts
+        .extend(crate::links::url_host(&cfg.canvas.base_url));
     let course_pb = progress_bar(selected.len() as u64, "Scanning announcements");
     let mut totals = CourseSummary::default();
     for course in selected {
