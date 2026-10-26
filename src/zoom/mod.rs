@@ -48,8 +48,9 @@ pub async fn run_flow(course_id: u64, since: Option<String>) -> anyhow::Result<(
     let cfg = crate::config::Config::load_or_init()?;
     let naming = CourseNaming::new(&cfg.layout)?;
     let root = PathBuf::from(&cfg.download_root);
-    let lib = library::read(&root)?;
     let canvas = CanvasClient::from_config().await?;
+    crate::migrate::ensure::ensure_configured(&cfg, &naming, &canvas, false).await?;
+    let lib = library::read(&root)?;
     let courses = canvas.list_courses().await?;
     let dirs = library::course_dirs(&naming, &lib, &courses);
 

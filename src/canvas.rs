@@ -274,6 +274,13 @@ impl CanvasClient {
         ))?;
         Ok(self.get_json::<PageObj>(url, "page").await?.0)
     }
+    /// One course by id. Answers for a course that is no longer active too,
+    /// which the active list does not include.
+    pub async fn get_course(&self, course_id: u64) -> Result<Course, CanvasError> {
+        let url = self.base.join(&format!("/api/v1/courses/{course_id}"))?;
+        Ok(self.get_json::<Course>(url, "course").await?.0)
+    }
+
     pub async fn get_file(&self, file_id: u64) -> Result<FileObj, CanvasError> {
         let url = self.base.join(&format!("/api/v1/files/{file_id}"))?;
         Ok(self.get_json::<FileObj>(url, "file").await?.0)

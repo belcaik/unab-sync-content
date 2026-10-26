@@ -39,6 +39,7 @@ pub async fn run_discovery(filter_course_id: Option<u64>, dry_run: bool) -> anyh
     let http = build_http_client(&cfg);
     let httpctx = HttpCtx::new(&cfg, http);
     let canvas = CanvasClient::from_config().await?;
+    crate::migrate::ensure::ensure_configured(&cfg, &naming, &canvas, dry_run).await?;
 
     let courses = canvas.list_courses().await?;
     let lib = library::read(&root)?;

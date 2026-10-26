@@ -16,17 +16,24 @@
 //! - [`apply::apply`] carries a plan out: a write-ahead journal under
 //!   `.u_crawler/migrations/`, `rename(2)` without replacement, BLAKE3 for
 //!   collisions; [`apply::undo`] reverses a journal.
+//! - [`ensure`](crate::migrate::ensure) chains them: resume, plan, apply, rewrite, index files and
+//!   `.u_crawler/library.json`. It is `u_crawler migrate`, and
+//!   [`ensure_v2`](crate::migrate::ensure::ensure_v2) runs it at the start of every writer command.
 //!
 //! [`scan`], [`detect`] and [`plan`] never open a file for writing. The
 //! writers are [`apply`], which renames and creates directories and
-//! `curso.json` (nothing deleted, copied or overwritten), and [`rewrite`],
+//! `curso.json` (nothing deleted, copied or overwritten), [`rewrite`],
 //! which only replaces a note [`rewrite::generated_kind`] accepts, after
-//! the backup exists. There is no `migrate` CLI.
+//! the backup exists, and [`ensure`](crate::migrate::ensure), which adds the root index files and
+//! `library.json`.
 
 pub mod apply;
 pub mod detect;
+pub mod ensure;
 pub mod plan;
 pub mod rewrite;
+
+pub use ensure::{ensure_v2, migrate, undo, MigrateError, Outcome, Target};
 
 use crate::layout::{self, CourseMeta, ExistingCourseDir};
 use serde::Deserialize;

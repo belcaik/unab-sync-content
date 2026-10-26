@@ -133,10 +133,19 @@ mounted-first trap in `main.rs`.
 | `calendar` | `--course-id`, `--dry-run` | Project assignment deadlines to `.ics` `VTODO` files under `calendar.caldir_root`: course-labelled `SUMMARY`, three-line `DESCRIPTION`, `DTSTART`/`DUE`. |
 | `recordings` | `--course-id`, `--dry-run` | Report Zoom links found across a course. Does not download. |
 | `zoom flow` | `--course-id`, `--since` | Capture a Zoom session and download its recordings. |
+| `migrate` | `--root`, `--dry-run`, `--undo <ts>`, `--canvas` | Migrate a layout v1 library to v2 (see "Migration"). `--root` migrates another tree and leaves the calendar alone; `--canvas` asks Canvas for names and module order. |
 | `status` | `--verbose` | Per-course file counts, storage, last sync, failed items. |
 
 `sync` honours `[announcements].enabled` and `[zoom].enabled`; either can be
 turned off without touching the command line.
+
+`sync`, `announcements`, `calendar` and `zoom flow` call
+`migrate::ensure::ensure_configured` (→ `ensure_v2`) before they read the
+library: a layout v1 library is migrated in place, always, with a `warn!`
+summary (spec: "Layout viejo en `sync`"). A failed migration stops the
+command with `12`, because writing v2 paths next to a half-migrated v1 tree
+would download everything again. Their `--dry-run` only reports what the
+migration would do.
 
 ### Exit Codes
 
@@ -147,6 +156,10 @@ turned off without touching the command line.
 | `11` | Auth error |
 | `12` | Network / rate-limit / runtime failure |
 | `13` | `calendar` partial failure: at least one course synced and at least one failed. All courses failing is **not** this code — it is a hard failure and surfaces as `12` instead. |
+
+`migrate` exits `0` on success (including "nothing to migrate"), `10` when
+the config cannot be loaded, and `12` on any migration failure — the journal
+holds what was done, so re-running resumes.
 
 Codes 14–15 are not currently emitted. Do not document them until they are.
 
@@ -275,9 +288,11 @@ key from then on. The file id is Zoom's `id` when the listing has one, else
 
 `INDEX.md` is rewritten only by a `sync` without `--course-id` (a filtered
 run has not seen the other courses' deadlines); `AGENTS.md`, the READMEs and
-`curso.json` are rewritten only when their text changed. Nothing writes
-`.u_crawler/library.json` yet — marking a library v2 is `migrate::ensure_v2`'s
-job (T7).
+`curso.json` are rewritten only when their text changed. A root `AGENTS.md`
+or `INDEX.md` whose first line is not ours (the vault's own) is never
+overwritten (`library::write_root_file`). `.u_crawler/library.json`
+(`{"layout_version": 2}`) is written by the migration only, as its last step
+(see "Migration").
 
 ### Directory Layout (Calendar)
 
@@ -291,10 +306,20 @@ job (T7).
 ```
 
 Separate tree from `download_root`, and named per course the same way
-(`library::course_dirs`, so a Canvas rename no longer moves it). While a
-course's v1 directory (`fsutil::course_dir`) is still under `caldir_root`,
-`calendar` skips that course as failed (`calendar::unmigrated_caldir`)
-rather than write its UIDs into a second directory; the migrator renames it. `deadlines/` and `windows/` are sibling directories
+(`library::course_dirs`, so a Canvas rename no longer moves it). A course
+whose v1 directory (`fsutil::course_dir`) is still under `caldir_root` —
+the library migration renames it along with the course, but a
+calendar-only deployment has no v1 library — has it renamed by `calendar`
+itself (`calendar::adopt_v1_caldir`, rename without replace) before its
+UIDs are written; `--dry-run` reports the rename and plans against the v1
+directory. When the v2 directory exists too, the course is skipped as
+failed rather than write its UIDs twice. When `download_root` overlaps
+`caldir_root` (the example container config), `calendar` names courses
+from Canvas alone (an empty `library::Library`: the caldir tree is not a
+library, and read as one its course directories would all be reserved),
+writes no `curso.json` there, and its state lives at
+`<caldir_root>/<ramo>/.u_crawler/state.json` — a v1 `state.json` carried
+along by the rename is moved there. `deadlines/` and `windows/` are sibling directories
 per course × semantics (spec D4), so a client can subscribe to one without
 the other; a third directory for recurring-class semantics has room to land
 later without moving anything under either. Filenames and UIDs derive from
@@ -370,6 +395,57 @@ cron, where nobody would notice until the data was gone.
 
 ---
 
+## Migration
+
+Layout v1 → v2 (`docs/specs/layout-v2.md`, "Reglas del migrador" and "API
+de `migrate::ensure`"). Rename only: there is no delete, copy or overwrite
+anywhere in it.
+
+`migrate::ensure::migrate` (the `migrate` command) runs, in this order:
+
+1. `apply::pending` → `apply::resume`: a run cut short is finished from its
+   journal's intent before anything is planned.
+2. `scan` → `plan` → `apply` under a new journal
+   `.u_crawler/migrations/<ts>.jsonl`, when the plan is not empty. With a
+   `CanvasClient` (`--canvas`, and always from the writer commands), Canvas
+   supplies official names and module positions (`ensure::canvas_courses`:
+   the active list plus `GET /courses/:id` for ids an `index.json` gave);
+   offline, modules are numbered in id order.
+3. Every generated note a journal renamed is rewritten
+   (`rewrite::rewrite_file`, backup under `.u_crawler/backup/<ts>/`, the
+   journal's `<ts>`): `ramo` + `tipo`, and for an announcement `canvas_id`
+   (from the v1 file name), `url` and `publicado` (from `index.json`), plus
+   Canvas `/files/<id>` links to the announcement media `index.json` lists.
+   Pages and assignments keep their other keys until the next `sync`. The
+   notes come from the journals, not the plan: without `library.json`, every
+   finished journal is replayed (idempotent), so a cut between the renames
+   and the rewrites is healed by the next run; with it, only this call's.
+   A note that fails is logged and counted, never fatal.
+4. Root `AGENTS.md` and `INDEX.md` (`library::write_library_files`).
+5. `.u_crawler/library.json`, last: until it exists the library is not v2.
+
+`ensure_v2` is the cheap gate the writer commands use: a root that does not
+exist is left alone; `library.json` present and no open journal returns at
+once without scanning or calling Canvas; otherwise it is `migrate`. A
+library root that overlaps `calendar.caldir_root` is never treated as a
+library (`MigrateError::Overlap` from `migrate`). `migrate` ignores the
+marker and always plans, so a v1 course copied into a v2 library is migrated
+by running it explicitly.
+
+`migrate --root P` migrates `P` and passes no caldir root (unless `P` is
+`download_root` itself): that is how a `cp -al` clone is migrated without
+touching the real calendar tree. Clone
+only when no journal is open: a resumed journal is appended to, and in a
+hardlink clone it is the original's inode.
+
+`migrate --undo <ts>` (`ensure::undo`): refuses an unknown journal or one
+with a newer journal still in effect, before touching anything; puts each
+rewritten note back from its backup, setting the current bytes aside under
+`.u_crawler/migrations/<ts>.undo/<path>`; then `apply::undo`; then sets
+`library.json` aside the same way, so the next writer command migrates
+again (for example after a `[layout]` change). Root `AGENTS.md`/`INDEX.md`
+stay. Every step is idempotent, so a cut undo is simply run again.
+
 ## Architecture
 
 ```
@@ -392,11 +468,12 @@ src/
   library.rs        # which directory each course owns (curso.json), shared by every writer; index-file writes
   index.rs          # layout v2 indexes: pure rendering of course/module README, curso.json, INDEX.md and AGENTS.md
   migrate/
-    mod.rs          # read-only scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs); no CLI yet
+    mod.rs          # read-only scan into an Inventory (files+sizes, index.json ids, curso.json, caldir dirs)
     detect.rs       # pure: v1 / v2 / empty, from the inventory
     plan.rs         # pure: inventory (+ optional Canvas metadata) -> Plan { courses, moves, edits, duplicates, conflicts, unresolved }
     apply.rs        # executor: write-ahead journal (.u_crawler/migrations/<ts>.jsonl), rename without replace, BLAKE3 collisions, resume, undo
     rewrite.rs      # backup under .u_crawler/backup/<ts>/, then atomic rewrite of generated markdown
+    ensure.rs       # the whole migration: resume, plan, apply, rewrite, root indexes, library.json; ensure_v2; undo
   ffmpeg.rs         # ffmpeg invocation
   progress.rs       # progress bars, registered with ui::bars()
   ui.rs             # user-facing output channel (status! macro)
@@ -433,7 +510,7 @@ Rules that hold today and should keep holding:
   indented prose line between two rules stay in the body. An existing
   non-symlink `.part` beside the note or the backup is refused (`PartExists`);
   `atomic_write` itself is unchanged and downloads still truncate their own
-  `.part`. There is no `migrate` CLI command. The frozen signatures are in
+  `.part`. `migrate::ensure` is its only caller outside the writers. The frozen signatures are in
   `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
@@ -447,6 +524,7 @@ Rules that hold today and should keep holding:
 * Submissions (own, bulk per course): `GET /api/v1/courses/{id}/students/submissions?student_ids[]=self&per_page=100`
 * Announcements: `GET /api/v1/courses/{id}/discussion_topics?only_announcements=true&per_page=100`
 * Pages: `GET /api/v1/courses/{id}/pages/{slug}`
+* Course by id (migration only, answers for inactive courses): `GET /api/v1/courses/{id}`
 * Files: `GET /api/v1/files/{id}`; download via `download_url` or `url`
 * Pagination: the `Link` header, `rel="next"`, capped at `MAX_PAGES`
 * Backoff: honour `Retry-After` (capped), exponential for 5xx, bounded by
@@ -557,6 +635,11 @@ Documented so they are not rediscovered as surprises:
   `caldir` preserves the value verbatim and never sends it to Google anyway,
   and the function is shared with the frozen `windows` `VEVENT`. Known debt,
   deliberately unfixed; fixing it means touching `VEVENT` bytes.
+* **Two writer commands started at once on an unmigrated library both
+  migrate.** `ensure_v2` takes no lock. Renames never replace and each run
+  has its own journal, so nothing is lost, but the slower run can stop with
+  `SourceMissing`; running it again finishes cleanly. Start the first run of
+  a new version alone (or run `u_crawler migrate` first).
 * **`recordings` does not honour `canvas.ignored_courses`,** while `sync` and
   `announcements` both do.
 * **`scan --course-id` counts file items but does not list them,** unlike the
@@ -584,7 +667,13 @@ regenerated with `U_CRAWLER_BLESS=1`; no-loss and second-run-is-empty checks),
 and its execution (`tests/migrate_apply.rs`: a cut at several points resumes
 from the journal to the same tree, undo restores the manifest byte for byte,
 a second run is a no-op, identical/different collisions, and a `cp -al` clone
-whose markdown is rewritten leaves the original untouched).
+whose markdown is rewritten leaves the original untouched), and the whole
+migration end to end, offline, as a `sync` runs it (`tests/migrate_ensure.rs`:
+it migrates and marks the library, a second pass does nothing, every hash of
+the v1 manifest survives (rewritten notes in their backup), the calendar
+directory follows its course, a dry run touches nothing, a cut mid-apply or
+after the renames heals on the next run, undo restores the v1 tree byte for
+byte, and a caldir used as `download_root` is never marked).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and

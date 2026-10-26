@@ -630,10 +630,7 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
                 }
             }
             Entry::Write { path } => {
-                let aside_rel = format!(
-                    "{}/{MIGRATIONS_DIR}/{ts}.{UNDO_SUFFIX}/{path}",
-                    layout::META_DIR
-                );
+                let aside_rel = format!("{}/{path}", undo_dir_rel(ts));
                 let file = exec.resolve(Root::Library, path)?;
                 let aside = exec.resolve(Root::Library, &aside_rel)?;
                 if exists(&file)? && !exists(&aside)? {
@@ -667,6 +664,12 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
         "migration undone"
     );
     Ok(report)
+}
+
+/// `.u_crawler/migrations/<ts>.undo`, relative to the library root: where an
+/// undo sets generated files aside instead of deleting them.
+pub fn undo_dir_rel(ts: &str) -> String {
+    format!("{}/{MIGRATIONS_DIR}/{ts}.{UNDO_SUFFIX}", layout::META_DIR)
 }
 
 fn migrations_dir(library: &Path) -> PathBuf {
@@ -1052,7 +1055,7 @@ fn same_content(src: &Path, src_hash: &blake3::Hash, other: &Path) -> Result<boo
 }
 
 /// `rename(2)` that never replaces `to` and never copies.
-fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
     match rename_os(from, to) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => Err(ApplyError::CrossDevice {

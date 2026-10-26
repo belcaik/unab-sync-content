@@ -16,9 +16,11 @@
 //! - [`index`] renders the layout v2 index files (per-course `README.md` and
 //!   `curso.json`, per-module `README.md`, root `INDEX.md` and `AGENTS.md`)
 //!   from an in-memory model both `sync` and `migrate` can build.
-//! - [`migrate`] scans a layout v1 library and plans its move to v2 without
-//!   deleting or overwriting a file. [`migrate::rewrite`] is the writer: it
-//!   copies a generated note under `.u_crawler/backup/` and then replaces it.
+//! - [`migrate`] scans a layout v1 library, plans its move to v2 and carries
+//!   it out without deleting or overwriting a file: renames behind a journal
+//!   ([`migrate::apply`]), generated notes rewritten after a backup
+//!   ([`migrate::rewrite`]). [`migrate::ensure_v2`] runs it at the start of
+//!   every writer command.
 //! - [`library`] reads the library root's `curso.json` files and tells every
 //!   writer which directory a course owns, so they all agree.
 //! - [`state`] records per-course what has been fetched and what failed.
@@ -56,7 +58,8 @@ pub mod links;
 /// Log file setup.
 pub mod logger;
 /// Retroactive layout v1 → v2 migration: read-only scan, pure detection and
-/// planning, plus [`migrate::rewrite`] for generated markdown.
+/// planning, the journaled executor, the markdown rewrite, and
+/// [`migrate::ensure`], which chains them.
 pub mod migrate;
 /// Progress bars.
 pub mod progress;

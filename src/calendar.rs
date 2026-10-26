@@ -774,11 +774,55 @@ pub fn plan(
 ///
 /// Its `.ics` files carry the very UIDs [`plan`] would write into
 /// `<caldir_root>/<dir_name>/`, and `caldir push` would then see two files
-/// per UID — the collision shape of Radicale issue #101. Until the migrator
-/// renames the directory, [`run_calendar`] skips such a course instead.
+/// per UID — the collision shape of Radicale issue #101. [`run_calendar`]
+/// renames it with [`adopt_v1_caldir`] (the library migration usually got
+/// there first), and skips the course when the v2 directory exists too.
 pub fn unmigrated_caldir(caldir_root: &Path, course: &Course, dir_name: &str) -> Option<PathBuf> {
     let v1 = fsutil::course_dir(caldir_root, course);
     (v1 != caldir_root.join(dir_name) && v1.is_dir()).then_some(v1)
+}
+
+/// Rename the course's layout v1 caldir directory `v1` (from
+/// [`unmigrated_caldir`]) to its v2 name, never replacing anything.
+///
+/// The library migration renames these along with the course, but a
+/// calendar-only deployment has no v1 library to plan from. Returns `false`
+/// when the v2 directory already exists: both carry the same UIDs, and
+/// which one is right is not this function's call.
+///
+/// With `state_inside` (the calendar state lives in the caldir tree,
+/// `download_root` being `caldir_root`), the v1 `state.json` that came along
+/// is moved to `.u_crawler/state.json`, where layout v2 reads it, unless one
+/// is already there.
+///
+/// # Errors
+///
+/// The rename or the directory creation failed.
+pub fn adopt_v1_caldir(
+    v1: &Path,
+    caldir_root: &Path,
+    dir_name: &str,
+    state_inside: bool,
+) -> Result<bool, crate::migrate::apply::ApplyError> {
+    let v2 = caldir_root.join(dir_name);
+    if v2.exists() {
+        return Ok(false);
+    }
+    crate::migrate::apply::rename_noreplace(v1, &v2)?;
+    let old_state = v2.join(library::STATE_FILE);
+    let new_state = library::state_path(&v2);
+    if state_inside && old_state.is_file() && !new_state.exists() {
+        if let Some(parent) = new_state.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                crate::migrate::apply::ApplyError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        crate::migrate::apply::rename_noreplace(&old_state, &new_state)?;
+    }
+    Ok(true)
 }
 
 /// Gate [`plan`] on both of a course's fetches having actually succeeded
@@ -980,12 +1024,24 @@ pub async fn run_calendar(
     let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
     let download_root = PathBuf::from(&cfg.download_root);
     let canvas = CanvasClient::from_config().await?;
+    let naming = CourseNaming::new(&cfg.layout)?;
+    // Migrating renames the course's v1 caldir directory, which
+    // `unmigrated_caldir` below would otherwise refuse to write next to.
+    crate::migrate::ensure::ensure_configured(&cfg, &naming, &canvas, dry_run).await?;
 
     let courses = canvas.list_courses().await?;
     // The same directory names `sync` gives these courses (named over the
     // whole active list, before filtering), under both roots.
-    let naming = CourseNaming::new(&cfg.layout)?;
-    let lib = library::read(&download_root)?;
+    // A calendar-only deployment may point `download_root` at the caldir
+    // tree. That tree is not a library: read as one, every course directory
+    // in it (no `curso.json`) would be reserved, and the next run would name
+    // the course `-s<nrc>` and write its UIDs a second time.
+    let shared = crate::migrate::ensure::roots_overlap(&download_root, &caldir_root);
+    let lib = if shared {
+        library::Library::default()
+    } else {
+        library::read(&download_root)?
+    };
     let dirs = library::course_dirs(&naming, &lib, &courses);
     let selected = select_active_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 
@@ -1038,31 +1094,59 @@ pub async fn run_calendar(
             results.push(CourseResult::Failed);
             continue;
         };
-        if let Some(v1) = unmigrated_caldir(&caldir_root, course, dir_name) {
-            tracing::error!(
-                course_id = course.id,
-                path = %v1.display(),
-                "caldir still has this course's layout v1 directory; migrate it first, \
-                 or the same UIDs would be written twice; skipping this course"
-            );
-            results.push(CourseResult::Failed);
-            continue;
-        }
         let course_dir = download_root.join(dir_name);
-        let state_path = library::state_path(&course_dir);
+        let mut state_path = library::state_path(&course_dir);
+        let mut cal_dir = caldir_root.join(dir_name);
+        if let Some(v1) = unmigrated_caldir(&caldir_root, course, dir_name) {
+            if cal_dir.exists() {
+                tracing::error!(
+                    course_id = course.id,
+                    path = %v1.display(),
+                    "caldir has both this course's layout v1 and v2 directories, with the \
+                     same UIDs; merge them by hand; skipping this course"
+                );
+                results.push(CourseResult::Failed);
+                continue;
+            }
+            if dry_run {
+                // Preview the run after the rename: plan against the v1 directory.
+                status!(
+                    "DRY-RUN: would rename {} to {}",
+                    v1.display(),
+                    cal_dir.display()
+                );
+                if shared {
+                    state_path = v1.join(library::STATE_FILE);
+                }
+                cal_dir = v1;
+            } else {
+                match adopt_v1_caldir(&v1, &caldir_root, dir_name, shared) {
+                    Ok(true) => tracing::warn!(
+                        course_id = course.id,
+                        from = %v1.display(),
+                        to = %cal_dir.display(),
+                        "renamed the course's layout v1 caldir directory to layout v2"
+                    ),
+                    Ok(false) | Err(_) => {
+                        tracing::error!(
+                            course_id = course.id,
+                            path = %v1.display(),
+                            "could not rename this course's layout v1 caldir directory; skipping this course"
+                        );
+                        results.push(CourseResult::Failed);
+                        continue;
+                    }
+                }
+            }
+        }
         let mut state = State::load(&state_path).await;
 
         // Ticket 10's safety requirement: a fetch failure must never reach
         // `plan` disguised as an empty `Vec` — see `plan_for_course`'s doc
         // comment. `None` here means "no plan attempted", not "empty plan".
-        let Some(course_plan) = plan_for_course(
-            &caldir_root.join(dir_name),
-            course,
-            assignments,
-            submissions,
-            now,
-            &state,
-        ) else {
+        let Some(course_plan) =
+            plan_for_course(&cal_dir, course, assignments, submissions, now, &state)
+        else {
             results.push(CourseResult::Failed);
             continue;
         };
@@ -1089,7 +1173,10 @@ pub async fn run_calendar(
                     library::course_index(&naming, dir_name, course, lib.records.get(dir_name));
                 let saved = async {
                     tokio::fs::create_dir_all(&course_dir).await?;
-                    library::claim(&course_dir, &skeleton).await?;
+                    // No `curso.json` in the caldir tree: it is not a library.
+                    if !shared {
+                        library::claim(&course_dir, &skeleton).await?;
+                    }
                     state.save(&state_path).await
                 };
                 if let Err(e) = saved.await {
@@ -1204,6 +1291,31 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-08-23T00:00:00Z")
             .unwrap()
             .into()
+    }
+
+    #[test]
+    fn a_v1_caldir_directory_is_adopted_with_its_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let v1 = root.join("Intro_to_Testing_TST101");
+        std::fs::create_dir_all(v1.join("deadlines")).unwrap();
+        std::fs::write(v1.join("deadlines/assignment-1.ics"), "BEGIN:VCALENDAR\n").unwrap();
+        std::fs::write(v1.join("state.json"), "{\"items\":{}}").unwrap();
+        assert!(adopt_v1_caldir(&v1, root, "tst101-intro-to-testing", true).unwrap());
+        let v2 = root.join("tst101-intro-to-testing");
+        assert!(v2.join("deadlines/assignment-1.ics").is_file());
+        assert!(v2.join(".u_crawler/state.json").is_file());
+        assert!(!v2.join("state.json").exists());
+        assert!(!v1.exists());
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            None
+        );
+
+        // Never onto an existing v2 directory.
+        std::fs::create_dir_all(v1.join("deadlines")).unwrap();
+        assert!(!adopt_v1_caldir(&v1, root, "tst101-intro-to-testing", true).unwrap());
+        assert!(v1.is_dir());
     }
 
     #[test]
