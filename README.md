@@ -17,6 +17,7 @@ off.
 - [Install](#install)
   - [Building without Zoom](#building-without-zoom)
 - [Getting started](#getting-started)
+- [Upgrading from layout v1 (breaking change)](#upgrading-from-layout-v1-breaking-change)
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [What ends up on disk](#what-ends-up-on-disk)
@@ -156,6 +157,145 @@ that probably is not yours.
 
 ---
 
+## Upgrading from layout v1 (breaking change)
+
+This release changes the folder layout of the library ("layout v2", spec:
+`docs/specs/layout-v2.md`). The old tree repeated the term and section in
+every course folder name, kept recordings under `Zoom/<course id>/` and
+ordered modules by id:
+
+```
+v1                                                    v2
+202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/   atdf105-mineria-de-datos/
+  state.json                                            .u_crawler/state.json
+  Modules/100_Informacion_General/01-Pagina.md          modulos/01-informacion-general/01-pagina.md
+  Modules/100_Informacion_General/02-ASSIGN-Tarea.md    tareas/tarea.md
+  Modules/100_Informacion_General/Attachments/Guia.pdf  modulos/01-informacion-general/adjuntos/guia.pdf
+  announcements/2026-06-17_Bienvenidos_501.md           anuncios/2026-06-17_bienvenidos.md
+  announcements/media/CodeR_S3.zip                      anuncios/adjuntos/coder-s3.zip
+Zoom/9001/2026_07_02_Sesion_sincronica_1.mp4            atdf105-mineria-de-datos/grabaciones/2026-07-02_sesion-sincronica-1.mp4
+```
+
+**An existing library is migrated automatically.** The first `sync`,
+`announcements`, `calendar` or `zoom flow` of this version finds the old
+layout, migrates it in place and logs a warning with a summary, then carries
+on. There is nothing to opt into. What the migration does, and does not do:
+
+- It only **renames**. No file is deleted, copied or overwritten. Two
+  different Canvas items that want the same name (two announcements with
+  one date and title, two assignments with one title) are numbered in
+  Canvas order: `tarea.md`, `tarea-2.md`, as `sync` names them. Two copies
+  of the same item are compared by content: identical ones leave the
+  second where it was (reported as a duplicate); different ones get
+  `name.conflicto-<hash>.ext`.
+- Generated notes get YAML frontmatter and local links: a link to a Canvas
+  file, page, assignment, announcement, module item or course that the
+  library has a copy of points at that copy (relative path, works in
+  Obsidian), in this course or another one; a `https://<canvas>/mailto:`
+  becomes a plain `mailto:`. What has no local copy, or is only known by its
+  size (a v1 attachment the link text does not name), keeps its Canvas link.
+  Raw HTML in a note (`<img … width=…>`) only gets its `src` changed. The original of every note it
+  rewrites is kept under `.u_crawler/backup/<timestamp>/`.
+- A library migrated by an earlier version, whose notes still link to
+  Canvas, is relinked once by the next writer command (or by
+  `u_crawler migrate`), under its own journal: `migrate --undo <timestamp>`
+  puts the notes back. Module items, and anything ambiguous offline, are
+  resolved with Canvas (`--canvas`, or the next `sync`).
+- Every step is first written to a journal, `.u_crawler/migrations/<timestamp>.jsonl`.
+  A run that is cut short (power, `Ctrl-C`) is finished by the next one.
+- A `Zoom/<id>/` folder that cannot be matched to exactly one course stays
+  where it is, with a warning. The v1 folders it empties (and `Zoom/`, once
+  nothing is left in it) are removed with `rmdir`, which only removes an
+  empty folder; one that still holds any file stays and is reported.
+- The calendar folders under `calendar.caldir_root` are renamed with their
+  course. File names and UIDs do not change, so `caldir push` sees no task
+  deleted or created.
+- When it is done it writes `.u_crawler/library.json`; from then on the check
+  costs nothing.
+
+**Before you upgrade:**
+
+1. Set `[layout]` in the config (see `assets/config.toml`; the commented
+   example is the UNAB one). Course folders are named once, when they are
+   migrated or first created, and keep that name afterwards.
+2. Preview the migration. Nothing is touched:
+
+   ```bash
+   u_crawler migrate --dry-run --canvas
+   ```
+
+3. Migrate, or let the next `sync` do it:
+
+   ```bash
+   u_crawler migrate --canvas
+   ```
+
+   Prefer `--canvas` (it reads course names and module order from Canvas;
+   `sync` does the same when it migrates). Offline, modules are numbered by
+   their id, and where that differs from the Canvas order the next `sync`
+   downloads those modules' attachments again into the correctly numbered
+   folder.
+
+To undo, pass the timestamp the summary printed (or the name of the journal
+in `.u_crawler/migrations/`):
+
+```bash
+u_crawler migrate --undo 20261025T120000000Z
+```
+
+Every rename is reversed and every rewritten note is put back from its
+backup. The rewritten versions and the migration's `curso.json` and
+`README.md` files are set aside under `.u_crawler/migrations/<timestamp>.undo/`, not deleted. The
+`library.json` marker is set aside too, so the next writer command migrates
+again (for example after you change `[layout]`). Undoing a relink journal
+only puts the notes (and `state.json` files) back; the library stays v2 and
+is not relinked again on its own.
+
+### Migrating a NAS library and a PC copy
+
+- **Migrate where the files are.** Run it on the NAS itself (the binary, or
+  the image with `podman`), not on a PC through sshfs or SMB. Over the network
+  every rename is a round trip, and comparing two colliding recordings means
+  reading both across the wire. A rename across filesystems is refused, never
+  turned into a copy.
+- **Merge first, migrate once.** Finish copying the PC's library into the NAS
+  before the first run of this version there. The automatic check only looks
+  for `.u_crawler/library.json`; v1 course folders copied into a library that
+  is already migrated are migrated by running `u_crawler migrate` by hand.
+- **Rehearse on a hardlink clone.** A clone on the same filesystem costs no
+  space, and the migration replaces every rewritten note with a new file, so
+  the original never changes:
+
+  ```bash
+  cp -al /mnt/backup/UNAB /mnt/backup/UNAB-clone
+  u_crawler migrate --root /mnt/backup/UNAB-clone --dry-run --canvas
+  u_crawler migrate --root /mnt/backup/UNAB-clone --canvas
+  find /mnt/backup/UNAB -type f | wc -l; find /mnt/backup/UNAB-clone -type f | wc -l
+  ```
+
+  `--root` never touches `calendar.caldir_root`, so the real calendar stays as
+  it is. Make the clone while no migration is half done (no open journal):
+  the journal of a resumed run is appended to, and in a clone it is the
+  original's file.
+- **Then the real library:** `u_crawler migrate --canvas` with `download_root`
+  and `caldir_root` pointing at the NAS trees. If the vault root is a git
+  repository, `git status` shows the moves as renames; `.git` itself is never
+  entered.
+- **The PC that mounts the NAS.** Do not run this version against the mounted
+  share before the NAS is migrated, or the migration runs over the network.
+  Once the NAS is marked, the check is a no-op on the PC.
+- **The calendar cron container.** Nothing to do by hand. The example
+  container config points `download_root` at the caldir tree, which is never
+  treated as a library; `calendar` renames each course's old calendar folder
+  to its new name itself, on its first run of this version, moving its state
+  along, and then writes into it. Files and UIDs do not change, so `caldir
+  push` sees no task deleted or created. `calendar --dry-run` shows the
+  renames first. A course whose old and new calendar folders both exist is
+  skipped (merge them by hand): exit `13` if other courses synced, `12` if
+  none did.
+
+---
+
 ## Commands
 
 ### `init`
@@ -255,6 +395,23 @@ it is unavailable and exits `12` (see
 | `--course-id ID` | yes | Target course |
 | `--since DATE` | no | Only recordings after this date |
 
+### `migrate`
+
+Migrates a layout v1 library to layout v2, in place. See
+[Upgrading from layout v1](#upgrading-from-layout-v1-breaking-change) — the
+writer commands run the same migration on their own; this command is for
+previewing it, running it on another tree, or undoing it.
+
+| Flag | Description |
+|---|---|
+| `--root PATH` | Migrate this tree instead of `download_root`. The calendar tree is left alone (unless `PATH` is `download_root` itself). |
+| `--dry-run` | Print the full plan (courses, moves, notes to rewrite, collisions, what stays), or on a v2 library how many links would become local; touch nothing |
+| `--undo TS` | Undo the migration journal `TS` |
+| `--canvas` | Read official course names and module order from Canvas, and module items and file names for the links (needs the token) |
+
+Running it on a library that is already v2 only relinks the notes whose
+Canvas links now have a local copy, and otherwise does nothing and says so.
+
 ### `status`
 
 Reads each course's `state.json` and reports tracked file count, storage used,
@@ -268,7 +425,7 @@ attempt.
 ```
 Backup Status:
 
-Course: Calculo_II_MAT2200
+Course: mat2200-calculo-ii
   Files: 143
   Storage: 1.24 GB
   Last sync: 2026-03-01T12:00:00Z
@@ -367,34 +524,42 @@ specific to one institution and is unlikely to be right for yours.
 
 ```
 <download_root>/
-├── <Course Name>_<COURSE_CODE>/
-│   ├── state.json                            sync state for this course
-│   ├── Modules/
-│   │   └── <module_id>_<Module Name>/
-│   │       ├── 01-<Page Title>.md            page body as Markdown
-│   │       ├── 02-ASSIGN-<Title>.md          assignment description
-│   │       └── Attachments/
-│   │           └── <original-filename.pdf>
-│   └── announcements/
-│       ├── <YYYY-MM-DD>_<title-slug>_<id>.md   date omitted if unknown
-│       ├── index.json
-│       └── media/
-│           └── <attachments and inline media>
-└── Zoom/
-    └── <course_id>/
-        └── <YYYY-MM-DD - Meeting Topic>.mp4
+├── INDEX.md                                  courses + upcoming deadlines
+├── AGENTS.md                                 how to navigate the tree (for AI agents)
+├── .u_crawler/
+│   ├── library.json                          {"layout_version": 2, "links_version": 1}
+│   ├── migrations/<timestamp>.jsonl          migration journals
+│   └── backup/<timestamp>/...                originals of notes the migration rewrote
+└── <course>/                                 e.g. atdf105-mineria-de-datos, from [layout]
+    ├── README.md                             modules, assignments, announcements, recordings
+    ├── curso.json                            canvas_id, course_code, name, canvas_name, term, section, zoom_ids
+    ├── .u_crawler/state.json                 sync state for this course
+    ├── modulos/
+    │   └── <NN>-<module>/                    NN = the module's position in Canvas
+    │       ├── README.md
+    │       ├── <NN>-<page>.md                page body as Markdown, with frontmatter
+    │       └── adjuntos/<file>.<ext>
+    ├── tareas/<assignment>.md                assignment description, with due dates
+    ├── anuncios/
+    │   ├── <YYYY-MM-DD>_<title>.md
+    │   ├── index.json
+    │   └── adjuntos/<attachments and inline media>
+    └── grabaciones/<YYYY-MM-DD>_<topic>[-parte-N].mp4
 ```
 
-Directory and file names are sanitized and transliterated to ASCII, so
-`Introducción` becomes `Introduccion`. Numeric prefixes (`01-`, `02-`) follow
-the module's own item ordering. Announcement slugs are capped at 60 characters,
-and the date prefix is dropped if Canvas reports no `posted_at`. Recording
-names that would collide get a `_1`, `_2` suffix rather than overwriting.
+Every name is lowercase kebab-case ASCII, so `Introducción` becomes
+`introduccion`. Notes carry YAML frontmatter (`ramo`, `tipo`, `canvas_id`,
+`url`, and dates) and link the local copies of the Canvas files, pages,
+assignments and announcements they mention.
+Two assignments or announcements that would share a name, or two files that
+slug to the same name in one folder, are told apart by their Canvas id; a
+recording split into several segments gets `-parte-2`, `-parte-3`.
 
 ### `state.json`
 
-Maps an item key to what is known about it. Keys are namespaced:
-`file:<id>`, `page:<slug>`, `assignment:<id>`, `announcement:<id>`.
+Lives at `<course>/.u_crawler/state.json`. Maps an item key to what is known
+about it. Keys are namespaced: `file:<id>`, `page:<slug>`, `assignment:<id>`,
+`announcement:<id>`, `calendar:<id>`, `calendar-window:<id>`, `zoom:<id>`.
 
 ```json
 {
@@ -416,7 +581,7 @@ same for generated Markdown. `last_error` and `error_count` are what `status`
 reports. A file linked from both a module and an announcement is one entry, and
 is downloaded once.
 
-### `announcements/index.json`
+### `anuncios/index.json`
 
 An array of records, one per announcement:
 
@@ -428,14 +593,14 @@ An array of records, one per announcement:
     "posted_at": "2026-03-01T12:00:00Z",
     "html_url": "https://canvas.your-school.edu/courses/1/discussion_topics/123",
     "author": "Nombre Apellido",
-    "body_md_path": "announcements/2026-03-01_Semana_3_Taller_123.md",
+    "body_md_path": "anuncios/2026-03-01_semana-3-taller.md",
     "links": ["https://..."],
     "media": [
       {
         "url": "https://canvas.your-school.edu/courses/1/files/456",
         "kind": "canvas_file",
         "file_id": 456,
-        "local_path": "announcements/media/taller.ipynb"
+        "local_path": "anuncios/adjuntos/taller.ipynb"
       }
     ],
     "zoom_links": ["https://x.zoom.us/rec/play/..."]
@@ -455,7 +620,7 @@ hosted on Canvas.
 
 ```
 <calendar.caldir_root>/
-└── <Course Name>_<COURSE_CODE>/
+└── <course>/                                 same name as in download_root
     ├── deadlines/
     │   └── assignment-<assignment_id>.ics    one VTODO per assignment with a due date
     └── windows/
@@ -639,7 +804,12 @@ already present on disk are skipped without re-visiting them.
 | `0` | Success |
 | `10` | Config error — including the first run, which creates the config and stops |
 | `11` | Authentication error (`auth canvas`) |
-| `12` | Any other runtime failure: network, API, browser, or filesystem |
+| `12` | Any other runtime failure: network, API, browser, filesystem, or a failed migration |
+| `13` | `calendar` only: some courses synced and some failed. All failing is `12` |
+
+A failed layout migration stops `sync`, `announcements`, `calendar` and
+`zoom flow` with `12` before they write anything; its journal records what was
+done, and running again resumes it.
 
 Failure handling during `sync` is uneven, and worth knowing:
 

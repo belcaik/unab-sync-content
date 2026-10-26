@@ -56,6 +56,8 @@ use sha1::{Digest, Sha1};
 use crate::canvas::{Assignment, CanvasClient, Course, Submission};
 use crate::config::Config;
 use crate::fsutil;
+use crate::layout::CourseNaming;
+use crate::library;
 use crate::state::{ItemState, State};
 use crate::status;
 
@@ -460,7 +462,7 @@ fn fold_line(line: &str) -> String {
 /// title>` (spec ID1).
 ///
 /// The course name is [`Course::name`] — the human name Canvas shows — and
-/// deliberately neither [`fsutil::course_dir`]'s output (sanitized and
+/// deliberately neither the course directory name (sanitized and
 /// transliterated to ASCII) nor `course_code`. A student reading a list that
 /// aggregates every course needs the name they recognize, not a path
 /// component.
@@ -602,6 +604,11 @@ fn render_vevent(
 /// assignment that also has an `unlock_at` strictly before its `due_at`
 /// (spec D3, ticket 08).
 ///
+/// `course_dir` is the course's directory under `calendar.caldir_root`
+/// (`<caldir_root>/<ramo>`, the same name [`crate::library::course_dirs`]
+/// gives it under `download_root`); the components land in its
+/// `deadlines/` and `windows/`.
+///
 /// Pure: no network, no disk access and no system clock — `now` is the
 /// caller's injected instant. `submissions` is the caller's own submissions
 /// for this course (spec D1, ticket 09): a deadline `VTODO` is marked
@@ -662,14 +669,13 @@ fn render_vevent(
 /// see its doc comment for how a failed fetch is kept from ever reaching
 /// this function.
 pub fn plan(
-    caldir_root: &Path,
+    course_dir: &Path,
     course: &Course,
     assignments: &[Assignment],
     submissions: &[Submission],
     _now: DateTime<Utc>,
     prev: &State,
 ) -> Plan {
-    let course_dir = fsutil::course_dir(caldir_root, course);
     let deadlines_dir = course_dir.join(DEADLINES_DIR);
     let windows_dir = course_dir.join(WINDOWS_DIR);
     let submissions_by_assignment = index_submissions(submissions);
@@ -762,6 +768,63 @@ pub fn plan(
     Plan { writes, deletes }
 }
 
+/// The course's layout v1 directory under `caldir_root`
+/// (`fsutil::course_dir`), when it is still there under a name other than
+/// its v2 `dir_name`.
+///
+/// Its `.ics` files carry the very UIDs [`plan`] would write into
+/// `<caldir_root>/<dir_name>/`, and `caldir push` would then see two files
+/// per UID — the collision shape of Radicale issue #101. [`run_calendar`]
+/// renames it with [`adopt_v1_caldir`] (the library migration usually got
+/// there first), and skips the course when the v2 directory exists too.
+pub fn unmigrated_caldir(caldir_root: &Path, course: &Course, dir_name: &str) -> Option<PathBuf> {
+    let v1 = fsutil::course_dir(caldir_root, course);
+    (v1 != caldir_root.join(dir_name) && v1.is_dir()).then_some(v1)
+}
+
+/// Rename the course's layout v1 caldir directory `v1` (from
+/// [`unmigrated_caldir`]) to its v2 name, never replacing anything.
+///
+/// The library migration renames these along with the course, but a
+/// calendar-only deployment has no v1 library to plan from. Returns `false`
+/// when the v2 directory already exists: both carry the same UIDs, and
+/// which one is right is not this function's call.
+///
+/// With `state_inside` (the calendar state lives in the caldir tree,
+/// `download_root` being `caldir_root`), the v1 `state.json` that came along
+/// is moved to `.u_crawler/state.json`, where layout v2 reads it, unless one
+/// is already there.
+///
+/// # Errors
+///
+/// The rename or the directory creation failed.
+pub fn adopt_v1_caldir(
+    v1: &Path,
+    caldir_root: &Path,
+    dir_name: &str,
+    state_inside: bool,
+) -> Result<bool, crate::migrate::apply::ApplyError> {
+    let v2 = caldir_root.join(dir_name);
+    if v2.exists() {
+        return Ok(false);
+    }
+    crate::migrate::apply::rename_noreplace(v1, &v2)?;
+    let old_state = v2.join(library::STATE_FILE);
+    let new_state = library::state_path(&v2);
+    if state_inside && old_state.is_file() && !new_state.exists() {
+        if let Some(parent) = new_state.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                crate::migrate::apply::ApplyError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        crate::migrate::apply::rename_noreplace(&old_state, &new_state)?;
+    }
+    Ok(true)
+}
+
 /// Gate [`plan`] on both of a course's fetches having actually succeeded
 /// (spec ticket 10's safety requirement): "un ramo que falla al consultarse
 /// NO dispara el borrado de sus componentes". `plan` itself cannot make this
@@ -780,7 +843,7 @@ pub fn plan(
 /// testable predicate rather than something only visible by reading
 /// `run_calendar`'s control flow.
 pub fn plan_for_course(
-    caldir_root: &Path,
+    course_dir: &Path,
     course: &Course,
     assignments: Result<Vec<Assignment>, ()>,
     submissions: Result<Vec<Submission>, ()>,
@@ -790,7 +853,7 @@ pub fn plan_for_course(
     let assignments = assignments.ok()?;
     let submissions = submissions.ok()?;
     Some(plan(
-        caldir_root,
+        course_dir,
         course,
         &assignments,
         &submissions,
@@ -906,7 +969,7 @@ pub fn conclude(summary: RunSummary) -> Result<RunOutcome, TotalFailure> {
 /// assignments fetch failure (spec ticket 11): the course is logged and
 /// skipped rather than aborting the run. The previous
 /// [`State`] *is* wired in (ticket 06): it is loaded from the course's
-/// existing `state.json` under `download_root` — the same file `sync` and
+/// `<download_root>/<ramo>/.u_crawler/state.json` — the same file `sync` and
 /// `announcements` already read and write, under the `calendar:{id}`
 /// namespace (spec D5) — never from anywhere inside `caldir_root`. After a
 /// successful apply, every written assignment's content hash is recorded
@@ -961,8 +1024,25 @@ pub async fn run_calendar(
     let caldir_root = PathBuf::from(&cfg.calendar.caldir_root);
     let download_root = PathBuf::from(&cfg.download_root);
     let canvas = CanvasClient::from_config().await?;
+    let naming = CourseNaming::new(&cfg.layout)?;
+    // Migrating renames the course's v1 caldir directory, which
+    // `unmigrated_caldir` below would otherwise refuse to write next to.
+    crate::migrate::ensure::ensure_configured(&cfg, &naming, &canvas, dry_run).await?;
 
     let courses = canvas.list_courses().await?;
+    // The same directory names `sync` gives these courses (named over the
+    // whole active list, before filtering), under both roots.
+    // A calendar-only deployment may point `download_root` at the caldir
+    // tree. That tree is not a library: read as one, every course directory
+    // in it (no `curso.json`) would be reserved, and the next run would name
+    // the course `-s<nrc>` and write its UIDs a second time.
+    let shared = crate::migrate::ensure::roots_overlap(&download_root, &caldir_root);
+    let lib = if shared {
+        library::Library::default()
+    } else {
+        library::read(&download_root)?
+    };
+    let dirs = library::course_dirs(&naming, &lib, &courses);
     let selected = select_active_courses(courses, filter_course_id, &cfg.canvas.ignored_courses);
 
     if selected.is_empty() {
@@ -1006,14 +1086,66 @@ pub async fn run_calendar(
             Err(())
         };
 
-        let state_path = fsutil::course_dir(&download_root, course).join("state.json");
+        let Some(dir_name) = dirs.get(&course.id) else {
+            tracing::error!(
+                course_id = course.id,
+                "no directory was named for this course; skipping it"
+            );
+            results.push(CourseResult::Failed);
+            continue;
+        };
+        let course_dir = download_root.join(dir_name);
+        let mut state_path = library::state_path(&course_dir);
+        let mut cal_dir = caldir_root.join(dir_name);
+        if let Some(v1) = unmigrated_caldir(&caldir_root, course, dir_name) {
+            if cal_dir.exists() {
+                tracing::error!(
+                    course_id = course.id,
+                    path = %v1.display(),
+                    "caldir has both this course's layout v1 and v2 directories, with the \
+                     same UIDs; merge them by hand; skipping this course"
+                );
+                results.push(CourseResult::Failed);
+                continue;
+            }
+            if dry_run {
+                // Preview the run after the rename: plan against the v1 directory.
+                status!(
+                    "DRY-RUN: would rename {} to {}",
+                    v1.display(),
+                    cal_dir.display()
+                );
+                if shared {
+                    state_path = v1.join(library::STATE_FILE);
+                }
+                cal_dir = v1;
+            } else {
+                match adopt_v1_caldir(&v1, &caldir_root, dir_name, shared) {
+                    Ok(true) => tracing::warn!(
+                        course_id = course.id,
+                        from = %v1.display(),
+                        to = %cal_dir.display(),
+                        "renamed the course's layout v1 caldir directory to layout v2"
+                    ),
+                    Ok(false) | Err(_) => {
+                        tracing::error!(
+                            course_id = course.id,
+                            path = %v1.display(),
+                            "could not rename this course's layout v1 caldir directory; skipping this course"
+                        );
+                        results.push(CourseResult::Failed);
+                        continue;
+                    }
+                }
+            }
+        }
         let mut state = State::load(&state_path).await;
 
         // Ticket 10's safety requirement: a fetch failure must never reach
         // `plan` disguised as an empty `Vec` — see `plan_for_course`'s doc
         // comment. `None` here means "no plan attempted", not "empty plan".
         let Some(course_plan) =
-            plan_for_course(&caldir_root, course, assignments, submissions, now, &state)
+            plan_for_course(&cal_dir, course, assignments, submissions, now, &state)
         else {
             results.push(CourseResult::Failed);
             continue;
@@ -1037,7 +1169,17 @@ pub async fn run_calendar(
             Ok(()) => {
                 record_writes(&mut state, &course_plan.writes);
                 record_deletes(&mut state, &course_plan.deletes);
-                if let Err(e) = state.save(&state_path).await {
+                let skeleton =
+                    library::course_index(&naming, dir_name, course, lib.records.get(dir_name));
+                let saved = async {
+                    tokio::fs::create_dir_all(&course_dir).await?;
+                    // No `curso.json` in the caldir tree: it is not a library.
+                    if !shared {
+                        library::claim(&course_dir, &skeleton).await?;
+                    }
+                    state.save(&state_path).await
+                };
+                if let Err(e) = saved.await {
                     tracing::error!(
                         course_id = course.id,
                         error = %e,
@@ -1118,6 +1260,8 @@ fn record_writes(state: &mut State, writes: &[PlannedWrite]) {
                 content_hash: Some(hash),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
     }
@@ -1150,6 +1294,51 @@ mod tests {
             .into()
     }
 
+    #[test]
+    fn a_v1_caldir_directory_is_adopted_with_its_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let v1 = root.join("Intro_to_Testing_TST101");
+        std::fs::create_dir_all(v1.join("deadlines")).unwrap();
+        std::fs::write(v1.join("deadlines/assignment-1.ics"), "BEGIN:VCALENDAR\n").unwrap();
+        std::fs::write(v1.join("state.json"), "{\"items\":{}}").unwrap();
+        assert!(adopt_v1_caldir(&v1, root, "tst101-intro-to-testing", true).unwrap());
+        let v2 = root.join("tst101-intro-to-testing");
+        assert!(v2.join("deadlines/assignment-1.ics").is_file());
+        assert!(v2.join(".u_crawler/state.json").is_file());
+        assert!(!v2.join("state.json").exists());
+        assert!(!v1.exists());
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            None
+        );
+
+        // Never onto an existing v2 directory.
+        std::fs::create_dir_all(v1.join("deadlines")).unwrap();
+        assert!(!adopt_v1_caldir(&v1, root, "tst101-intro-to-testing", true).unwrap());
+        assert!(v1.is_dir());
+    }
+
+    #[test]
+    fn a_v1_caldir_directory_blocks_the_course_until_migrated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            None
+        );
+        std::fs::create_dir_all(root.join("Intro_to_Testing_TST101/deadlines")).unwrap();
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "tst101-intro-to-testing"),
+            Some(root.join("Intro_to_Testing_TST101"))
+        );
+        // A v2 name that happens to equal the v1 one is the same directory.
+        assert_eq!(
+            unmigrated_caldir(root, &course(), "Intro_to_Testing_TST101"),
+            None
+        );
+    }
+
     fn course() -> Course {
         Course {
             id: 1,
@@ -1160,7 +1349,7 @@ mod tests {
 
     #[test]
     fn empty_assignment_set_produces_an_empty_plan() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let got = plan(root, &course(), &[], &[], fixed_now(), &State::default());
         assert!(got.writes.is_empty());
         assert!(got.deletes.is_empty());
@@ -1186,7 +1375,7 @@ mod tests {
 
     #[test]
     fn assignment_without_due_date_produces_no_components() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignments = vec![assignment_without_due_date()];
         let got = plan(
             root,
@@ -1224,7 +1413,7 @@ mod tests {
 
     #[test]
     fn assignment_with_due_date_produces_a_vtodo_write() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignments = vec![assignment_with_due_date()];
         let got = plan(
             root,
@@ -1239,7 +1428,7 @@ mod tests {
         let write = &got.writes[0];
         assert_eq!(
             write.path,
-            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-555.ics")
         );
         assert!(write.content.contains("BEGIN:VTODO"));
         assert!(write
@@ -1289,7 +1478,7 @@ mod tests {
 
     #[test]
     fn the_vtodo_carries_a_three_line_description() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -1322,7 +1511,7 @@ mod tests {
 
     #[test]
     fn a_missing_unlock_at_says_so_instead_of_inventing_a_date() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
         let got = plan(
@@ -1347,7 +1536,7 @@ mod tests {
         // inconsistent one is not silently rewritten into it. (Whether such
         // an `unlock_at` earns a `DTSTART` is ticket #14's question, not
         // this line's.)
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut same_instant = assignment_with_due_date();
         same_instant.unlock_at = same_instant.due_at;
         let got = plan(
@@ -1385,7 +1574,7 @@ mod tests {
 
     #[test]
     fn a_missing_html_url_drops_the_third_description_line_entirely() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.html_url = None;
         let got = plan(
@@ -1411,7 +1600,7 @@ mod tests {
         // becomes `\n`, and `:` is left alone. Spec ID6: `\r\n` and lone `\r`
         // collapse to `\n` *before* escaping, since vassago's `unfold` treats
         // a surviving lone `\r` as a line terminator and splits the property.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let messy_course = Course {
             id: 1,
             name: r"Cálculo, Álgebra; Nivel\Avanzado".into(),
@@ -1453,7 +1642,7 @@ mod tests {
         // §3.1 note calls a fold inside a multi-octet UTF-8 sequence
         // "improperly folded", which matters the moment a course is named in
         // Spanish.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         // Each 'ñ' is two octets, so a naive 75-octet cut would land inside
         // one: "SUMMARY:" is 8 octets, leaving 67 for the value, and 67 is
         // odd. The last whole character that fits is the 33rd.
@@ -1509,7 +1698,7 @@ mod tests {
 
     #[test]
     fn unlock_at_strictly_before_due_at_becomes_the_vtodo_dtstart() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -1545,7 +1734,7 @@ mod tests {
         // Canvas said nothing about when this opens, so the component says
         // nothing either — a fabricated `DTSTART` would be an assertion the
         // data never supported (spec user story 7).
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
         let got = plan(
@@ -1571,7 +1760,7 @@ mod tests {
         // §3.8.2.3 wants `DUE` *later* than `DTSTART`; equal timestamps are
         // not later. The property goes, the component stays — and `plan`
         // already refuses the zero-length window, so both collections agree.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = assignment.due_at;
         let got = plan(
@@ -1601,7 +1790,7 @@ mod tests {
     fn an_unlock_at_after_the_due_at_produces_no_dtstart_and_no_vevent() {
         // The inverted case, which the equal case is deliberately treated as
         // an instance of.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z.
         assignment.unlock_at = Some(
@@ -1638,7 +1827,7 @@ mod tests {
         // the renderer's own helpers, so a change to any of them — label,
         // escaping, date format, fold points, property order — has to be
         // restated here deliberately.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -1693,7 +1882,7 @@ mod tests {
         // component must be byte-identical to what it was before the `VTODO`
         // grew a label, a DESCRIPTION and line folding. Pinned in full, not
         // probed with `contains`, so any drift shows up here.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -1737,7 +1926,7 @@ mod tests {
 
     #[test]
     fn an_assignment_without_a_title_summarises_as_the_bare_course_name() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.name = None;
         let got = plan(
@@ -1757,7 +1946,7 @@ mod tests {
 
     #[test]
     fn a_course_without_a_name_summarises_as_the_bare_assignment_title() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let nameless = Course {
             id: 1,
             name: String::new(),
@@ -1778,7 +1967,7 @@ mod tests {
 
     #[test]
     fn same_assignment_id_keeps_the_same_uid_and_path_across_title_and_date_changes() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let original = assignment_with_due_date();
         let renamed_and_rescheduled = Assignment {
             id: 555,
@@ -1826,7 +2015,7 @@ mod tests {
 
     #[test]
     fn dtstamp_is_derived_from_updated_at_when_present_and_parseable() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.updated_at = Some("2026-08-20T10:15:00Z".into());
         let got = plan(
@@ -1842,7 +2031,7 @@ mod tests {
 
     #[test]
     fn dtstamp_falls_back_to_due_at_when_updated_at_is_absent() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         assert!(assignment.updated_at.is_none());
         let got = plan(
@@ -1859,7 +2048,7 @@ mod tests {
 
     #[test]
     fn dtstamp_falls_back_to_due_at_when_updated_at_does_not_parse() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.updated_at = Some("not-a-date".into());
         let got = plan(
@@ -1882,7 +2071,7 @@ mod tests {
 
     #[test]
     fn graded_and_not_omitted_gets_priority_1() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
@@ -1900,7 +2089,7 @@ mod tests {
 
     #[test]
     fn accepts_submission_but_zero_points_gets_priority_5() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(0.0);
         assignment.omit_from_final_grade = None;
@@ -1918,7 +2107,7 @@ mod tests {
 
     #[test]
     fn no_submission_type_gets_priority_9() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
@@ -1936,7 +2125,7 @@ mod tests {
 
     #[test]
     fn not_gradable_submission_type_also_gets_priority_9() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
@@ -1954,7 +2143,7 @@ mod tests {
 
     #[test]
     fn missing_submission_types_gets_priority_9() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(false);
@@ -1975,7 +2164,7 @@ mod tests {
         // The case a naive implementation gets wrong (ticket 07's explicit
         // callout): a positive point value does not win if the assignment is
         // marked as excluded from the final grade.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.points_possible = Some(30.0);
         assignment.omit_from_final_grade = Some(true);
@@ -1994,7 +2183,7 @@ mod tests {
 
     #[test]
     fn planning_the_same_assignment_twice_produces_byte_identical_content() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let a1 = assignment_with_due_date();
         let a2 = assignment_with_due_date();
         let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
@@ -2010,7 +2199,7 @@ mod tests {
 
     #[test]
     fn unlock_before_due_produces_a_vevent_in_a_sibling_windows_directory() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -2036,7 +2225,7 @@ mod tests {
             .expect("vtodo present");
         assert_eq!(
             vtodo.path,
-            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-555.ics")
         );
 
         let vevent = got
@@ -2046,7 +2235,7 @@ mod tests {
             .expect("vevent present");
         assert_eq!(
             vevent.path,
-            Path::new("/caldir/Intro_to_Testing_TST101/windows/assignment-555.ics")
+            Path::new("/caldir/ramo/windows/assignment-555.ics")
         );
         assert!(vevent
             .content
@@ -2064,7 +2253,7 @@ mod tests {
 
     #[test]
     fn missing_unlock_at_produces_the_vtodo_and_no_vevent() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         assert!(assignment.unlock_at.is_none());
         let got = plan(
@@ -2086,7 +2275,7 @@ mod tests {
 
     #[test]
     fn unlock_at_after_due_at_is_inconsistent_and_produces_no_vevent() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         // due_at for assignment_with_due_date() is 2026-09-01T23:59:00Z
         assignment.unlock_at = Some(
@@ -2113,7 +2302,7 @@ mod tests {
 
     #[test]
     fn unchanged_vtodo_and_vevent_together_produce_an_empty_plan() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut assignment = assignment_with_due_date();
         assignment.unlock_at = Some(
             DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
@@ -2142,6 +2331,8 @@ mod tests {
                     content_hash: Some(content_hash(&write.content)),
                     last_error: None,
                     error_count: None,
+                    file_name: None,
+                    path: None,
                 },
             );
         }
@@ -2173,6 +2364,8 @@ mod tests {
                 content_hash: Some(hash),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
         state
@@ -2184,7 +2377,7 @@ mod tests {
         // todo el comportamiento de este ticket." A first run captures what
         // would be written; a previous state recording that exact content
         // must make the second run plan nothing at all.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let first = plan(
             root,
@@ -2205,7 +2398,7 @@ mod tests {
 
     #[test]
     fn due_date_change_produces_a_write() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let original = assignment_with_due_date();
         let first = plan(
             root,
@@ -2237,7 +2430,7 @@ mod tests {
 
     #[test]
     fn title_change_produces_a_write_with_same_uid_and_path() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let original = assignment_with_due_date();
         let first = plan(
             root,
@@ -2290,7 +2483,7 @@ mod tests {
     fn a_second_plan_against_the_recorded_state_is_empty() {
         // End-to-end of the executor contract: plan, record what was
         // written, plan again against that recorded state -> nothing.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let first = plan(
             root,
@@ -2375,7 +2568,7 @@ mod tests {
         // `the_committed_fixture_files_still_match_what_the_planner_emits`
         // now reads those files off disk. That test binds the files to the
         // renderer; this one says what the bytes were always meant to be.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
 
         let with_window = plan(
             root,
@@ -2388,7 +2581,7 @@ mod tests {
         let vtodo = only_vtodo(&with_window);
         assert_eq!(
             vtodo.path,
-            Path::new("/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-90210.ics")
         );
         assert_eq!(
             vtodo.content,
@@ -2481,7 +2674,7 @@ mod tests {
         // caldir and vassago in `compat-report.md`. Neither subsumes the
         // other: without the literal there is no independent expectation,
         // without the file read a fixture could rot unnoticed.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
 
         let with_window = plan(
             root,
@@ -2520,7 +2713,7 @@ mod tests {
         // so a course rename is newly a content change. It must still be a
         // rewrite of the same component, not a new object: same filename,
         // same UID, same state key, and nothing planned for deletion.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let before = plan(
             root,
@@ -2563,15 +2756,12 @@ mod tests {
     }
 
     #[test]
-    fn a_course_rename_moves_the_course_directory_and_that_predates_this_change() {
-        // Honest pin of a real limitation rather than a claim it does not
-        // exist. The *file* is stable, but the directory above it is
-        // `fsutil::course_dir`, derived from the course's sanitized name —
-        // shared with `download_root` and with the frozen `windows`
-        // collection, and unchanged by this ticket. Renaming a course in
-        // Canvas therefore leaves the old course directory behind; the
-        // deletion pass in `plan` reconciles assignments, not directories.
-        let root = Path::new("/caldir");
+    fn a_course_rename_keeps_the_course_directory() {
+        // Layout v2: the directory is the one `library::course_dirs` gives
+        // the course id, which `curso.json` keeps stable across a Canvas
+        // rename, so `plan` is handed the same directory and the file stays
+        // put. (v1 derived it from the name and left the old one behind.)
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let before = plan(
             root,
@@ -2597,11 +2787,11 @@ mod tests {
 
         assert_eq!(
             before.writes[0].path,
-            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-555.ics")
         );
         assert_eq!(
             after.writes[0].path,
-            Path::new("/caldir/Intro_to_Testing_Section_B_TST101/deadlines/assignment-555.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-555.ics")
         );
     }
 
@@ -2610,7 +2800,7 @@ mod tests {
         // `unlock_at` now feeds the `VTODO` (`DTSTART` and the availability
         // line) as well as the `VEVENT` it always fed. Moving it must rewrite
         // both existing files, not mint new ones.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = fixture_assignment();
         let before = plan(
             root,
@@ -2667,7 +2857,7 @@ mod tests {
 
     #[test]
     fn gaining_an_unlock_at_adds_a_dtstart_and_a_window_without_moving_the_deadline() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut without = fixture_assignment();
         without.unlock_at = None;
         let before = plan(
@@ -2716,7 +2906,7 @@ mod tests {
         // `SUMMARY`/`DESCRIPTION`. If any of those made the render depend on
         // something other than Canvas data, the second plan would not be
         // empty.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = fixture_assignment();
         let submissions = vec![submission_submitted(assignment.id)];
 
@@ -2770,7 +2960,7 @@ mod tests {
         // Cross-check that the properties ticket 12 and 14 inserted did not
         // displace the ones tickets 07 and 09 own: `PRIORITY` and `STATUS`
         // still sit between `DUE` and `SUMMARY`, in that order.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = fixture_assignment();
         let submissions = vec![submission_submitted(assignment.id)];
         let got = plan(
@@ -2796,7 +2986,7 @@ mod tests {
         // and assignment ids, so the new properties cannot reach it — pinned
         // anyway, because "cannot reach it" is exactly the kind of claim that
         // stops being true quietly.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = fixture_assignment();
         let first = plan(
             root,
@@ -2822,15 +3012,11 @@ mod tests {
             deletes,
             vec![
                 (
-                    PathBuf::from(
-                        "/caldir/Calculo_Diferencial_MAT1101/deadlines/assignment-90210.ics"
-                    ),
+                    PathBuf::from("/caldir/ramo/deadlines/assignment-90210.ics"),
                     "calendar:90210".to_string()
                 ),
                 (
-                    PathBuf::from(
-                        "/caldir/Calculo_Diferencial_MAT1101/windows/assignment-90210.ics"
-                    ),
+                    PathBuf::from("/caldir/ramo/windows/assignment-90210.ics"),
                     "calendar-window:90210".to_string()
                 ),
             ]
@@ -2842,7 +3028,7 @@ mod tests {
         // `plan_for_course`'s gate (spec ticket 11) is upstream of every
         // property this feature added, and stays that way: a failed fetch is
         // `None`, never an empty plan that would read as "delete everything".
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut state = State::default();
         let first = plan(
             root,
@@ -2910,7 +3096,7 @@ mod tests {
 
     #[test]
     fn submission_with_submitted_at_marks_the_vtodo_completed() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let submissions = vec![submission_submitted(assignment.id)];
         let got = plan(
@@ -2927,7 +3113,7 @@ mod tests {
 
     #[test]
     fn submission_graded_without_submitted_at_marks_the_vtodo_completed() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let submissions = vec![submission_graded_without_submitted_at(assignment.id)];
         let got = plan(
@@ -2944,7 +3130,7 @@ mod tests {
 
     #[test]
     fn submission_neither_submitted_nor_graded_stays_pending() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let submissions = vec![submission_untouched(assignment.id)];
         let got = plan(
@@ -2964,7 +3150,7 @@ mod tests {
     fn no_matching_submission_stays_pending() {
         // No submission record at all for this assignment id -- must not be
         // confused with "done".
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let got = plan(
             root,
@@ -2980,7 +3166,7 @@ mod tests {
 
     #[test]
     fn submission_for_a_different_assignment_does_not_leak_completion() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date();
         let submissions = vec![submission_submitted(assignment.id + 1)];
         let got = plan(
@@ -3001,7 +3187,7 @@ mod tests {
         // assignment, same (absent) submission state, twice -> identical
         // bytes, so an unrelated later run with the same input plans nothing
         // (spec user story 14).
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let a1 = assignment_with_due_date();
         let a2 = assignment_with_due_date();
         let before = plan(root, &course(), &[a1], &[], fixed_now(), &State::default());
@@ -3195,7 +3381,7 @@ mod tests {
 
     #[test]
     fn assignment_absent_from_canvas_deletes_both_vtodo_and_vevent() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let deleted_id = 555;
         let mut prev = State::default();
         prev.set(
@@ -3207,6 +3393,8 @@ mod tests {
                 content_hash: Some("stale-todo-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
         prev.set(
@@ -3218,6 +3406,8 @@ mod tests {
                 content_hash: Some("stale-window-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
 
@@ -3235,7 +3425,7 @@ mod tests {
             .expect("vtodo delete planned");
         assert_eq!(
             todo_delete.path,
-            Path::new("/caldir/Intro_to_Testing_TST101/deadlines/assignment-555.ics")
+            Path::new("/caldir/ramo/deadlines/assignment-555.ics")
         );
         assert_eq!(todo_delete.assignment_id, deleted_id);
 
@@ -3246,14 +3436,14 @@ mod tests {
             .expect("vevent delete planned");
         assert_eq!(
             window_delete.path,
-            Path::new("/caldir/Intro_to_Testing_TST101/windows/assignment-555.ics")
+            Path::new("/caldir/ramo/windows/assignment-555.ics")
         );
         assert_eq!(window_delete.assignment_id, deleted_id);
     }
 
     #[test]
     fn assignment_still_present_in_canvas_is_not_deleted() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment = assignment_with_due_date(); // id 555
         let content = render_vtodo(
             &deadline_uid(assignment.id),
@@ -3285,7 +3475,7 @@ mod tests {
         // `plan`'s reconciliation pass (which would otherwise see "no
         // assignments" and delete everything the previous state remembers)
         // ever runs.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignment_id = 555;
         let mut prev = State::default();
         prev.set(
@@ -3297,6 +3487,8 @@ mod tests {
                 content_hash: Some("stale-hash".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
 
@@ -3330,7 +3522,7 @@ mod tests {
         // Both fetches must succeed, not just the first one -- a submissions
         // failure is exactly as dangerous as an assignments failure, since
         // `plan` needs both to render a `VTODO`'s STATUS correctly.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
         let submissions_failed: Result<Vec<Submission>, ()> = Err(());
 
@@ -3348,7 +3540,7 @@ mod tests {
 
     #[test]
     fn both_fetches_succeeding_produces_a_plan() {
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let assignments_ok: Result<Vec<Assignment>, ()> = Ok(vec![assignment_with_due_date()]);
         let submissions_ok: Result<Vec<Submission>, ()> = Ok(vec![]);
 
@@ -3377,6 +3569,8 @@ mod tests {
                 content_hash: Some("whatever".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3402,6 +3596,8 @@ mod tests {
                 content_hash: Some("kept".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
         state.set(
@@ -3413,6 +3609,8 @@ mod tests {
                 content_hash: Some("gone".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
         let deletes = vec![PlannedDelete {
@@ -3434,7 +3632,7 @@ mod tests {
         // that the reconciliation scan only matches the real
         // `calendar:`/`calendar-window:` prefixes, not anything that merely
         // contains "calendar" as a substring elsewhere in the key.
-        let root = Path::new("/caldir");
+        let root = Path::new("/caldir/ramo");
         let mut prev = State::default();
         prev.set(
             "assignment:555".to_string(),
@@ -3445,6 +3643,8 @@ mod tests {
                 content_hash: Some("unrelated".into()),
                 last_error: None,
                 error_count: None,
+                file_name: None,
+                path: None,
             },
         );
 

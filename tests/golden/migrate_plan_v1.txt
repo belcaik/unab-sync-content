@@ -1,0 +1,86 @@
+courses (8):
+  202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON -> fmma015-elementos-de-fisica-y-medicion canvas_id=null zoom=8101
+  202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON -> fmma015-fisica-general canvas_id=null zoom=8102
+  202525_1149_MECANICA_MECA100_202525_1149_EL_ON -> meca100-mecanica canvas_id=null zoom=8104
+  202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON -> fmma115-dinamica canvas_id=null zoom=8103
+  202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON -> atdf101-disrupcion-empresarial canvas_id=9003 zoom=9003
+  202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON -> atdf106-electivo-s2520 canvas_id=null
+  202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON -> atdf106-electivo-s2524 canvas_id=9002 zoom=9002
+  202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON -> atdf105-mineria-de-datos canvas_id=9001 zoom=9001
+moves (43):
+  library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/Modules/510_Inicio/01-Informacion_general.md -> fmma015-elementos-de-fisica-y-medicion/modulos/01-inicio/01-informacion-general.md
+  library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/state.json -> fmma015-elementos-de-fisica-y-medicion/.u_crawler/state.json
+  library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/Modules/520_Inicio/01-Informacion_general.md -> fmma015-fisica-general/modulos/01-inicio/01-informacion-general.md
+  library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/state.json -> fmma015-fisica-general/.u_crawler/state.json
+  library: 202525_1149_MECANICA_MECA100_202525_1149_EL_ON/Modules/540_Inicio/01-Informacion_general.md -> meca100-mecanica/modulos/01-inicio/01-informacion-general.md
+  library: 202525_1149_MECANICA_MECA100_202525_1149_EL_ON/state.json -> meca100-mecanica/.u_crawler/state.json
+  library: 202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON/Modules/530_Inicio/01-Informacion_general.md -> fmma115-dinamica/modulos/01-inicio/01-informacion-general.md
+  library: 202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON/state.json -> fmma115-dinamica/.u_crawler/state.json
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/Modules/400_Inicio/01-Informacion_general.md -> atdf101-disrupcion-empresarial/modulos/01-inicio/01-informacion-general.md
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/2026-03-01_Inicio_de_clases_801.md -> atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases.md
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/2026-03-01_Inicio_de_clases_802.md -> atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases-2.md
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/index.json -> atdf101-disrupcion-empresarial/anuncios/index.json
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/state.json -> atdf101-disrupcion-empresarial/.u_crawler/state.json
+  library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/Modules/310_Avisos/01-Informacion_general.md -> atdf106-electivo-s2520/modulos/01-avisos/01-informacion-general.md
+  library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/announcements/2026-04-01_Aviso_de_seccion_770.md -> atdf106-electivo-s2520/anuncios/2026-04-01_aviso-de-seccion.md
+  library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/state.json -> atdf106-electivo-s2520/.u_crawler/state.json
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/Modules/320_Avisos/01-Informacion_general.md -> atdf106-electivo-s2524/modulos/01-avisos/01-informacion-general.md
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/announcements/2026-04-02_Aviso_de_seccion_771.md -> atdf106-electivo-s2524/anuncios/2026-04-02_aviso-de-seccion.md
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/announcements/index.json -> atdf106-electivo-s2524/anuncios/index.json
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/state.json -> atdf106-electivo-s2524/.u_crawler/state.json
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/01-Informacion_general.md -> atdf105-mineria-de-datos/modulos/01-informacion-general/01-informacion-general.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/02-ASSIGN-Semana_10_Formativa_6.md -> atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/Attachments/Diagrama.png -> atdf105-mineria-de-datos/modulos/01-informacion-general/adjuntos/diagrama.png
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/Attachments/Guia_1.pdf -> atdf105-mineria-de-datos/modulos/01-informacion-general/adjuntos/guia-1.pdf
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/Attachments/Rubrica_final.docx -> atdf105-mineria-de-datos/modulos/01-informacion-general/adjuntos/rubrica-final.docx
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/nota-del-usuario.md -> atdf105-mineria-de-datos/modulos/01-informacion-general/nota-del-usuario.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/01-Contenidos.md -> atdf105-mineria-de-datos/modulos/02-semana-1/01-contenidos.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/02-Fase_4.md -> atdf105-mineria-de-datos/modulos/02-semana-1/02-fase-4.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/04-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md -> atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/06-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md -> atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3-2.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/Attachments/Guia_2.pdf -> atdf105-mineria-de-datos/modulos/02-semana-1/adjuntos/guia-2.pdf
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/2026-06-17_Bienvenidos_al_curso_501.md -> atdf105-mineria-de-datos/anuncios/2026-06-17_bienvenidos-al-curso.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/index.json -> atdf105-mineria-de-datos/anuncios/index.json
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/media/CodeR_S3.zip -> atdf105-mineria-de-datos/anuncios/adjuntos/coder-s3.zip
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/state.json -> atdf105-mineria-de-datos/.u_crawler/state.json
+  library: Zoom/8101/2025_06_23_202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION.mp4 -> fmma015-elementos-de-fisica-y-medicion/grabaciones/2025-06-23_clase.mp4
+  library: Zoom/8102/2025_06_18_Clase_FMMA015_1226_18_06_2025.mp4 -> fmma015-fisica-general/grabaciones/2025-06-18_clase-fmma015-1226-18-06-2025.mp4
+  library: Zoom/8103/2025_10_06_Sesion_01_FMMA115_NRC_1332_0610.mp4 -> fmma115-dinamica/grabaciones/2025-10-06_sesion-01-fmma115-nrc-1332-0610.mp4
+  library: Zoom/8104/2025_10_01_202525_1149_MECANICA_1.mp4 -> meca100-mecanica/grabaciones/2025-10-01_clase-1.mp4
+  library: Zoom/9001/2026_07_02_Sesion_sincronica_1.mp4 -> atdf105-mineria-de-datos/grabaciones/2026-07-02_sesion-sincronica-1.mp4
+  library: Zoom/9002/2026_05_04_202615_2524_ELECTIVO.mp4 -> atdf106-electivo-s2524/grabaciones/2026-05-04_clase.mp4
+  library: Zoom/9003/2026_03_11_202605_2333_DISRUPCION_EMPRESARIAL.mp4 -> atdf101-disrupcion-empresarial/grabaciones/2026-03-11_clase.mp4
+  library: Zoom/9003/2026_03_11_202605_2333_DISRUPCION_EMPRESARIAL_1.mp4 -> atdf101-disrupcion-empresarial/grabaciones/2026-03-11_clase-parte-2.mp4
+edits (18):
+  announcement: atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases-2.md
+  announcement: atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases.md
+  page: atdf101-disrupcion-empresarial/modulos/01-inicio/01-informacion-general.md
+  announcement: atdf105-mineria-de-datos/anuncios/2026-06-17_bienvenidos-al-curso.md
+  page: atdf105-mineria-de-datos/modulos/01-informacion-general/01-informacion-general.md
+  page: atdf105-mineria-de-datos/modulos/02-semana-1/01-contenidos.md
+  page: atdf105-mineria-de-datos/modulos/02-semana-1/02-fase-4.md
+  assignment: atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md
+  assignment: atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3-2.md
+  assignment: atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3.md
+  announcement: atdf106-electivo-s2520/anuncios/2026-04-01_aviso-de-seccion.md
+  page: atdf106-electivo-s2520/modulos/01-avisos/01-informacion-general.md
+  announcement: atdf106-electivo-s2524/anuncios/2026-04-02_aviso-de-seccion.md
+  page: atdf106-electivo-s2524/modulos/01-avisos/01-informacion-general.md
+  page: fmma015-elementos-de-fisica-y-medicion/modulos/01-inicio/01-informacion-general.md
+  page: fmma015-fisica-general/modulos/01-inicio/01-informacion-general.md
+  page: fmma115-dinamica/modulos/01-inicio/01-informacion-general.md
+  page: meca100-mecanica/modulos/01-inicio/01-informacion-general.md
+duplicates (0):
+conflicts (0):
+unresolved (1):
+  library: Zoom/424242: zoom folder matches no course
+prune (9):
+  library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/ (if empty)
+  library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/ (if empty)
+  library: 202525_1149_MECANICA_MECA100_202525_1149_EL_ON/ (if empty)
+  library: 202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON/ (if empty)
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/ (if empty)
+  library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/ (if empty)
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/ (if empty)
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/ (if empty)
+  library: Zoom/ (if empty)
