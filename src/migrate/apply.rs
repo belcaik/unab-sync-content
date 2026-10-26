@@ -691,23 +691,11 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
                     report.dirs_restored += 1;
                 }
             }
-            Entry::Mkdir { root, path } => {
-                let dir = exec.resolve(*root, path)?;
-                match fs::symlink_metadata(&dir) {
-                    Ok(m) if m.is_dir() && is_empty_dir(&dir)? => {
-                        fs::remove_dir(&dir).at(&dir)?;
-                        report.dirs_removed += 1;
-                    }
-                    Ok(_) => report.dirs_left += 1,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(ApplyError::Io {
-                            path: dir,
-                            source: e,
-                        })
-                    }
-                }
-            }
+            Entry::Mkdir { root, path } => match remove_if_empty(&exec.resolve(*root, path)?)? {
+                Some(true) => report.dirs_removed += 1,
+                Some(false) => report.dirs_left += 1,
+                None => {}
+            },
             Entry::Begin { .. }
             | Entry::Revert { .. }
             | Entry::SetAside { .. }
@@ -726,6 +714,56 @@ pub fn undo(roots: &Roots<'_>, ts: &str) -> Result<UndoReport> {
         "migration undone"
     );
     Ok(report)
+}
+
+/// After [`undo`]: remove, newest first, each directory journal `ts`
+/// created that is empty now — one whose generated files the caller set
+/// aside only after the undo. Returns how many were removed and how many
+/// are still there because something is in them.
+///
+/// # Errors
+///
+/// [`ApplyError::UnknownJournal`], and the path and I/O errors of [`apply`].
+pub fn remove_created_dirs(roots: &Roots<'_>, ts: &str) -> Result<(usize, usize)> {
+    let journal = Journal::open(roots.library, ts)?;
+    if journal.state.is_none() {
+        return Err(ApplyError::UnknownJournal(ts.to_string()));
+    }
+    let exec = Exec {
+        roots: *roots,
+        journal,
+        hook: &mut |_| Ok(()),
+        report: Report::default(),
+        renamed: BTreeSet::new(),
+    };
+    let (mut removed, mut left) = (0, 0);
+    for entry in exec.journal.entries.iter().rev() {
+        if let Entry::Mkdir { root, path } = entry {
+            match remove_if_empty(&exec.resolve(*root, path)?)? {
+                Some(true) => removed += 1,
+                Some(false) => left += 1,
+                None => {}
+            }
+        }
+    }
+    Ok((removed, left))
+}
+
+/// `rmdir` of `dir` when it is an empty directory: `Some(true)`. `Some(false)`
+/// when it is there and not removed, `None` when it is gone.
+fn remove_if_empty(dir: &Path) -> Result<Option<bool>> {
+    match fs::symlink_metadata(dir) {
+        Ok(m) if m.is_dir() && is_empty_dir(dir)? => {
+            fs::remove_dir(dir).at(dir)?;
+            Ok(Some(true))
+        }
+        Ok(_) => Ok(Some(false)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ApplyError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        }),
+    }
 }
 
 /// `.u_crawler/migrations/<ts>.undo`, relative to the library root: where an

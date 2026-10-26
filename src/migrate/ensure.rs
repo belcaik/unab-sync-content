@@ -13,7 +13,10 @@
 //! 3. The generated notes each journal renamed get their frontmatter and
 //!    local links ([`rewrite::rewrite_file`], backup under
 //!    `.u_crawler/backup/<ts>/`, `<ts>` being the journal's).
-//! 4. `AGENTS.md` and `INDEX.md` at the root ([`library::write_library_files`]).
+//! 4. Every index file, from what is now on disk
+//!    ([`library::write_indexes_from_disk`]): a `README.md` per course and
+//!    per module where there is none, each `curso.json` brought up to date
+//!    (readable name, term, section), `AGENTS.md` and `INDEX.md` at the root.
 //! 5. `.u_crawler/library.json` last. Until it exists the library is not v2,
 //!    so a cut anywhere above is picked up by the next run.
 //!
@@ -141,6 +144,8 @@ pub struct Summary {
     pub rewrite_failed: usize,
     /// What the plan left in place, and why.
     pub unresolved: Vec<Unresolved>,
+    /// `README.md` files (course and module) written where there was none.
+    pub indexes: usize,
     /// `library.json` was written by this run.
     pub marked: bool,
 }
@@ -188,6 +193,9 @@ impl fmt::Display for Summary {
         if self.rewrite_failed > 0 {
             write!(f, ", {} note(s) not rewritten", self.rewrite_failed)?;
         }
+        if self.indexes > 0 {
+            write!(f, ", {} README(s) written", self.indexes)?;
+        }
         if let Some(ts) = &self.resumed {
             write!(f, "; resumed {ts}")?;
         }
@@ -207,6 +215,9 @@ pub struct UndoSummary {
     pub restored: usize,
     /// What [`apply::undo`] did.
     pub report: apply::UndoReport,
+    /// `README.md` files of the course directories this journal created,
+    /// set aside after them.
+    pub indexes: usize,
     /// `library.json` was set aside, so the next run migrates again.
     pub unmarked: bool,
 }
@@ -223,7 +234,7 @@ impl fmt::Display for UndoSummary {
              {} new dir(s) removed, {} new dir(s) left (not empty)",
             self.report.reverted,
             self.restored,
-            self.report.set_aside.len() + usize::from(self.unmarked),
+            self.report.set_aside.len() + self.indexes + usize::from(self.unmarked),
             self.report.missing.len(),
             self.report.dirs_restored,
             self.report.dirs_removed,
@@ -245,7 +256,9 @@ pub fn library_json() -> String {
 /// Make sure the library is layout v2 before a writer touches it.
 ///
 /// Cheap when it already is: `library.json` present and no open journal
-/// means nothing is scanned and Canvas is not asked. A root that does not
+/// means nothing is scanned and Canvas is not asked; only when a course or
+/// module lacks its `README.md` are the index files written from disk
+/// ([`library::write_indexes_from_disk`]; not in a dry run). A root that does not
 /// exist is left alone (the writer creates it). Otherwise this is
 /// [`migrate`], and a migration that moved or rewrote anything is logged
 /// with `warn!` and shown to the user.
@@ -273,6 +286,10 @@ pub async fn ensure_v2(
     }
     let marked = tokio::fs::try_exists(library_json_path(target.library)).await?;
     if marked && apply::pending(target.library)?.is_none() {
+        if !dry_run && library::indexes_missing(target.library, &library::read(target.library)?)? {
+            let written = library::write_indexes_from_disk(target.library, target.naming).await?;
+            tracing::info!(path = %target.library.display(), written = written.len(), "missing index files written");
+        }
         return Ok(Outcome::AlreadyV2);
     }
     let outcome = migrate(target, canvas, dry_run).await?;
@@ -417,10 +434,9 @@ pub async fn migrate(
         rewrite_notes(library, ts, &mut summary).await?;
     }
 
-    if !ran.is_empty() || !was_marked {
-        let lib = library::read(library)?;
-        library::write_library_files(library, &lib, Vec::new(), true).await?;
-    }
+    summary.indexes = library::write_indexes_from_disk(library, target.naming)
+        .await?
+        .len();
     if !was_marked {
         fsutil::atomic_write(&library_json_path(library), library_json().as_bytes()).await?;
         summary.marked = true;
@@ -477,11 +493,20 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
     }
 
     let restored = restore_notes(library, ts).await?;
-    let report = blocking(target, {
+    let mut report = blocking(target, {
         let ts = ts.to_string();
         move |roots| apply::undo(roots, &ts)
     })
     .await?;
+    let indexes = set_aside_readmes(library, ts)?;
+    // The READMEs kept the directories the run created from being removed.
+    let (removed, left) = blocking(target, {
+        let ts = ts.to_string();
+        move |roots| apply::remove_created_dirs(roots, &ts)
+    })
+    .await?;
+    report.dirs_removed += removed;
+    report.dirs_left = left;
     let unmarked = set_aside(
         library,
         &format!("{}/{LIBRARY_JSON}", layout::META_DIR),
@@ -491,6 +516,7 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
         already_undone: false,
         restored,
         report,
+        indexes,
         unmarked,
     })
 }
@@ -798,6 +824,44 @@ async fn restore_notes(library: &Path, ts: &str) -> Result<usize, MigrateError> 
         restored += 1;
     }
     Ok(restored)
+}
+
+/// Set aside the `README.md` files (course and module) of every course
+/// directory journal `ts` created, known by the `curso.json` it wrote and
+/// the undo set aside. They were written after the journal, so it does not
+/// list them; left there, they would make the emptied directory a foreign
+/// one the next migration must avoid. Whatever was renamed in has already
+/// been renamed back, so what is left is generated. Idempotent: a cut undo
+/// run again finds the `curso.json` already set aside.
+fn set_aside_readmes(library: &Path, ts: &str) -> Result<usize, MigrateError> {
+    let aside_dir = apply::undo_dir_rel(ts);
+    let suffix = format!("/{}", super::CURSO_JSON);
+    let mut moved = 0;
+    for entry in apply::read_journal(&apply::journal_path(library, ts))? {
+        let Entry::Write { path } = entry else {
+            continue;
+        };
+        let Some(dir) = path.strip_suffix(&suffix) else {
+            continue;
+        };
+        if !library.join(&aside_dir).join(&path).exists() {
+            continue;
+        }
+        let mut readmes = vec![format!("{dir}/README.md")];
+        let modulos = format!("{dir}/{}", layout::MODULES_DIR);
+        if let Ok(read) = std::fs::read_dir(library.join(&modulos)) {
+            for module in read.flatten() {
+                if let Some(name) = module.file_name().to_str() {
+                    readmes.push(format!("{modulos}/{name}/README.md"));
+                }
+            }
+        }
+        readmes.sort();
+        for rel in readmes {
+            moved += usize::from(set_aside(library, &rel, &aside_dir)?);
+        }
+    }
+    Ok(moved)
 }
 
 /// Rename `<library>/<rel>` to `<library>/<aside_dir>/<rel>` when it exists

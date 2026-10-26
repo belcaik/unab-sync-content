@@ -60,6 +60,11 @@ pub struct Layout {
     /// `-c<canvas id>`.
     #[serde(default)]
     pub section_pattern: String,
+    /// Regex finding the academic term in the code, then the name; capture
+    /// group 1 (or the whole match) is `curso.json`'s `term`. Empty records
+    /// no term.
+    #[serde(default)]
+    pub term_pattern: String,
 }
 
 impl Default for Layout {
@@ -69,6 +74,7 @@ impl Default for Layout {
             code_pattern: String::new(),
             name_strip_pattern: String::new(),
             section_pattern: String::new(),
+            term_pattern: String::new(),
         }
     }
 }

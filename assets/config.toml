@@ -41,13 +41,17 @@ name_strip_pattern = ""         # regex; every match is removed from the name be
 section_pattern = ""            # regex finding the section/NRC (in the code, then the name); only
                                 # used to add -s<nrc> when a course would get a directory name
                                 # that another course has, or already had, in this library
+term_pattern = ""               # regex finding the academic term (in the code, then the name);
+                                # group 1 (or the match) is curso.json's "term"
 #
 # Example (UNAB): code "ATDF105_202615_2690_EL_ON" + name "202615_2690_MINERIA DE DATOS"
 # become "atdf105-mineria-de-datos"; two sections of ATDF106 become
-# "atdf106-...-s2520" and "atdf106-...-s2524".
+# "atdf106-...-s2520" and "atdf106-...-s2524". The indexes and curso.json show
+# the name stripped and humanized ("Mineria de Datos"), term "202615", section "2690".
 # code_pattern = '^([A-Z]+[0-9]+)'
 # name_strip_pattern = '^[0-9]{6}[_\s]+[0-9]+[_\s]+'
 # section_pattern = '(?:^|_)[0-9]{6}[_\s]+([0-9]+)[_\s]'
+# term_pattern = '(?:^|_)([0-9]{6})[_\s]'
 
 [zoom]
 enabled = true                  # set false to skip the Zoom subsystem entirely

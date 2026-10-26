@@ -1,0 +1,278 @@
+=== INDEX.md
+# Índice de la biblioteca
+
+## Ramos
+
+- [Disrupcion Empresarial](atdf101-disrupcion-empresarial/README.md) — ATDF101_202605_2333_EL_ON · 202605
+- [Mineria de Datos](atdf105-mineria-de-datos/README.md) — ATDF105_202615_2690_EL_ON · 202615
+- [Electivo](atdf106-electivo-s2520/README.md) — ATDF106_202615_2520_EL_ON · 202615
+- [Electivo](atdf106-electivo-s2524/README.md) — ATDF106_202615_2524_EL_ON · 202615
+- [Elementos de Fisica y Medicion](fmma015-elementos-de-fisica-y-medicion/README.md) — FMMA015_202515_1033_EL_ON · 202515
+- [Fisica General](fmma015-fisica-general/README.md) — FMMA015_202515_1226_EL_ON · 202515
+- [Dinamica](fmma115-dinamica/README.md) — FMMA115_202525_1332_EL_ON · 202525
+- [Mecanica](meca100-mecanica/README.md) — MECA100_202525_1149_EL_ON · 202525
+=== atdf101-disrupcion-empresarial/README.md
+# Disrupcion Empresarial
+
+**Código:** ATDF101_202605_2333_EL_ON · **Término:** 202605 · **Sección:** 2333 · **ID Canvas:** 9003
+
+## Módulos
+
+1. [Inicio](modulos/01-inicio/README.md)
+
+## Anuncios recientes
+
+- 2026-03-01 — [Inicio de clases](anuncios/2026-03-01_inicio-de-clases-2.md)
+- 2026-03-01 — [Inicio de clases](anuncios/2026-03-01_inicio-de-clases.md)
+
+## Grabaciones
+
+- 2026-03-11 — [Clase parte 2](grabaciones/2026-03-11_clase-parte-2.mp4)
+- 2026-03-11 — [Clase](grabaciones/2026-03-11_clase.mp4)
+=== atdf101-disrupcion-empresarial/curso.json
+{
+  "canvas_id": 9003,
+  "course_code": "ATDF101_202605_2333_EL_ON",
+  "name": "Disrupcion Empresarial",
+  "canvas_name": "202605_2333_DISRUPCION_EMPRESARIAL",
+  "term": "202605",
+  "section": "2333",
+  "zoom_ids": [
+    9003
+  ]
+}
+=== atdf101-disrupcion-empresarial/modulos/01-inicio/README.md
+# Inicio
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== atdf105-mineria-de-datos/README.md
+# Mineria de Datos
+
+**Código:** ATDF105_202615_2690_EL_ON · **Término:** 202615 · **Sección:** 2690 · **ID Canvas:** 9001
+
+## Módulos
+
+1. [Informacion general](modulos/01-informacion-general/README.md)
+2. [Semana 1](modulos/02-semana-1/README.md)
+
+## Tareas
+
+- [Semana 10 formativa 6](tareas/semana-10-formativa-6.md)
+- [Semana 11 sumativa 3 informe de caso 3](tareas/semana-11-sumativa-3-informe-de-caso-3.md)
+- [Semana 11 sumativa 3 informe de caso 3 2](tareas/semana-11-sumativa-3-informe-de-caso-3-2.md)
+
+## Anuncios recientes
+
+- 2026-06-17 — [Bienvenidos al curso](anuncios/2026-06-17_bienvenidos-al-curso.md)
+
+## Grabaciones
+
+- 2026-07-02 — [Sesion sincronica 1](grabaciones/2026-07-02_sesion-sincronica-1.mp4)
+=== atdf105-mineria-de-datos/curso.json
+{
+  "canvas_id": 9001,
+  "course_code": "ATDF105_202615_2690_EL_ON",
+  "name": "Mineria de Datos",
+  "canvas_name": "202615_2690_MINERIA_DE_DATOS",
+  "term": "202615",
+  "section": "2690",
+  "zoom_ids": [
+    9001
+  ]
+}
+=== atdf105-mineria-de-datos/modulos/01-informacion-general/README.md
+# Informacion general
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== atdf105-mineria-de-datos/modulos/02-semana-1/README.md
+# Semana 1
+
+## Páginas
+
+- [Contenidos](01-contenidos.md)
+=== atdf106-electivo-s2520/README.md
+# Electivo
+
+**Código:** ATDF106_202615_2520_EL_ON · **Término:** 202615 · **Sección:** 2520
+
+## Módulos
+
+1. [Avisos](modulos/01-avisos/README.md)
+
+## Anuncios recientes
+
+- 2026-04-01 — [Aviso de seccion](anuncios/2026-04-01_aviso-de-seccion.md)
+=== atdf106-electivo-s2520/curso.json
+{
+  "canvas_id": null,
+  "course_code": "ATDF106_202615_2520_EL_ON",
+  "name": "Electivo",
+  "canvas_name": "202615_2520_ELECTIVO",
+  "term": "202615",
+  "section": "2520",
+  "zoom_ids": []
+}
+=== atdf106-electivo-s2520/modulos/01-avisos/README.md
+# Avisos
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== atdf106-electivo-s2524/README.md
+# Electivo
+
+**Código:** ATDF106_202615_2524_EL_ON · **Término:** 202615 · **Sección:** 2524 · **ID Canvas:** 9002
+
+## Módulos
+
+1. [Avisos](modulos/01-avisos/README.md)
+
+## Anuncios recientes
+
+- 2026-04-02 — [Aviso de seccion](anuncios/2026-04-02_aviso-de-seccion.md)
+
+## Grabaciones
+
+- 2026-05-04 — [Clase](grabaciones/2026-05-04_clase.mp4)
+=== atdf106-electivo-s2524/curso.json
+{
+  "canvas_id": 9002,
+  "course_code": "ATDF106_202615_2524_EL_ON",
+  "name": "Electivo",
+  "canvas_name": "202615_2524_ELECTIVO",
+  "term": "202615",
+  "section": "2524",
+  "zoom_ids": [
+    9002
+  ]
+}
+=== atdf106-electivo-s2524/modulos/01-avisos/README.md
+# Avisos
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== fmma015-elementos-de-fisica-y-medicion/README.md
+# Elementos de Fisica y Medicion
+
+**Código:** FMMA015_202515_1033_EL_ON · **Término:** 202515 · **Sección:** 1033
+
+## Módulos
+
+1. [Inicio](modulos/01-inicio/README.md)
+
+## Grabaciones
+
+- 2025-06-23 — [Clase](grabaciones/2025-06-23_clase.mp4)
+=== fmma015-elementos-de-fisica-y-medicion/curso.json
+{
+  "canvas_id": null,
+  "course_code": "FMMA015_202515_1033_EL_ON",
+  "name": "Elementos de Fisica y Medicion",
+  "canvas_name": "202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION",
+  "term": "202515",
+  "section": "1033",
+  "zoom_ids": [
+    8101
+  ]
+}
+=== fmma015-elementos-de-fisica-y-medicion/modulos/01-inicio/README.md
+# Inicio
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== fmma015-fisica-general/README.md
+# Fisica General
+
+**Código:** FMMA015_202515_1226_EL_ON · **Término:** 202515 · **Sección:** 1226
+
+## Módulos
+
+1. [Inicio](modulos/01-inicio/README.md)
+
+## Grabaciones
+
+- 2025-06-18 — [Clase fmma015 1226 18 06 2025](grabaciones/2025-06-18_clase-fmma015-1226-18-06-2025.mp4)
+=== fmma015-fisica-general/curso.json
+{
+  "canvas_id": null,
+  "course_code": "FMMA015_202515_1226_EL_ON",
+  "name": "Fisica General",
+  "canvas_name": "202515_1226_FISICA_GENERAL",
+  "term": "202515",
+  "section": "1226",
+  "zoom_ids": [
+    8102
+  ]
+}
+=== fmma015-fisica-general/modulos/01-inicio/README.md
+# Inicio
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== fmma115-dinamica/README.md
+# Dinamica
+
+**Código:** FMMA115_202525_1332_EL_ON · **Término:** 202525 · **Sección:** 1332
+
+## Módulos
+
+1. [Inicio](modulos/01-inicio/README.md)
+
+## Grabaciones
+
+- 2025-10-06 — [Sesion 01 fmma115 nrc 1332 0610](grabaciones/2025-10-06_sesion-01-fmma115-nrc-1332-0610.mp4)
+=== fmma115-dinamica/curso.json
+{
+  "canvas_id": null,
+  "course_code": "FMMA115_202525_1332_EL_ON",
+  "name": "Dinamica",
+  "canvas_name": "202525_1332_DINAMICA",
+  "term": "202525",
+  "section": "1332",
+  "zoom_ids": [
+    8103
+  ]
+}
+=== fmma115-dinamica/modulos/01-inicio/README.md
+# Inicio
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)
+=== meca100-mecanica/README.md
+# Mecanica
+
+**Código:** MECA100_202525_1149_EL_ON · **Término:** 202525 · **Sección:** 1149
+
+## Módulos
+
+1. [Inicio](modulos/01-inicio/README.md)
+
+## Grabaciones
+
+- 2025-10-01 — [Clase 1](grabaciones/2025-10-01_clase-1.mp4)
+=== meca100-mecanica/curso.json
+{
+  "canvas_id": null,
+  "course_code": "MECA100_202525_1149_EL_ON",
+  "name": "Mecanica",
+  "canvas_name": "202525_1149_MECANICA",
+  "term": "202525",
+  "section": "1149",
+  "zoom_ids": [
+    8104
+  ]
+}
+=== meca100-mecanica/modulos/01-inicio/README.md
+# Inicio
+
+## Páginas
+
+- [Informacion general](01-informacion-general.md)

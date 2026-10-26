@@ -223,7 +223,8 @@ pub async fn run_sync(
     if !dry_run {
         // A filtered run has not seen the other courses' deadlines, so it
         // leaves INDEX.md as the last full run wrote it.
-        library::write_library_files(&root, &lib, synced, filter_course_id.is_none()).await?;
+        library::write_library_files(&root, &lib, &naming, synced, filter_course_id.is_none())
+            .await?;
     }
     if dry_run {
         status!(

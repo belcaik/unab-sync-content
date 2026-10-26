@@ -201,6 +201,7 @@ course_dir = "{code}-{name}" # placeholders {code}, {name}, {id}
 code_pattern = ""            # regex on course_code; group 1 fills {code}
 name_strip_pattern = ""      # regex removed from the name before {name}
 section_pattern = ""         # regex for the section/NRC, used for -s<nrc> when a dir name is taken
+term_pattern = ""            # regex for the academic term; group 1 fills curso.json's term
 
 [zoom]
 enabled = true
@@ -226,7 +227,7 @@ writers never format a path themselves.
   AGENTS.md                          # static: how to navigate the tree
   <ramo>/                            # course dir, see "Course directories" below
     README.md                        # modules, assignments, announcements, recordings
-    curso.json                       # canvas_id, course_code, name, term, section, zoom_ids
+    curso.json                       # canvas_id, course_code, name, canvas_name, term, section, zoom_ids
     .u_crawler/state.json            # per-course sync state (file:, page:, assignment:,
                                      #   announcement:, calendar:, calendar-window:, zoom:)
     modulos/
@@ -259,7 +260,15 @@ to a course, except one holding `.u_crawler/state.json` without `curso.json`
 (an interrupted run, which its course resumes). Whoever creates a course
 directory (`sync`, `announcements`, `calendar`, `zoom flow`) writes a minimal
 `curso.json` at once; the end of `sync` rewrites it in full, keeping the
-`zoom_ids` and `term` a migration recorded.
+`zoom_ids` a migration recorded, and `term` / `section` when
+`term_pattern` / `section_pattern` give none. In `curso.json`, `name` is the
+readable name (`CourseNaming::display_name`: `name_strip_pattern` applied,
+then `layout::humanize` — an all-caps `MINERIA_DE_DATOS` reads `Mineria de
+Datos`, a name with lowercase letters keeps its case and accents) and
+`canvas_name` the name as Canvas gives it (or as a v1 directory spelled it,
+offline), which is what identifies a course without `canvas_id`. A
+`curso.json` from before `canvas_name` has only `name`, read as that
+identity. `README.md`, `INDEX.md` show the readable name.
 
 **Name collisions inside a course.** Two assignments with the same title,
 or two announcements with the same date and title: `layout::unique_names`,
@@ -439,12 +448,25 @@ handling is only for sources of the same item (same id / `NN`).
    finished journal is replayed (idempotent), so a cut between the renames
    and the rewrites is healed by the next run; with it, only this call's.
    A note that fails is logged and counted, never fatal.
-4. Root `AGENTS.md` and `INDEX.md` (`library::write_library_files`).
+4. Every index file, from the disk (`library::write_indexes_from_disk`,
+   always, offline or not): a `README.md` per course and per module where
+   there is none — one already there (a `sync`'s, or the user's) is never
+   overwritten — each `curso.json` brought up to date (readable `name`,
+   `canvas_name`, `term` and `section` when it had none), and root
+   `AGENTS.md` and `INDEX.md`, with the deadlines the assignments'
+   frontmatter records. From disk, modules are named by the first line of
+   an existing module README, else by their slug; page, assignment and
+   recording titles come from file names (`layout::humanize_slug`),
+   announcement titles from `index.json`; a module README lists its pages
+   only (which module links which assignment is not on disk; `sync` adds
+   it).
 5. `.u_crawler/library.json`, last: until it exists the library is not v2.
 
 `ensure_v2` is the cheap gate the writer commands use: a root that does not
 exist is left alone; `library.json` present and no open journal returns at
-once without scanning or calling Canvas; otherwise it is `migrate`. A
+once without scanning or calling Canvas — unless a course or module lacks
+its `README.md` (`library::indexes_missing`, directory listings only), when
+step 4 runs (not in a dry run); otherwise it is `migrate`. A
 library root that overlaps `calendar.caldir_root` is never treated as a
 library (`MigrateError::Overlap` from `migrate`). `migrate` ignores the
 marker and always plans, so a v1 course copied into a v2 library is migrated
@@ -459,7 +481,11 @@ hardlink clone it is the original's inode.
 `migrate --undo <ts>` (`ensure::undo`): refuses an unknown journal or one
 with a newer journal still in effect, before touching anything; puts each
 rewritten note back from its backup, setting the current bytes aside under
-`.u_crawler/migrations/<ts>.undo/<path>`; then `apply::undo`; then sets
+`.u_crawler/migrations/<ts>.undo/<path>`; then `apply::undo`; then the
+`README.md` files of every course directory the journal created (its
+`curso.json` set aside), which would otherwise make the emptied directory
+a foreign one the next migration avoids; then removes the directories the
+run created that this left empty (`apply::remove_created_dirs`); then sets
 `library.json` aside the same way, so the next writer command migrates
 again (for example after a `[layout]` change). Root `AGENTS.md`/`INDEX.md`
 stay. Every step is idempotent, so a cut undo is simply run again.
@@ -688,7 +714,12 @@ manifest byte for byte and the same set of directories, no empty v1
 directory is left after a migration while one holding a file is kept and
 reported, two distinct items with one name are numbered rather than
 collided, a second run is a no-op, identical/different collisions, and a `cp -al` clone
-whose markdown is rewritten leaves the original untouched), and the whole
+whose markdown is rewritten leaves the original untouched), the index files
+an offline migration writes (`tests/migrate_indexes.rs`: golden snapshot of
+every `README.md`, `curso.json` and `INDEX.md` in
+`tests/golden/migrate_indexes_v1.txt`, regenerated with `U_CRAWLER_BLESS=1`;
+no relative link points at a missing file; readable name, term and section;
+`ensure_v2` writes back missing READMEs and leaves an existing one alone), and the whole
 migration end to end, offline, as a `sync` runs it (`tests/migrate_ensure.rs`:
 it migrates and marks the library, a second pass does nothing, every hash of
 the v1 manifest survives (rewritten notes in their backup), the calendar
