@@ -23,10 +23,13 @@ const TS: &str = "20261025T120000000Z";
 const TS2: &str = "20261025T130000000Z";
 /// An empty directory nested in a v1 course, relative to it.
 const EMPTY_V1_DIR: &str = "Modules/999_Vacio/Attachments";
+/// A `Zoom/<id>` with no recordings: no file names it, so no course owns it.
+const EMPTY_ZOOM_DIR: &str = "Zoom/555";
 
 /// The fixture library at `<tmp>/lib`, plus a calendar tree at `<tmp>/cal`
 /// with a `deadlines/` directory for two of its courses, and an empty
-/// [`EMPTY_V1_DIR`] in the first course, as v1 could leave behind.
+/// [`EMPTY_V1_DIR`] in the first course and an empty [`EMPTY_ZOOM_DIR`], as
+/// v1 could leave behind.
 struct Lib {
     _dir: TempDir,
     root: PathBuf,
@@ -41,6 +44,7 @@ impl Lib {
         let cal = dir.path().join("cal");
         let lib = v1::write_v1_library(&root)?;
         fs::create_dir_all(root.join(&lib.courses[0].v1_dir).join(EMPTY_V1_DIR))?;
+        fs::create_dir_all(root.join(EMPTY_ZOOM_DIR))?;
         for course in lib.courses.iter().take(2) {
             let deadlines = cal.join(&course.v1_dir).join("deadlines");
             fs::create_dir_all(&deadlines)?;
@@ -236,7 +240,9 @@ fn a_migration_leaves_no_empty_v1_directory() -> TestResult {
     // `Zoom/` stays: the orphan folder is still in it.
     assert!(l.root.join(&l.lib.orphan_zoom.rel).is_dir());
     assert_eq!(empty_dirs(&l.root)?, Vec::<String>::new());
-    assert!(report.kept_dirs.is_empty(), "{:?}", report.kept_dirs);
+    assert!(!l.root.join(EMPTY_ZOOM_DIR).exists());
+    // `Zoom/` is kept, and reported: the orphan folder is in it.
+    assert_eq!(report.kept_dirs, ["Zoom"]);
     let empty = format!("{}/{EMPTY_V1_DIR}", l.lib.courses[0].v1_dir);
     assert!(report.removed_dirs.contains(&empty), "{empty} not removed");
     // Each removal is journaled, children before their parent.

@@ -171,7 +171,9 @@ async fn a_sync_migrates_the_v1_library_once_and_loses_nothing() -> TestResult {
             assert!(!lib.root.join(&zoom.rel).exists(), "{}", zoom.rel);
         }
     }
-    assert!(summary.removed_dirs > 0 && summary.kept_dirs.is_empty());
+    assert!(summary.removed_dirs > 0);
+    // Only `Zoom/` is kept, for its orphan folder.
+    assert_eq!(summary.kept_dirs, ["Zoom"]);
     for path in &lib.lib.foreign {
         assert_eq!(after.get(path), lib.before.get(path), "{path} changed");
     }

@@ -69,7 +69,7 @@ duplicates (0):
 conflicts (0):
 unresolved (1):
   library: Zoom/424242: zoom folder matches no course
-prune (15):
+prune (9):
   library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/ (if empty)
   library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/ (if empty)
   library: 202525_1149_MECANICA_MECA100_202525_1149_EL_ON/ (if empty)
@@ -78,10 +78,4 @@ prune (15):
   library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/ (if empty)
   library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/ (if empty)
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/ (if empty)
-  library: Zoom/8101/ (if empty)
-  library: Zoom/8102/ (if empty)
-  library: Zoom/8103/ (if empty)
-  library: Zoom/8104/ (if empty)
-  library: Zoom/9001/ (if empty)
-  library: Zoom/9002/ (if empty)
-  library: Zoom/9003/ (if empty)
+  library: Zoom/ (if empty)
