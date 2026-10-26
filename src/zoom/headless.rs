@@ -1,14 +1,18 @@
 use crate::config::Config;
+use crate::layout;
+use crate::state::{ItemState, State};
 use crate::zoom::app_conf;
 use crate::zoom::db::ZoomDb;
 use crate::zoom::models::{ZoomCookie, ZoomRecordingFile};
 use crate::zoom::sso::{self, SsoCreds};
+use crate::zoom::ZoomTarget;
 use base64::prelude::*;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::network::EventRequestWillBeSent;
 use chromiumoxide::Page;
+use chrono::NaiveDate;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -342,41 +346,34 @@ impl<'a> ZoomHeadless<'a> {
         Ok(())
     }
 
+    /// Downloads every recording in `files` that the course does not have
+    /// yet, into `<course_dir>/grabaciones/` ([`plan_recordings`]), recording
+    /// each one under its `zoom:` key in `state`.
     pub async fn capture_and_download_immediately(
         &self,
         files: Vec<ZoomRecordingFile>,
+        target: &ZoomTarget<'_>,
+        state: &mut State,
     ) -> anyhow::Result<()> {
         use crate::ffmpeg::{download_via_ffmpeg, ensure_ffmpeg_available, FfmpegError};
-        use crate::fsutil::sanitize_filename_preserve_ext;
         use crate::zoom::models::ReplayHeader;
-        use std::collections::HashMap;
-        use std::path::PathBuf;
 
         let cfg = self.config;
-        let course_id = self.course_id;
 
         ensure_ffmpeg_available(&cfg.zoom.ffmpeg_path).await?;
 
-        let base = PathBuf::from(&cfg.download_root)
-            .join("Zoom")
-            .join(course_id.to_string());
-
+        let base = target.course_dir.join(layout::RECORDINGS_DIR);
         tokio::fs::create_dir_all(&base).await?;
 
-        // Scan for existing recordings to avoid redownloading
         let existing_files = scan_existing_recordings(&base)?;
-        let files_to_download: Vec<_> = files
-            .into_iter()
-            .filter(|file| {
-                let filename = sanitize_filename_preserve_ext(&(file.filename_hint() + ".mp4"));
-                if existing_files.contains(&filename) {
-                    info!("⏩ Skipping (already exists): {}", filename);
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
+        let total = files.len();
+        let plan = plan_recordings(files, target.course_name, state, &existing_files);
+        for (key, name) in &plan.adopt {
+            info!(path = %base.join(name).display(), "recording already on disk; recorded in state");
+            let size = std::fs::metadata(base.join(name)).ok().map(|m| m.len());
+            state.set(key.clone(), downloaded(None, size));
+        }
+        let files_to_download = plan.download;
 
         if files_to_download.is_empty() {
             info!("All recordings already downloaded!");
@@ -385,7 +382,7 @@ impl<'a> ZoomHeadless<'a> {
 
         info!(
             "Found {} recordings, {} new to download",
-            files_to_download.len() + existing_files.len(),
+            total,
             files_to_download.len()
         );
 
@@ -410,7 +407,6 @@ impl<'a> ZoomHeadless<'a> {
         let page = browser.new_page("about:blank").await?;
         page.set_user_agent(&self.config.zoom.user_agent).await?;
 
-        let mut name_counts: HashMap<String, usize> = HashMap::new();
         info!("Starting capture and download (tokens expire quickly, processing one by one)...");
         info!(
             "Processing {} recordings (capture → download → next)...\n",
@@ -419,7 +415,8 @@ impl<'a> ZoomHeadless<'a> {
 
         let mut cookies_captured = false;
 
-        for (idx, file) in files_to_download.iter().enumerate() {
+        for (idx, planned) in files_to_download.iter().enumerate() {
+            let file = &planned.file;
             info!(
                 "\n[{}/{}] Processing: {}",
                 idx + 1,
@@ -437,6 +434,7 @@ impl<'a> ZoomHeadless<'a> {
             {
                 warn!("Warning: SSO failed for {}: {:?}", file.play_url, e);
                 info!("Skipping this file...");
+                state.record_error(planned.key.clone(), &e);
                 continue;
             }
 
@@ -505,23 +503,13 @@ impl<'a> ZoomHeadless<'a> {
                 Some(a) => a,
                 None => {
                     warn!("✗ Could not capture download URL, skipping...");
+                    state.record_error(planned.key.clone(), &"could not capture the download URL");
                     continue;
                 }
             };
 
             // STEP 5: Download immediately (while token is fresh!)
-            let mut filename = sanitize_filename_preserve_ext(file.filename_hint() + ".mp4");
-            let count = name_counts.entry(filename.clone()).or_insert(0);
-            if *count > 0 {
-                let stem = filename.trim_end_matches(".mp4");
-                filename = format!("{}_{}.mp4", stem, count);
-            }
-            *count += 1;
-
-            let dest = base.join(&filename);
-            if let Some(parent) = dest.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+            let dest = base.join(&planned.name);
 
             let headers = crate::zoom::download::build_ffmpeg_headers(
                 cfg,
@@ -532,27 +520,37 @@ impl<'a> ZoomHeadless<'a> {
             );
 
             info!("⬇ Downloading to: {}", dest.display());
-            match download_via_ffmpeg(&cfg.zoom.ffmpeg_path, &headers, &asset.download_url, &dest)
-                .await
+            let result = match download_via_ffmpeg(
+                &cfg.zoom.ffmpeg_path,
+                &headers,
+                &asset.download_url,
+                &dest,
+            )
+            .await
             {
-                Ok(()) => warn!("✓ Downloaded successfully!"),
+                Ok(()) => {
+                    info!("✓ Downloaded successfully!");
+                    Ok(())
+                }
                 Err(FfmpegError::Process { .. }) => {
                     warn!("ffmpeg failed, trying HTTP fallback");
-                    if let Err(e) = crate::zoom::download::http_download(
-                        cfg,
-                        &headers,
-                        &asset.download_url,
-                        &dest,
-                    )
-                    .await
-                    {
-                        warn!("✗ HTTP download also failed: {:?}", e);
-                    } else {
-                        info!("✓ Downloaded via HTTP!");
-                    }
+                    crate::zoom::download::http_download(cfg, &headers, &asset.download_url, &dest)
+                        .await
+                        .inspect(|()| info!("✓ Downloaded via HTTP!"))
+                }
+                Err(e) => Err(e.into()),
+            };
+            match result {
+                Ok(()) => {
+                    let size = tokio::fs::metadata(&dest).await.ok().map(|m| m.len());
+                    state.set(
+                        planned.key.clone(),
+                        downloaded(file.recording_start.clone(), size),
+                    );
                 }
                 Err(e) => {
-                    warn!("✗ Download error: {:?}", e);
+                    warn!("✗ Download failed: {:?}", e);
+                    state.record_error(planned.key.clone(), &e);
                 }
             }
         }
@@ -585,11 +583,124 @@ impl<'a> ZoomHeadless<'a> {
     }
 }
 
+/// The state entry of a recording that is on disk.
+fn downloaded(updated_at: Option<String>, size: Option<u64>) -> ItemState {
+    ItemState {
+        etag: None,
+        updated_at,
+        size,
+        content_hash: None,
+        last_error: None,
+        error_count: None,
+    }
+}
+
+/// One recording to fetch, and the file it goes to under `grabaciones/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedRecording {
+    /// What the listing reported.
+    pub file: ZoomRecordingFile,
+    /// File name under `grabaciones/`.
+    pub name: String,
+    /// `zoom:` state key ([`ZoomRecordingFile::state_key`]).
+    pub key: String,
+}
+
+/// What [`plan_recordings`] decided.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecordingPlan {
+    /// Recordings to download, in listing order.
+    pub download: Vec<PlannedRecording>,
+    /// `(state key, file name)` of recordings already on disk under their
+    /// name but missing from `state` — a migrated library: record, do not fetch.
+    pub adopt: Vec<(String, String)>,
+}
+
+/// The day a recording took place: the meeting's `start_time`, else the
+/// segment's `recording_start`. Both begin with `YYYY-MM-DD`.
+fn recording_date(file: &ZoomRecordingFile) -> Option<NaiveDate> {
+    [&file.start_time, &file.recording_start]
+        .into_iter()
+        .flatten()
+        .find_map(|s| NaiveDate::parse_from_str(s.get(0..10)?, "%Y-%m-%d").ok())
+}
+
+/// The file name of every recording in `files`, in input order.
+///
+/// A dated recording is [`layout::recording_file`] of its date, its topic
+/// and the course name; an undated one keeps v1's `zoom-<meeting id>`
+/// fallback, through [`layout::attachment_file`] as the migrator does.
+/// Recordings that would share a name are the parts of one meeting: they are
+/// ordered by segment start (then play URL), and the second, third... get
+/// `-parte-2`, `-parte-3`...
+pub fn recording_names(files: &[ZoomRecordingFile], course_name: &str) -> Vec<String> {
+    let name = |file: &ZoomRecordingFile, part: Option<u32>| match recording_date(file) {
+        Some(date) => {
+            layout::recording_file(date, file.topic.as_deref().unwrap_or(""), part, course_name)
+        }
+        None => {
+            let base = layout::attachment_file(&format!("zoom-{}.mp4", file.meeting_id));
+            match part {
+                Some(n) => format!("{}-parte-{n}.mp4", base.trim_end_matches(".mp4")),
+                None => base,
+            }
+        }
+    };
+    let bases: Vec<String> = files.iter().map(|f| name(f, None)).collect();
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by(|&a, &b| {
+        (&bases[a], &files[a].recording_start, &files[a].play_url).cmp(&(
+            &bases[b],
+            &files[b].recording_start,
+            &files[b].play_url,
+        ))
+    });
+    let mut names = bases.clone();
+    let mut seen: HashMap<&str, u32> = HashMap::new();
+    for i in order {
+        let count = seen.entry(bases[i].as_str()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            names[i] = name(&files[i], Some(*count));
+        }
+    }
+    names
+}
+
+/// Which recordings to download. A recording is skipped when `state` has
+/// its `zoom:` key without an error, or when a file with its computed name
+/// is already in `existing` (what the migrator moved in: it cannot know
+/// recording ids offline). The second case is returned in
+/// [`RecordingPlan::adopt`], so it is recorded in `state` from then on.
+/// A recording listed twice is planned once.
+pub fn plan_recordings(
+    files: Vec<ZoomRecordingFile>,
+    course_name: &str,
+    state: &State,
+    existing: &HashSet<String>,
+) -> RecordingPlan {
+    let names = recording_names(&files, course_name);
+    let mut plan = RecordingPlan::default();
+    let mut keys = HashSet::new();
+    for (file, name) in files.into_iter().zip(names) {
+        let key = file.state_key();
+        if !keys.insert(key.clone()) {
+            continue;
+        }
+        if state.get(&key).is_some_and(|s| s.last_error.is_none()) {
+            info!(path = %name, "⏩ Skipping (already downloaded)");
+        } else if existing.contains(&name) {
+            plan.adopt.push((key, name));
+        } else {
+            plan.download.push(PlannedRecording { file, name, key });
+        }
+    }
+    plan
+}
+
 /// Helper function to scan existing .mp4 files in the recordings directory
-fn scan_existing_recordings(
-    dir: &std::path::Path,
-) -> anyhow::Result<std::collections::HashSet<String>> {
-    let mut existing = std::collections::HashSet::new();
+fn scan_existing_recordings(dir: &std::path::Path) -> anyhow::Result<HashSet<String>> {
+    let mut existing = HashSet::new();
     if dir.exists() {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -601,4 +712,100 @@ fn scan_existing_recordings(
         }
     }
     Ok(existing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(topic: &str, start: &str, segment: &str) -> ZoomRecordingFile {
+        ZoomRecordingFile {
+            meeting_id: "m1".into(),
+            file_id: None,
+            play_url: format!("https://zoom.us/rec/play/{segment}"),
+            download_url: None,
+            file_type: Some("MP4".into()),
+            recording_start: Some(segment.into()),
+            topic: Some(topic.into()),
+            start_time: Some(start.into()),
+            timezone: None,
+            meeting_number: None,
+        }
+    }
+
+    #[test]
+    fn a_recording_is_named_by_date_and_topic_without_the_course_name() {
+        let files = [rec(
+            "202615_2690 MINERIA DE DATOS Sesion sincronica 1",
+            "2026-06-18 19:00:00",
+            "a",
+        )];
+        assert_eq!(
+            recording_names(&files, "202615_2690 MINERIA DE DATOS"),
+            ["2026-06-18_sesion-sincronica-1.mp4"]
+        );
+    }
+
+    #[test]
+    fn the_segments_of_one_meeting_become_parts_in_segment_order() {
+        let files = [
+            rec("Clase", "2026-03-11 10:00", "2026-03-11T11:00:00Z"),
+            rec("Clase", "2026-03-11 10:00", "2026-03-11T10:00:00Z"),
+        ];
+        assert_eq!(
+            recording_names(&files, "Ramo"),
+            [
+                "2026-03-11_clase-parte-2.mp4".to_string(),
+                "2026-03-11_clase.mp4".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undated_recording_keeps_the_meeting_id_fallback() {
+        let mut file = rec("Clase", "", "a");
+        file.start_time = None;
+        file.recording_start = None;
+        assert_eq!(recording_names(&[file], "Ramo"), ["zoom-m1.mp4"]);
+    }
+
+    #[test]
+    fn a_recording_in_state_is_not_downloaded_again() {
+        let file = rec("Clase", "2026-03-11 10:00", "s");
+        let mut state = State::default();
+        state.set(file.state_key(), downloaded(None, Some(1)));
+        let plan = plan_recordings(vec![file], "Ramo", &state, &HashSet::new());
+        assert_eq!(plan, RecordingPlan::default());
+    }
+
+    #[test]
+    fn a_failed_recording_is_tried_again() {
+        let file = rec("Clase", "2026-03-11 10:00", "s");
+        let mut state = State::default();
+        state.record_error(file.state_key(), &"boom");
+        let plan = plan_recordings(vec![file], "Ramo", &state, &HashSet::new());
+        assert_eq!(plan.download.len(), 1);
+    }
+
+    #[test]
+    fn a_migrated_recording_is_found_by_name_and_adopted() {
+        let file = rec("Clase", "2026-03-11 10:00", "s");
+        let key = file.state_key();
+        let existing = HashSet::from(["2026-03-11_clase.mp4".to_string()]);
+        let plan = plan_recordings(vec![file], "Ramo", &State::default(), &existing);
+        assert!(plan.download.is_empty());
+        assert_eq!(plan.adopt, [(key, "2026-03-11_clase.mp4".to_string())]);
+    }
+
+    #[test]
+    fn a_recording_listed_twice_is_planned_once() {
+        let file = rec("Clase", "2026-03-11 10:00", "s");
+        let plan = plan_recordings(
+            vec![file.clone(), file],
+            "Ramo",
+            &State::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(plan.download.len(), 1);
+    }
 }

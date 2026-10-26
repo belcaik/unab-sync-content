@@ -232,7 +232,7 @@ async fn main() -> ExitCode {
         #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
             ZoomCommands::Flow { course_id, since } => {
-                match zoom::zoom_flow(course_id, since).await {
+                match zoom::run_flow(course_id, since).await {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
                         tracing::error!(error = %e, "zoom flow failed");
@@ -401,7 +401,14 @@ async fn handle_status(verbose: bool) -> anyhow::Result<()> {
 
     // Load state from each course directory
     for course_dir in &course_dirs {
-        let state_path = course_dir.join("state.json");
+        // Layout v2 keeps state under `.u_crawler/`; a v1 course not yet
+        // migrated still has it at the top of the course directory.
+        let v2_state = u_crawler::library::state_path(course_dir);
+        let state_path = if v2_state.exists() {
+            v2_state
+        } else {
+            course_dir.join("state.json")
+        };
         let state = State::load(&state_path).await;
 
         let course_name = course_dir

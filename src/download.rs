@@ -5,7 +5,7 @@
 //! only where the file lands.
 
 use crate::canvas::FileObj;
-use crate::fsutil::{atomic_rename, sanitize_filename_preserve_ext};
+use crate::fsutil::atomic_rename;
 use crate::http::HttpCtx;
 use crate::state::{ItemState, State};
 use futures_util::StreamExt;
@@ -31,7 +31,8 @@ pub enum DownloadError {
 pub enum Dest<'a> {
     /// The caller has already chosen the full path, extension included.
     Exact(&'a Path),
-    /// Place the file in `dir` under `name`, deriving a missing extension from
+    /// Place the file in `dir` under `name` (named by
+    /// [`crate::layout::attachment_file`]), deriving a missing extension from
     /// the response's `Content-Type`.
     InDir { dir: &'a Path, name: &'a str },
 }
@@ -75,7 +76,7 @@ pub async fn download_if_needed(
         Dest::Exact(p) => p.to_path_buf(),
         Dest::InDir { dir, name } => {
             let ext = header_str(&head, header::CONTENT_TYPE).and_then(content_type_to_ext);
-            dir.join(sanitize_filename_preserve_ext(with_extension(name, ext)))
+            dir.join(crate::layout::attachment_file(&with_extension(name, ext)))
         }
     };
 
