@@ -21,9 +21,15 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const TS: &str = "20261025T120000000Z";
 const TS2: &str = "20261025T130000000Z";
+/// An empty directory nested in a v1 course, relative to it.
+const EMPTY_V1_DIR: &str = "Modules/999_Vacio/Attachments";
+/// A `Zoom/<id>` with no recordings: no file names it, so no course owns it.
+const EMPTY_ZOOM_DIR: &str = "Zoom/555";
 
 /// The fixture library at `<tmp>/lib`, plus a calendar tree at `<tmp>/cal`
-/// with a `deadlines/` directory for two of its courses.
+/// with a `deadlines/` directory for two of its courses, and an empty
+/// [`EMPTY_V1_DIR`] in the first course and an empty [`EMPTY_ZOOM_DIR`], as
+/// v1 could leave behind.
 struct Lib {
     _dir: TempDir,
     root: PathBuf,
@@ -37,6 +43,8 @@ impl Lib {
         let root = dir.path().join("lib");
         let cal = dir.path().join("cal");
         let lib = v1::write_v1_library(&root)?;
+        fs::create_dir_all(root.join(&lib.courses[0].v1_dir).join(EMPTY_V1_DIR))?;
+        fs::create_dir_all(root.join(EMPTY_ZOOM_DIR))?;
         for course in lib.courses.iter().take(2) {
             let deadlines = cal.join(&course.v1_dir).join("deadlines");
             fs::create_dir_all(&deadlines)?;
@@ -71,6 +79,47 @@ impl Lib {
         }
         Ok(out)
     }
+
+    /// Every directory of both trees, minus the library's `.u_crawler/`.
+    fn dirs(&self) -> io::Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        dirs_under(&self.root, "", &mut out)?;
+        out.retain(|d| d != ".u_crawler" && !d.starts_with(".u_crawler/"));
+        let mut cal = BTreeSet::new();
+        dirs_under(&self.cal, "", &mut cal)?;
+        out.extend(cal.into_iter().map(|d| format!("cal:{d}")));
+        Ok(out)
+    }
+}
+
+fn dirs_under(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            dirs_under(&entry.path(), &rel, out)?;
+            out.insert(rel);
+        }
+    }
+    Ok(())
+}
+
+/// The directories under `root` with nothing in them.
+fn empty_dirs(root: &Path) -> io::Result<Vec<String>> {
+    let mut all = BTreeSet::new();
+    dirs_under(root, "", &mut all)?;
+    let mut out = Vec::new();
+    for d in all {
+        if fs::read_dir(root.join(&d))?.next().is_none() {
+            out.push(d);
+        }
+    }
+    Ok(out)
 }
 
 fn user_files(root: &Path) -> io::Result<BTreeMap<String, String>> {
@@ -97,7 +146,10 @@ fn operations(entries: &[Entry]) -> usize {
         .filter(|e| {
             matches!(
                 e,
-                Entry::Mkdir { .. } | Entry::Rename { .. } | Entry::Write { .. }
+                Entry::Mkdir { .. }
+                    | Entry::Rename { .. }
+                    | Entry::Rmdir { .. }
+                    | Entry::Write { .. }
             )
         })
         .count()
@@ -175,6 +227,103 @@ fn apply_migrates_the_fixture_and_loses_nothing() -> TestResult {
 }
 
 #[test]
+fn a_migration_leaves_no_empty_v1_directory() -> TestResult {
+    let l = Lib::new()?;
+    let plan = l.plan()?;
+    let report = apply(&plan, &l.roots(), TS)?;
+    for course in &l.lib.courses {
+        assert!(!l.root.join(&course.v1_dir).exists(), "{}", course.v1_dir);
+        if let Some(zoom) = &course.zoom {
+            assert!(!l.root.join(&zoom.rel).exists(), "{}", zoom.rel);
+        }
+    }
+    // `Zoom/` stays: the orphan folder is still in it.
+    assert!(l.root.join(&l.lib.orphan_zoom.rel).is_dir());
+    assert_eq!(empty_dirs(&l.root)?, Vec::<String>::new());
+    assert!(!l.root.join(EMPTY_ZOOM_DIR).exists());
+    // `Zoom/` is kept, and reported: the orphan folder is in it.
+    assert_eq!(report.kept_dirs, ["Zoom"]);
+    let empty = format!("{}/{EMPTY_V1_DIR}", l.lib.courses[0].v1_dir);
+    assert!(report.removed_dirs.contains(&empty), "{empty} not removed");
+    // Each removal is journaled, children before their parent.
+    let entries = read_journal(&journal_path(&l.root, TS))?;
+    let removed: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Rmdir {
+                root: Root::Library,
+                path,
+            } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed, report.removed_dirs);
+    for (i, dir) in removed.iter().enumerate() {
+        assert!(
+            !removed[..i]
+                .iter()
+                .any(|d| dir.starts_with(&format!("{d}/"))),
+            "{dir} removed after its parent"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_v1_directory_with_a_file_left_is_kept_and_reported() -> TestResult {
+    // `a/x.pdf` is a duplicate: it stays, so `a/` stays; `a/vacia/` goes.
+    let dir = tree_of(&[("a/x.pdf", "same"), ("b/x.pdf", "same")])?;
+    fs::create_dir_all(dir.path().join("a/vacia"))?;
+    let plan = Plan {
+        duplicates: vec![collision("b/x.pdf", &["a/x.pdf"], true)],
+        prune: vec!["a".into()],
+        ..Plan::default()
+    };
+    let report = apply(&plan, &library(&dir), TS)?;
+    assert_eq!(report.removed_dirs, ["a/vacia"]);
+    assert_eq!(report.kept_dirs, ["a"]);
+    assert_eq!(fs::read_to_string(dir.path().join("a/x.pdf"))?, "same");
+    assert!(!dir.path().join("a/vacia").exists());
+
+    undo(&library(&dir), TS)?;
+    assert!(dir.path().join("a/vacia").is_dir());
+    assert_eq!(fs::read_to_string(dir.path().join("a/x.pdf"))?, "same");
+    Ok(())
+}
+
+#[test]
+fn an_emptied_zoom_folder_and_its_parent_go_and_undo_brings_them_back() -> TestResult {
+    let dir = tree_of(&[("Zoom/1/r.mp4", "video")])?;
+    let plan = Plan {
+        moves: vec![Move {
+            root: Root::Library,
+            kind: EntryKind::File,
+            from: "Zoom/1/r.mp4".into(),
+            to: "ramo/grabaciones/r.mp4".into(),
+        }],
+        prune: vec!["Zoom/1".into()],
+        ..Plan::default()
+    };
+    let report = apply(&plan, &library(&dir), TS)?;
+    assert_eq!(report.removed_dirs, ["Zoom/1", "Zoom"]);
+    assert!(!dir.path().join("Zoom").exists());
+
+    let undone = undo(&library(&dir), TS)?;
+    assert_eq!(
+        fs::read_to_string(dir.path().join("Zoom/1/r.mp4"))?,
+        "video"
+    );
+    assert_eq!(undone.dirs_restored, 2);
+    // The directories the run created are gone again; only `.u_crawler/` is new.
+    let mut left: Vec<String> = fs::read_dir(dir.path())?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<io::Result<_>>()?;
+    left.sort();
+    assert_eq!(left, [".u_crawler", "Zoom"]);
+    Ok(())
+}
+
+#[test]
 fn a_second_run_does_nothing() -> TestResult {
     let l = Lib::new()?;
     apply(&l.plan()?, &l.roots(), TS)?;
@@ -210,6 +359,9 @@ fn every_operation_is_journaled_before_it_happens() -> TestResult {
                 assert!(base(r).join(from).exists() && !base(r).join(to).exists());
             }
             Entry::Mkdir { root: r, path } => assert!(!base(r).join(path).exists()),
+            Entry::Rmdir { root: r, path } => {
+                assert!(fs::read_dir(base(r).join(path))?.next().is_none(), "{path}");
+            }
             Entry::Write { path } => assert!(!root.join(path).exists()),
             _ => {}
         }
@@ -220,22 +372,25 @@ fn every_operation_is_journaled_before_it_happens() -> TestResult {
     Ok(())
 }
 
-/// The reference: the fixture migrated in one go.
-fn reference() -> Result<(BTreeMap<String, String>, usize), Box<dyn Error>> {
+/// The reference: the fixture migrated in one go, files and directories.
+type Reference = (BTreeMap<String, String>, BTreeSet<String>, usize);
+
+fn reference() -> Result<Reference, Box<dyn Error>> {
     let l = Lib::new()?;
     apply(&l.plan()?, &l.roots(), TS)?;
     let ops = operations(&read_journal(&journal_path(&l.root, TS))?);
-    Ok((l.tree()?, ops))
+    Ok((l.tree()?, l.dirs()?, ops))
 }
 
 #[test]
 fn a_cut_anywhere_resumes_from_the_journal_to_the_same_tree() -> TestResult {
-    let (want, ops) = reference()?;
+    let (want, want_dirs, ops) = reference()?;
     assert!(ops > 10, "fixture plan too small to cut: {ops}");
     let cuts: BTreeSet<usize> = [0, 1, 2, ops / 3, ops / 2, ops - 2, ops - 1].into();
     for cut in cuts {
         let l = Lib::new()?;
         let original = l.tree()?;
+        let original_dirs = l.dirs()?;
         let mut n = 0;
         let result = apply_with_hook(&l.plan()?, &l.roots(), TS, &mut |_| {
             n += 1;
@@ -253,6 +408,11 @@ fn a_cut_anywhere_resumes_from_the_journal_to_the_same_tree() -> TestResult {
         let report = resume(&l.roots(), TS)?;
         assert!(report.resumed, "cut {cut}");
         assert_eq!(l.tree()?, want, "cut {cut}: resumed tree differs");
+        assert_eq!(
+            l.dirs()?,
+            want_dirs,
+            "cut {cut}: resumed directories differ"
+        );
         assert_eq!(pending(&l.root)?, None, "cut {cut}");
         assert!(matches!(
             resume(&l.roots(), TS),
@@ -261,6 +421,11 @@ fn a_cut_anywhere_resumes_from_the_journal_to_the_same_tree() -> TestResult {
 
         undo(&l.roots(), TS)?;
         assert_eq!(l.tree()?, original, "cut {cut}: undo after resume differs");
+        assert_eq!(
+            l.dirs()?,
+            original_dirs,
+            "cut {cut}: undo left other directories"
+        );
     }
     Ok(())
 }
@@ -269,6 +434,7 @@ fn a_cut_anywhere_resumes_from_the_journal_to_the_same_tree() -> TestResult {
 fn undo_returns_the_identical_manifest() -> TestResult {
     let l = Lib::new()?;
     let before = l.tree()?;
+    let before_dirs = l.dirs()?;
     let plan_before = l.plan()?;
     assert_eq!(user_files(&l.root)?, l.lib.manifest);
 
@@ -279,6 +445,9 @@ fn undo_returns_the_identical_manifest() -> TestResult {
     assert_eq!(report.set_aside.len(), plan_before.courses.len());
     assert_eq!(user_files(&l.root)?, l.lib.manifest, "library differs");
     assert_eq!(l.tree()?, before, "calendar differs");
+    assert_eq!(l.dirs()?, before_dirs, "directories differ");
+    assert!(report.dirs_restored > 0 && report.dirs_removed > 0);
+    assert_eq!(report.dirs_left, 0);
     // The tree plans exactly as it did before the migration.
     assert_eq!(l.plan()?, plan_before);
 
@@ -292,6 +461,7 @@ fn undo_returns_the_identical_manifest() -> TestResult {
 fn undo_of_a_cut_run_restores_the_manifest_and_can_be_repeated() -> TestResult {
     let l = Lib::new()?;
     let before = l.tree()?;
+    let before_dirs = l.dirs()?;
     let mut n = 0;
     let cut = apply_with_hook(&l.plan()?, &l.roots(), TS, &mut |_| {
         n += 1;
@@ -304,6 +474,7 @@ fn undo_of_a_cut_run_restores_the_manifest_and_can_be_repeated() -> TestResult {
     assert!(cut.is_err());
     undo(&l.roots(), TS)?;
     assert_eq!(l.tree()?, before);
+    assert_eq!(l.dirs()?, before_dirs);
     assert!(undo(&l.roots(), TS)?.already_undone);
     // An undone journal cannot be resumed.
     assert!(matches!(

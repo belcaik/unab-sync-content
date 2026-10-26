@@ -134,6 +134,10 @@ pub struct Summary {
     pub conflicts: usize,
     /// Sources left in place for another reason (see the log).
     pub skipped: usize,
+    /// Empty v1 directories removed.
+    pub removed_dirs: usize,
+    /// v1 directories kept because something is still in them.
+    pub kept_dirs: Vec<String>,
     /// Generated notes given frontmatter and local links.
     pub rewritten: usize,
     /// Generated notes that could not be rewritten (see the log).
@@ -157,6 +161,8 @@ impl Summary {
         self.duplicates += report.duplicates.len();
         self.conflicts += report.conflicts.len();
         self.skipped += report.skipped.len();
+        self.removed_dirs += report.removed_dirs.len();
+        self.kept_dirs.extend(report.kept_dirs.iter().cloned());
     }
 }
 
@@ -165,15 +171,25 @@ impl fmt::Display for Summary {
         write!(
             f,
             "layout v2 migration: {} course(s), {} moved, {} notes rewritten, \
-             {} duplicate(s) left in place, {} conflict(s) renamed, {} skipped, {} unresolved",
+             {} duplicate(s) left in place, {} conflict(s) renamed, {} skipped, {} unresolved, \
+             {} empty v1 dir(s) removed",
             self.courses,
             self.moved,
             self.rewritten,
             self.duplicates,
             self.conflicts,
             self.skipped,
-            self.unresolved.len()
+            self.unresolved.len(),
+            self.removed_dirs
         )?;
+        if !self.kept_dirs.is_empty() {
+            write!(
+                f,
+                ", {} v1 dir(s) kept, not empty: {}",
+                self.kept_dirs.len(),
+                self.kept_dirs.join(", ")
+            )?;
+        }
         if self.rewrite_failed > 0 {
             write!(f, ", {} note(s) not rewritten", self.rewrite_failed)?;
         }
@@ -214,11 +230,14 @@ impl fmt::Display for UndoSummary {
         write!(
             f,
             "migration undone: {} rename(s) reverted, {} note(s) restored, \
-             {} generated file(s) set aside, {} missing, {} empty dir(s) left",
+             {} generated file(s) set aside, {} missing, {} v1 dir(s) recreated, \
+             {} new dir(s) removed, {} new dir(s) left (not empty)",
             self.report.reverted,
             self.restored,
             self.report.set_aside.len() + self.indexes + usize::from(self.unmarked),
             self.report.missing.len(),
+            self.report.dirs_restored,
+            self.report.dirs_removed,
             self.report.dirs_left
         )
     }
@@ -283,6 +302,8 @@ pub async fn ensure_v2(
                 rewritten = summary.rewritten,
                 duplicates = summary.duplicates,
                 conflicts = summary.conflicts,
+                removed_dirs = summary.removed_dirs,
+                kept_dirs = summary.kept_dirs.len(),
                 unresolved = summary.unresolved.len(),
                 journal = ?summary.journal,
                 resumed = ?summary.resumed,
@@ -472,12 +493,20 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
     }
 
     let restored = restore_notes(library, ts).await?;
-    let report = blocking(target, {
+    let mut report = blocking(target, {
         let ts = ts.to_string();
         move |roots| apply::undo(roots, &ts)
     })
     .await?;
     let indexes = set_aside_readmes(library, ts)?;
+    // The READMEs kept the directories the run created from being removed.
+    let (removed, left) = blocking(target, {
+        let ts = ts.to_string();
+        move |roots| apply::remove_created_dirs(roots, &ts)
+    })
+    .await?;
+    report.dirs_removed += removed;
+    report.dirs_left = left;
     let unmarked = set_aside(
         library,
         &format!("{}/{LIBRARY_JSON}", layout::META_DIR),

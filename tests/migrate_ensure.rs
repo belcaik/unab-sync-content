@@ -157,18 +157,23 @@ async fn a_sync_migrates_the_v1_library_once_and_loses_nothing() -> TestResult {
     );
     assert!(lib.root.join("AGENTS.md").is_file());
 
-    // No loss: every v1 byte is in the tree; nothing left in a v1 course dir.
+    // No loss: every v1 byte is in the tree; the v1 course directories and
+    // mapped `Zoom/<id>` folders are gone, emptied and removed.
     let after = v1::hash_tree(&lib.root)?;
     no_loss(&lib.before, &after)?;
     for course in &lib.lib.courses {
         assert!(
-            !after
-                .keys()
-                .any(|p| p.starts_with(&format!("{}/", course.v1_dir))),
-            "{} still has files",
+            !lib.root.join(&course.v1_dir).exists(),
+            "{} is still there",
             course.v1_dir
         );
+        if let Some(zoom) = &course.zoom {
+            assert!(!lib.root.join(&zoom.rel).exists(), "{}", zoom.rel);
+        }
     }
+    assert!(summary.removed_dirs > 0);
+    // Only `Zoom/` is kept, for its orphan folder.
+    assert_eq!(summary.kept_dirs, ["Zoom"]);
     for path in &lib.lib.foreign {
         assert_eq!(after.get(path), lib.before.get(path), "{path} changed");
     }
@@ -195,6 +200,17 @@ async fn a_sync_migrates_the_v1_library_once_and_loses_nothing() -> TestResult {
     assert_eq!(fm.canvas_id, Some(501));
     assert!(fm.url.is_some_and(|u| u.contains("/courses/9001/")));
     assert!(text.contains("[CodeR](adjuntos/coder-s3.zip)"), "{text}");
+    // The twin announcement got its own note, with its own id and url.
+    let disrupcion = lib.course_by_code_v2("ATDF101_202605_2333_EL_ON")?;
+    let twin = lib
+        .root
+        .join(&disrupcion)
+        .join("anuncios/2026-03-01_inicio-de-clases-2.md");
+    let fm = frontmatter::parse(&fs::read_to_string(&twin)?)?.ok_or("twin has no frontmatter")?;
+    assert_eq!(fm.canvas_id, Some(v1::TWIN_ANNOUNCEMENT_ID));
+    assert!(fm
+        .url
+        .is_some_and(|u| u.ends_with(&format!("/{}", v1::TWIN_ANNOUNCEMENT_ID))));
 
     // Second pass: nothing to do, nothing touched.
     assert_eq!(
@@ -248,11 +264,16 @@ async fn undo_puts_the_v1_tree_back_and_the_next_run_migrates_again() -> TestRes
     assert!(undone.unmarked);
     assert!(!library_json_path(&lib.root).exists());
 
-    // Byte for byte, except the two regenerated root index files.
+    // Byte for byte, except the two regenerated root index files, and every
+    // v1 directory is back.
     let mut files = lib.user_files()?;
     files.remove("AGENTS.md");
     files.remove("INDEX.md");
     assert_eq!(files, lib.before);
+    for course in &lib.lib.courses {
+        assert!(lib.root.join(&course.v1_dir).is_dir(), "{}", course.v1_dir);
+        assert!(!lib.root.join(&course.v2_dir).exists(), "{}", course.v2_dir);
+    }
     assert!(lib.cal.join(&lib.lib.courses[0].v1_dir).is_dir());
 
     assert!(undo(&lib.target(), &ts).await?.already_undone);

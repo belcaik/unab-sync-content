@@ -7,7 +7,7 @@ courses (8):
   202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON -> atdf106-electivo-s2520 canvas_id=null
   202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON -> atdf106-electivo-s2524 canvas_id=9002 zoom=9002
   202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON -> atdf105-mineria-de-datos canvas_id=9001 zoom=9001
-moves (36):
+moves (39):
   library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/Modules/510_Inicio/01-Informacion_general.md -> fmma015-elementos-de-fisica-y-medicion/modulos/01-inicio/01-informacion-general.md
   library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/state.json -> fmma015-elementos-de-fisica-y-medicion/.u_crawler/state.json
   library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/Modules/520_Inicio/01-Informacion_general.md -> fmma015-fisica-general/modulos/01-inicio/01-informacion-general.md
@@ -18,6 +18,7 @@ moves (36):
   library: 202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON/state.json -> fmma115-dinamica/.u_crawler/state.json
   library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/Modules/400_Inicio/01-Informacion_general.md -> atdf101-disrupcion-empresarial/modulos/01-inicio/01-informacion-general.md
   library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/2026-03-01_Inicio_de_clases_801.md -> atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases.md
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/2026-03-01_Inicio_de_clases_802.md -> atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases-2.md
   library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/announcements/index.json -> atdf101-disrupcion-empresarial/anuncios/index.json
   library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/state.json -> atdf101-disrupcion-empresarial/.u_crawler/state.json
   library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/Modules/310_Avisos/01-Informacion_general.md -> atdf106-electivo-s2520/modulos/01-avisos/01-informacion-general.md
@@ -32,6 +33,8 @@ moves (36):
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/Attachments/Guia_1.pdf -> atdf105-mineria-de-datos/modulos/01-informacion-general/adjuntos/guia-1.pdf
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/100_Informacion_General/nota-del-usuario.md -> atdf105-mineria-de-datos/modulos/01-informacion-general/nota-del-usuario.md
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/01-Contenidos.md -> atdf105-mineria-de-datos/modulos/02-semana-1/01-contenidos.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/04-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md -> atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3.md
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/Modules/200_Semana_1/06-ASSIGN-Semana_11_Sumativa_3_Informe_de_caso_3.md -> atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3-2.md
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/2026-06-17_Bienvenidos_al_curso_501.md -> atdf105-mineria-de-datos/anuncios/2026-06-17_bienvenidos-al-curso.md
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/index.json -> atdf105-mineria-de-datos/anuncios/index.json
   library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/announcements/media/CodeR_S3.zip -> atdf105-mineria-de-datos/anuncios/adjuntos/coder-s3.zip
@@ -44,13 +47,16 @@ moves (36):
   library: Zoom/9002/2026_05_04_202615_2524_ELECTIVO.mp4 -> atdf106-electivo-s2524/grabaciones/2026-05-04_clase.mp4
   library: Zoom/9003/2026_03_11_202605_2333_DISRUPCION_EMPRESARIAL.mp4 -> atdf101-disrupcion-empresarial/grabaciones/2026-03-11_clase.mp4
   library: Zoom/9003/2026_03_11_202605_2333_DISRUPCION_EMPRESARIAL_1.mp4 -> atdf101-disrupcion-empresarial/grabaciones/2026-03-11_clase-parte-2.mp4
-edits (14):
+edits (17):
+  announcement: atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases-2.md
   announcement: atdf101-disrupcion-empresarial/anuncios/2026-03-01_inicio-de-clases.md
   page: atdf101-disrupcion-empresarial/modulos/01-inicio/01-informacion-general.md
   announcement: atdf105-mineria-de-datos/anuncios/2026-06-17_bienvenidos-al-curso.md
   page: atdf105-mineria-de-datos/modulos/01-informacion-general/01-informacion-general.md
   page: atdf105-mineria-de-datos/modulos/02-semana-1/01-contenidos.md
   assignment: atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md
+  assignment: atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3-2.md
+  assignment: atdf105-mineria-de-datos/tareas/semana-11-sumativa-3-informe-de-caso-3.md
   announcement: atdf106-electivo-s2520/anuncios/2026-04-01_aviso-de-seccion.md
   page: atdf106-electivo-s2520/modulos/01-avisos/01-informacion-general.md
   announcement: atdf106-electivo-s2524/anuncios/2026-04-02_aviso-de-seccion.md
@@ -63,3 +69,13 @@ duplicates (0):
 conflicts (0):
 unresolved (1):
   library: Zoom/424242: zoom folder matches no course
+prune (9):
+  library: 202515_1033_ELEMENTOS_DE_FISICA_Y_MEDICION_FMMA015_202515_1033_EL_ON/ (if empty)
+  library: 202515_1226_FISICA_GENERAL_FMMA015_202515_1226_EL_ON/ (if empty)
+  library: 202525_1149_MECANICA_MECA100_202525_1149_EL_ON/ (if empty)
+  library: 202525_1332_DINAMICA_FMMA115_202525_1332_EL_ON/ (if empty)
+  library: 202605_2333_DISRUPCION_EMPRESARIAL_ATDF101_202605_2333_EL_ON/ (if empty)
+  library: 202615_2520_ELECTIVO_ATDF106_202615_2520_EL_ON/ (if empty)
+  library: 202615_2524_ELECTIVO_ATDF106_202615_2524_EL_ON/ (if empty)
+  library: 202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON/ (if empty)
+  library: Zoom/ (if empty)

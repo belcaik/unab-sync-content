@@ -572,23 +572,38 @@ pub fn with_suffix(name: &str, suffix: &str) -> String {
     }
 }
 
-/// `name` for the item `id`, made unique against `used` (and added to it):
-/// `name` itself when free, else [`with_suffix`] `<id>`, else `<id>-2`,
-/// `<id>-3`… Callers hand items over in id order, so the oldest item keeps
-/// the plain name and a newcomer never takes one already given out.
-pub fn unique_name(used: &mut BTreeSet<String>, name: String, id: u64) -> String {
-    let mut candidate = name.clone();
-    let mut n = 1u32;
-    while used.contains(&candidate) {
-        candidate = if n == 1 {
-            with_suffix(&name, &id.to_string())
-        } else {
-            with_suffix(&name, &format!("{id}-{n}"))
-        };
-        n += 1;
-    }
-    used.insert(candidate.clone());
-    candidate
+/// The names a list of distinct items get when each wants `wanted[i]`, in
+/// the same order.
+///
+/// Callers hand items over in a stable order (Canvas id, or the v1 `NN`
+/// prefix when the migrator has no id). Each item, in turn, keeps the name
+/// it wants unless an earlier item was given it; otherwise it gets
+/// [`with_suffix`] `2`, `3`… — the first that no earlier item was given and
+/// `taken` does not reject. A name depends only on the items before it, so
+/// an item added later (a higher id) never renames one already named:
+/// `Tarea`, `Tarea` are `tarea.md`, `tarea-2.md`, and a later `Tarea 2`
+/// gets `tarea-2-2.md`. `sync` and the migrator both name assignments and
+/// announcements here, so a migrated note and the one `sync` writes next
+/// agree.
+pub fn unique_names(wanted: &[String], taken: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut given: BTreeSet<String> = BTreeSet::new();
+    wanted
+        .iter()
+        .map(|name| {
+            if given.insert(name.clone()) {
+                return name.clone();
+            }
+            let mut n = 2u32;
+            loop {
+                let candidate = with_suffix(name, &n.to_string());
+                if !given.contains(&candidate) && !taken(&candidate) {
+                    given.insert(candidate.clone());
+                    return candidate;
+                }
+                n += 1;
+            }
+        })
+        .collect()
 }
 
 /// An attachment under [`ATTACHMENTS_DIR`]: the stem slugified, the last
@@ -743,18 +758,38 @@ mod tests {
     }
 
     #[test]
-    fn unique_name_never_repeats_a_name() {
-        let mut used = BTreeSet::new();
-        // Assignments 7 "Tarea", 10 "Tarea 12", 12 "Tarea", in id order.
-        let a = unique_name(&mut used, assignment_file("Tarea"), 7);
-        let b = unique_name(&mut used, assignment_file("Tarea 12"), 10);
-        let c = unique_name(&mut used, assignment_file("Tarea"), 12);
-        assert_eq!((a.as_str(), b.as_str()), ("tarea.md", "tarea-12.md"));
-        assert_eq!(c, "tarea-12-2.md");
+    fn unique_names_number_later_items_and_never_repeat() {
+        let names = |titles: &[&str]| -> Vec<String> {
+            titles.iter().map(|t| assignment_file(t)).collect()
+        };
+        let free = |_: &str| false;
+        // In id order: "Tarea", "Tarea 2", "Tarea", "Tarea".
+        let got = unique_names(&names(&["Tarea", "Tarea 2", "Tarea", "Tarea"]), &free);
+        assert_eq!(got, ["tarea.md", "tarea-2.md", "tarea-3.md", "tarea-4.md"]);
+        // A `Tarea 2` after the twin finds `tarea-2.md` given, and moves on.
+        let got = unique_names(&names(&["Tarea", "Tarea", "Tarea 2"]), &free);
+        assert_eq!(got, ["tarea.md", "tarea-2.md", "tarea-2-2.md"]);
+        // `taken` is skipped too; the plain name is not checked against it.
+        let got = unique_names(&names(&["Tarea", "Tarea"]), &|n| n == "tarea-2.md");
+        assert_eq!(got, ["tarea.md", "tarea-3.md"]);
         let long = "x".repeat(150);
-        let d = unique_name(&mut used, assignment_file(&long), 100);
-        let e = unique_name(&mut used, assignment_file(&long), 200);
-        assert_ne!(d, e);
+        let got = unique_names(&names(&[&long, &long]), &free);
+        assert_ne!(got[0], got[1]);
+        assert!(got[1].ends_with("-2.md"), "{}", got[1]);
+    }
+
+    /// Adding items after the existing ones (higher ids) never renames an
+    /// existing one, whatever their titles.
+    #[test]
+    fn unique_names_are_stable_when_items_are_appended() {
+        let titles = ["Tarea", "Tarea", "Tarea 2", "Tarea", "Tarea 2 2", "Tarea 3"];
+        let all: Vec<String> = titles.iter().map(|t| assignment_file(t)).collect();
+        let full = unique_names(&all, &|_| false);
+        for n in 0..all.len() {
+            assert_eq!(unique_names(&all[..n], &|_| false), full[..n], "prefix {n}");
+        }
+        let distinct: BTreeSet<&String> = full.iter().collect();
+        assert_eq!(distinct.len(), full.len(), "{full:?}");
     }
 
     /// The commented UNAB example from `assets/config.toml`, read from the

@@ -271,10 +271,14 @@ offline), which is what identifies a course without `canvas_id`. A
 identity. `README.md`, `INDEX.md` show the readable name.
 
 **Name collisions inside a course.** Two assignments with the same title,
-or two announcements with the same date and title: `layout::unique_name`,
-in Canvas id order — the lower id keeps the plain name, the other gets
-`-<id>` (`tarea-12.md`), then `-<id>-2`… if that is taken too; the suffix
-survives slug truncation. Attachments that slug to the same path in one
+or two announcements with the same date and title: `layout::unique_names`,
+in Canvas id order — each keeps the plain name unless a lower id was given
+it, else gets the first free `-2`, `-3`… (`tarea-2.md`); a name depends only
+on lower ids, so a new item never renames an existing one (a later
+`Tarea 2` becomes `tarea-2-2.md`); the suffix survives slug truncation. The migrator numbers two
+v1 notes the same way (announcements by the id in their v1 name,
+assignments by their v1 module id and `NN` prefix), so a migrated note and the one `sync`
+writes next agree. Attachments that slug to the same path in one
 directory (`Guía 1.pdf`, `guia_1.PDF`) are settled by `download::Claims`:
 each file keeps the name recorded in its `file:<id>` entry
 (`ItemState::file_name`); a new one takes the plain name only when it is
@@ -407,8 +411,24 @@ cron, where nobody would notice until the data was gone.
 ## Migration
 
 Layout v1 → v2 (`docs/specs/layout-v2.md`, "Reglas del migrador" and "API
-de `migrate::ensure`"). Rename only: there is no delete, copy or overwrite
-anywhere in it.
+de `migrate::ensure`"). Rename only: there is no file delete, copy or
+overwrite anywhere in it. The one removal is `rmdir(2)` of the v1
+directories the moves emptied (`Plan::prune`: v1 course directories — or their `Modules/` and
+`announcements/` when the v2 name is the same — and the whole `Zoom/`,
+empty `Zoom/<id>` included, once any of its folders is migrated), bottom-up, each journaled as
+`rmdir` first; never `remove_dir_all`. A directory with anything left in it
+(a duplicate, a foreign file, a symlink) stays and is reported. `--undo`
+creates the removed directories again and removes the ones the run created
+once they are empty.
+
+Two v1 notes that are different Canvas items and want one v2 name (two
+announcements whose v1 names carry different ids, two `NN-ASSIGN-` files
+with one title and a different module or `NN`) are numbered `-2`, `-3`… by
+`layout::unique_names` over every item of the directory in id / module +
+`NN` order, never treated as a collision. Duplicate/conflict
+handling is only for sources of the same item (same id, or same module and
+`NN`). One assignment linked from two modules is therefore two notes; the
+one `sync` does not rewrite is a leftover copy, never a loss.
 
 `migrate::ensure::migrate` (the `migrate` command) runs, in this order:
 
@@ -466,7 +486,8 @@ rewritten note back from its backup, setting the current bytes aside under
 `.u_crawler/migrations/<ts>.undo/<path>`; then `apply::undo`; then the
 `README.md` files of every course directory the journal created (its
 `curso.json` set aside), which would otherwise make the emptied directory
-a foreign one the next migration avoids; then sets
+a foreign one the next migration avoids; then removes the directories the
+run created that this left empty (`apply::remove_created_dirs`); then sets
 `library.json` aside the same way, so the next writer command migrates
 again (for example after a `[layout]` change). Root `AGENTS.md`/`INDEX.md`
 stay. Every step is idempotent, so a cut undo is simply run again.
@@ -690,8 +711,11 @@ see `docs/specs/layout-v2.md`), the migration plan over that library
 (`tests/migrate_plan.rs`: golden snapshot in `tests/golden/migrate_plan_v1.txt`,
 regenerated with `U_CRAWLER_BLESS=1`; no-loss and second-run-is-empty checks),
 and its execution (`tests/migrate_apply.rs`: a cut at several points resumes
-from the journal to the same tree, undo restores the manifest byte for byte,
-a second run is a no-op, identical/different collisions, and a `cp -al` clone
+from the journal to the same tree and directories, undo restores the
+manifest byte for byte and the same set of directories, no empty v1
+directory is left after a migration while one holding a file is kept and
+reported, two distinct items with one name are numbered rather than
+collided, a second run is a no-op, identical/different collisions, and a `cp -al` clone
 whose markdown is rewritten leaves the original untouched), the index files
 an offline migration writes (`tests/migrate_indexes.rs`: golden snapshot of
 every `README.md`, `curso.json` and `INDEX.md` in

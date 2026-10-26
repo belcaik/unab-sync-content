@@ -37,11 +37,21 @@
 //! matches anything, is [`Reason::OrphanZoom`] / [`Reason::AmbiguousZoom`]
 //! and stays where it is.
 //!
-//! Two sources with the same destination, or a destination that already
-//! exists, are a [`Collision`]: same sizes go to [`Plan::duplicates`]
-//! (identical unless BLAKE3 says otherwise), different sizes to
-//! [`Plan::conflicts`]. The executor hashes and decides; the planner never
-//! reads file contents.
+//! Two v1 notes that are different Canvas items and want the same name —
+//! two announcements with one date and title (their v1 names carry
+//! different ids), two assignments with one title and different `NN`
+//! prefixes — are not a collision: [`layout::unique_names`] names every item
+//! of the directory in id / `NN` order (`tarea.md`, `tarea-2.md`), as `sync`
+//! does.
+//!
+//! Two sources of the same item with the same destination, or a destination
+//! that already exists, are a [`Collision`]: same sizes go to
+//! [`Plan::duplicates`] (identical unless BLAKE3 says otherwise), different
+//! sizes to [`Plan::conflicts`]. The executor hashes and decides; the
+//! planner never reads file contents.
+//!
+//! [`Plan::prune`] lists the v1 directories the migration empties; the
+//! executor removes what is left of them only where it is empty.
 
 use super::detect::{is_assignment_file, module_id, numeric};
 use super::{
@@ -194,6 +204,13 @@ pub struct Plan {
     pub conflicts: Vec<Collision>,
     /// Left in place.
     pub unresolved: Vec<Unresolved>,
+    /// v1 directories (library root) the moves empty, sorted: every migrated
+    /// v1 course directory (its `Modules/` and `announcements/` when the v2
+    /// directory has the same name) and, when any `Zoom/<id>` is migrated,
+    /// `Zoom/` itself (empty `Zoom/<id>` included). The executor removes
+    /// each empty directory under them, bottom-up; anything with a file left
+    /// in it stays.
+    pub prune: Vec<String>,
 }
 
 impl Plan {
@@ -218,14 +235,29 @@ pub fn plan(inv: &Inventory, naming: &CourseNaming, canvas: &[CanvasCourse]) -> 
         candidates: BTreeMap::new(),
         caldir_moves: Vec::new(),
         unresolved: Vec::new(),
+        prune: Vec::new(),
     };
     let mut courses = resolve_courses(inv, naming, canvas);
     let zoom = planner.map_zoom(naming, &mut courses);
     for course in &courses {
         planner.course_files(course);
+        let v1 = &course.planned.v1_dir;
+        if *v1 == course.planned.dir {
+            // The v2 tree lives in it: only its v1 subdirectories are emptied.
+            for sub in [V1_MODULES_DIR, V1_ANNOUNCEMENTS_DIR] {
+                planner.prune.push(format!("{v1}/{sub}"));
+            }
+        } else {
+            planner.prune.push(v1.clone());
+        }
     }
     for (folder, course) in &zoom {
         planner.zoom_files(*folder, &courses[*course]);
+    }
+    if !zoom.is_empty() {
+        // The whole v1 `Zoom/`: also the empty `Zoom/<id>` the inventory
+        // (files only) cannot see. An unresolved folder keeps it.
+        planner.prune.push(V1_ZOOM_DIR.to_string());
     }
     planner.caldir(&courses);
     planner.finish(courses)
@@ -332,6 +364,34 @@ struct Source {
     from: String,
     /// Edit kind and v2 course directory.
     edit: Option<(EditKind, String)>,
+    /// [`Dest::item`].
+    item: Option<Item>,
+}
+
+/// Which Canvas item a generated v1 note is: `(id, 0)` for an announcement
+/// (the id in its v1 name), `(module id, NN)` for an assignment (its v1
+/// module directory and item position). Ordered so items are numbered in
+/// id, then module and position, order.
+type Item = (u64, u64);
+
+/// Where a v1 file goes.
+struct Dest {
+    to: String,
+    edit: Option<EditKind>,
+    /// Which Canvas item a generated note is, when its v1 path says
+    /// ([`Item`]). Sources of one destination with different items are
+    /// different items, numbered apart.
+    item: Option<Item>,
+}
+
+impl Dest {
+    fn plain(to: String) -> Dest {
+        Dest {
+            to,
+            edit: None,
+            item: None,
+        }
+    }
 }
 
 /// One course-matching rule of [`match_by_tokens`].
@@ -344,16 +404,19 @@ struct Planner<'a> {
     candidates: BTreeMap<String, Vec<Source>>,
     caldir_moves: Vec<Move>,
     unresolved: Vec<Unresolved>,
+    prune: Vec<String>,
 }
 
 impl Planner<'_> {
-    fn propose(&mut self, from: &str, to: String, edit: Option<(EditKind, &str)>) {
-        if from == to {
+    /// `dest` for the file `from` of the v2 course `course`.
+    fn propose(&mut self, from: &str, dest: Dest, course: &str) {
+        if from == dest.to {
             return;
         }
-        self.candidates.entry(to).or_default().push(Source {
+        self.candidates.entry(dest.to).or_default().push(Source {
             from: from.to_string(),
-            edit: edit.map(|(k, c)| (k, c.to_string())),
+            edit: dest.edit.map(|k| (k, course.to_string())),
+            item: dest.item,
         });
     }
 
@@ -442,19 +505,19 @@ impl Planner<'_> {
         let files: Vec<(&str, &str)> = Self::files_under(self.inv, &course.v1_dir).collect();
         for (path, rel) in files {
             let parts: Vec<&str> = rel.split('/').collect();
-            let (to, edit) = match parts.as_slice() {
-                [V1_STATE_FILE] => (join(&[v2, layout::META_DIR, V1_STATE_FILE]), None),
+            let dest = match parts.as_slice() {
+                [V1_STATE_FILE] => Dest::plain(join(&[v2, layout::META_DIR, V1_STATE_FILE])),
                 [V1_MODULES_DIR, module, rest @ ..] if module_dirs.contains_key(*module) => {
                     let mdir = join(&[v2, layout::MODULES_DIR, &module_dirs[*module]]);
-                    module_file(v2, &mdir, rest)
+                    module_file(v2, &mdir, module_id(module), rest)
                 }
                 [V1_MODULES_DIR, rest @ ..] => {
-                    (join(&[v2, layout::MODULES_DIR, &rest.join("/")]), None)
+                    Dest::plain(join(&[v2, layout::MODULES_DIR, &rest.join("/")]))
                 }
                 [V1_ANNOUNCEMENTS_DIR, rest @ ..] => announcement_file(v2, rest),
-                _ => (join(&[v2, rel]), None),
+                _ => Dest::plain(join(&[v2, rel])),
             };
-            self.propose(path, to, edit.map(|k| (k, v2)));
+            self.propose(path, dest, v2);
         }
     }
 
@@ -479,8 +542,8 @@ impl Planner<'_> {
             };
             self.propose(
                 path,
-                join(&[&course.dir, layout::RECORDINGS_DIR, &name]),
-                None,
+                Dest::plain(join(&[&course.dir, layout::RECORDINGS_DIR, &name])),
+                &course.dir,
             );
         }
     }
@@ -508,7 +571,63 @@ impl Planner<'_> {
         }
     }
 
-    fn finish(self, courses: Vec<Resolved>) -> Plan {
+    /// Name every Canvas item of a directory (`anuncios/`, `tareas/`) the
+    /// way `sync` does: all of them, in [`Item`] order, through
+    /// [`layout::unique_names`]. A name it numbers is also kept free of
+    /// other files the plan puts there and of files already on disk. An item
+    /// is its [`Source::item`] and the name it wants, so the sources of one
+    /// item stay together, a collision as before.
+    fn number_items(&mut self) {
+        type Items = BTreeMap<(Item, String), Vec<Source>>;
+        let keyed: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|(_, sources)| sources.iter().any(|s| s.item.is_some()))
+            .map(|(to, _)| to.clone())
+            .collect();
+        let mut dirs: BTreeMap<String, Items> = BTreeMap::new();
+        for to in keyed {
+            let Some(sources) = self.candidates.remove(&to) else {
+                continue;
+            };
+            let (dir, name) = match to.rsplit_once('/') {
+                Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+                None => (String::new(), to.clone()),
+            };
+            let mut rest = Vec::new();
+            for source in sources {
+                match source.item {
+                    Some(item) => dirs
+                        .entry(dir.clone())
+                        .or_default()
+                        .entry((item, name.clone()))
+                        .or_default()
+                        .push(source),
+                    None => rest.push(source),
+                }
+            }
+            if !rest.is_empty() {
+                self.candidates.insert(to, rest);
+            }
+        }
+        for (dir, items) in dirs {
+            let wanted: Vec<String> = items.keys().map(|(_, name)| name.clone()).collect();
+            let taken = |n: &str| {
+                let path = format!("{dir}{n}");
+                self.candidates.contains_key(&path) || self.inv.files.contains_key(&path)
+            };
+            let names = layout::unique_names(&wanted, &taken);
+            for (name, sources) in names.into_iter().zip(items.into_values()) {
+                self.candidates
+                    .entry(format!("{dir}{name}"))
+                    .or_default()
+                    .extend(sources);
+            }
+        }
+    }
+
+    fn finish(mut self, courses: Vec<Resolved>) -> Plan {
+        self.number_items();
         let inv = self.inv;
         // Every directory a file sits in, now or after the plan: a file can
         // never be renamed onto one.
@@ -522,6 +641,7 @@ impl Planner<'_> {
             courses: courses.into_iter().map(|c| c.planned).collect(),
             moves: self.caldir_moves,
             unresolved: self.unresolved,
+            prune: self.prune,
             ..Plan::default()
         };
         for (to, sources) in &self.candidates {
@@ -578,6 +698,7 @@ impl Planner<'_> {
         plan.duplicates.sort();
         plan.conflicts.sort();
         plan.unresolved.sort();
+        plan.prune.sort();
         plan
     }
 }
@@ -715,64 +836,61 @@ fn module_dirs(
 
 /// Where a file inside a v1 module directory goes. `rest` is its path below
 /// the module directory; `mdir` the v2 module directory (from the library root).
-fn module_file(v2: &str, mdir: &str, rest: &[&str]) -> (String, Option<EditKind>) {
+fn module_file(v2: &str, mdir: &str, module: Option<u64>, rest: &[&str]) -> Dest {
     match rest {
         [file] if is_assignment_file(file) => {
             let title = v1_md_title(file).unwrap_or_default();
             let title = title.strip_prefix("ASSIGN-").unwrap_or(title);
-            (
-                join(&[v2, layout::ASSIGNMENTS_DIR, &layout::assignment_file(title)]),
-                Some(EditKind::Assignment),
-            )
+            Dest {
+                to: join(&[v2, layout::ASSIGNMENTS_DIR, &layout::assignment_file(title)]),
+                edit: Some(EditKind::Assignment),
+                item: module.zip(v1_md_position(file).map(u64::from)),
+            }
         }
         [file] => match (v1_md_position(file), v1_md_title(file)) {
-            (Some(position), Some(title)) => (
-                join(&[mdir, &layout::page_file(position, title)]),
-                Some(EditKind::Page),
-            ),
-            _ => (join(&[mdir, file]), None),
+            (Some(position), Some(title)) => Dest {
+                to: join(&[mdir, &layout::page_file(position, title)]),
+                edit: Some(EditKind::Page),
+                item: None,
+            },
+            _ => Dest::plain(join(&[mdir, file])),
         },
-        [V1_ATTACHMENTS_DIR, file] => (
-            join(&[
-                mdir,
-                layout::ATTACHMENTS_DIR,
-                &layout::attachment_file(file),
-            ]),
-            None,
-        ),
-        [V1_ATTACHMENTS_DIR, nested @ ..] => (
-            join(&[mdir, layout::ATTACHMENTS_DIR, &nested.join("/")]),
-            None,
-        ),
-        _ => (join(&[mdir, &rest.join("/")]), None),
+        [V1_ATTACHMENTS_DIR, file] => Dest::plain(join(&[
+            mdir,
+            layout::ATTACHMENTS_DIR,
+            &layout::attachment_file(file),
+        ])),
+        [V1_ATTACHMENTS_DIR, nested @ ..] => {
+            Dest::plain(join(&[mdir, layout::ATTACHMENTS_DIR, &nested.join("/")]))
+        }
+        _ => Dest::plain(join(&[mdir, &rest.join("/")])),
     }
 }
 
 /// Where a file inside a v1 `announcements/` directory goes.
-fn announcement_file(v2: &str, rest: &[&str]) -> (String, Option<EditKind>) {
+fn announcement_file(v2: &str, rest: &[&str]) -> Dest {
     let anuncios = join(&[v2, layout::ANNOUNCEMENTS_DIR]);
     match rest {
-        [INDEX_JSON] => (join(&[&anuncios, INDEX_JSON]), None),
-        [V1_MEDIA_DIR, file] => (
-            join(&[
-                &anuncios,
-                layout::ATTACHMENTS_DIR,
-                &layout::attachment_file(file),
-            ]),
-            None,
-        ),
-        [V1_MEDIA_DIR, nested @ ..] => (
-            join(&[&anuncios, layout::ATTACHMENTS_DIR, &nested.join("/")]),
-            None,
-        ),
+        [INDEX_JSON] => Dest::plain(join(&[&anuncios, INDEX_JSON])),
+        [V1_MEDIA_DIR, file] => Dest::plain(join(&[
+            &anuncios,
+            layout::ATTACHMENTS_DIR,
+            &layout::attachment_file(file),
+        ])),
+        [V1_MEDIA_DIR, nested @ ..] => Dest::plain(join(&[
+            &anuncios,
+            layout::ATTACHMENTS_DIR,
+            &nested.join("/"),
+        ])),
         [file] => match parse_v1_announcement(file) {
-            Some((date, title)) => (
-                join(&[&anuncios, &layout::announcement_file(date, title)]),
-                Some(EditKind::Announcement),
-            ),
-            None => (join(&[&anuncios, file]), None),
+            Some((date, title, id)) => Dest {
+                to: join(&[&anuncios, &layout::announcement_file(date, title)]),
+                edit: Some(EditKind::Announcement),
+                item: Some((id, 0)),
+            },
+            None => Dest::plain(join(&[&anuncios, file])),
         },
-        _ => (join(&[&anuncios, &rest.join("/")]), None),
+        _ => Dest::plain(join(&[&anuncios, &rest.join("/")])),
     }
 }
 
@@ -790,14 +908,13 @@ fn v1_md_title(file: &str) -> Option<&str> {
     Some(title)
 }
 
-/// A v1 announcement body, `YYYY-MM-DD_<slug>_<id>.md`, as date and title.
-fn parse_v1_announcement(file: &str) -> Option<(NaiveDate, &str)> {
+/// A v1 announcement body, `YYYY-MM-DD_<slug>_<id>.md`, as date, title and id.
+fn parse_v1_announcement(file: &str) -> Option<(NaiveDate, &str, u64)> {
     let stem = file.strip_suffix(".md")?;
     let (date, rest) = stem.split_once('_')?;
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
     let (title, id) = rest.rsplit_once('_')?;
-    numeric(id)?;
-    Some((date, title))
+    Some((date, title, numeric(id)?))
 }
 
 fn join(parts: &[&str]) -> String {
@@ -893,6 +1010,10 @@ impl fmt::Display for Plan {
         writeln!(f, "unresolved ({}):", self.unresolved.len())?;
         for u in &self.unresolved {
             writeln!(f, "  {}: {}: {}", u.root, u.path, u.reason)?;
+        }
+        writeln!(f, "prune ({}):", self.prune.len())?;
+        for dir in &self.prune {
+            writeln!(f, "  {}: {dir}/ (if empty)", Root::Library)?;
         }
         Ok(())
     }
@@ -1037,31 +1158,85 @@ mod tests {
     }
 
     #[test]
-    fn colliding_destinations_are_split_by_size() {
-        let a = format!("{MIN}/announcements/2026-01-01_Aviso_1.md");
-        let b = format!("{MIN}/announcements/2026-01-01_Aviso_2.md");
-        let c = format!("{MIN}/announcements/2026-01-02_Otro_3.md");
-        let d = format!("{MIN}/announcements/2026-01-02_Otro_4.md");
-        let inv = inv(&[(&a, 10), (&b, 10), (&c, 10), (&d, 11)]);
+    fn distinct_items_with_one_name_are_numbered_not_collided() {
+        // Announcements 1 and 2 share date and title; 9 is titled "Aviso 2".
+        let a1 = format!("{MIN}/announcements/2026-01-01_Aviso_1.md");
+        let a2 = format!("{MIN}/announcements/2026-01-01_Aviso_2.md");
+        let a9 = format!("{MIN}/announcements/2026-01-01_Aviso_2_9.md");
+        // Two assignments with one title, items 04 and 06 of one module.
+        let t4 = format!("{MIN}/Modules/1_Uno/04-ASSIGN-Informe_de_caso_3.md");
+        let t6 = format!("{MIN}/Modules/1_Uno/06-ASSIGN-Informe_de_caso_3.md");
+        // Two more with one title and one `NN`, in two modules.
+        let f1 = format!("{MIN}/Modules/1_Uno/03-ASSIGN-Foro_de_consultas.md");
+        let f2 = format!("{MIN}/Modules/2_Dos/03-ASSIGN-Foro_de_consultas.md");
+        let inv = inv(&[
+            (&a1, 10),
+            (&a2, 10),
+            (&a9, 12),
+            (&t4, 5),
+            (&t6, 7),
+            (&f1, 100),
+            (&f2, 120),
+        ]);
+        let plan = plan(&inv, &unab(), &[]);
+        assert!(plan.duplicates.is_empty() && plan.conflicts.is_empty());
+        let anuncios = "atdf105-mineria-de-datos/anuncios";
+        let tareas = "atdf105-mineria-de-datos/tareas";
+        let want = [
+            (&a1, format!("{anuncios}/2026-01-01_aviso.md")),
+            (&a2, format!("{anuncios}/2026-01-01_aviso-2.md")),
+            (&a9, format!("{anuncios}/2026-01-01_aviso-2-2.md")),
+            (&t4, format!("{tareas}/informe-de-caso-3.md")),
+            (&t6, format!("{tareas}/informe-de-caso-3-2.md")),
+            (&f1, format!("{tareas}/foro-de-consultas.md")),
+            (&f2, format!("{tareas}/foro-de-consultas-2.md")),
+        ];
+        for (from, to) in &want {
+            assert_eq!(moved(&plan, from), Some(to.as_str()), "{from}");
+            assert!(plan.edits.iter().any(|e| &e.path == to), "no edit for {to}");
+        }
+    }
+
+    #[test]
+    fn a_course_keeping_its_name_prunes_only_its_v1_subdirectories() {
+        let inv = inv(&[
+            ("mineria/state.json", 1),
+            ("mineria/Modules/1_Uno/01-Pagina.md", 1),
+        ]);
+        let plan = plan(&inv, &unab(), &[]);
+        assert_eq!(plan.courses[0].dir, "mineria");
+        assert_eq!(plan.prune, ["mineria/Modules", "mineria/announcements"]);
+    }
+
+    #[test]
+    fn colliding_sources_of_one_item_are_split_by_size() {
+        // Same `NN` and title once slugged: the same page, twice.
+        let a = format!("{MIN}/Modules/1_Uno/01-Pagina.md");
+        let b = format!("{MIN}/Modules/1_Uno/01-PAGINA.md");
+        let c = format!("{MIN}/Modules/1_Uno/02-Otra.md");
+        let d = format!("{MIN}/Modules/1_Uno/02-OTRA.md");
+        // One assignment, same module and `NN`, two spellings.
+        let e = format!("{MIN}/Modules/1_Uno/04-ASSIGN-Tarea.md");
+        let f = format!("{MIN}/Modules/1_Uno/04-ASSIGN-TAREA.md");
+        let inv = inv(&[(&a, 10), (&b, 10), (&c, 10), (&d, 11), (&e, 3), (&f, 3)]);
         let plan = plan(&inv, &unab(), &[]);
         assert!(plan.moves.is_empty() && plan.edits.is_empty());
+        let collision = |to: &str, from: Vec<String>| Collision {
+            root: Root::Library,
+            to: format!("atdf105-mineria-de-datos/{to}"),
+            from,
+            occupied: false,
+        };
         assert_eq!(
             plan.duplicates,
-            [Collision {
-                root: Root::Library,
-                to: "atdf105-mineria-de-datos/anuncios/2026-01-01_aviso.md".into(),
-                from: vec![a, b],
-                occupied: false,
-            }]
+            [
+                collision("modulos/01-uno/01-pagina.md", vec![b, a]),
+                collision("tareas/tarea.md", vec![f, e]),
+            ]
         );
         assert_eq!(
             plan.conflicts,
-            [Collision {
-                root: Root::Library,
-                to: "atdf105-mineria-de-datos/anuncios/2026-01-02_otro.md".into(),
-                from: vec![c, d],
-                occupied: false,
-            }]
+            [collision("modulos/01-uno/02-otra.md", vec![d, c])]
         );
     }
 
@@ -1285,7 +1460,7 @@ mod tests {
         assert_eq!(v1_md_title("nota.md"), None);
         assert_eq!(
             parse_v1_announcement("2026-06-17_Hola_mundo_501.md"),
-            NaiveDate::from_ymd_opt(2026, 6, 17).map(|d| (d, "Hola_mundo"))
+            NaiveDate::from_ymd_opt(2026, 6, 17).map(|d| (d, "Hola_mundo", 501))
         );
         assert_eq!(parse_v1_announcement("2026-06-17_Hola.md"), None);
         assert_eq!(parse_v1_announcement("17-06-2026_Hola_1.md"), None);

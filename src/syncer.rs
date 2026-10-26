@@ -238,21 +238,20 @@ pub async fn run_sync(
 
 /// The file name under `tareas/` of every assignment in a course, by id.
 ///
-/// Assignments are named in id order through [`layout::unique_name`], so
-/// the oldest of two with the same name keeps it, the newer one gets its id
-/// appended, and no two ever share a file; a new assignment never renames an
-/// existing one.
+/// Assignments are named in id order through [`layout::unique_names`], so
+/// the oldest of two with the same name keeps it, the newer one gets `-2`
+/// (then `-3`…), and no two ever share a file — the same names the
+/// migrator gives two v1 assignments with one title. A name depends only on
+/// the lower ids, so a new assignment never renames an existing one.
 fn assignment_files(assignments: &[Assignment]) -> HashMap<u64, String> {
     let mut sorted: Vec<&Assignment> = assignments.iter().collect();
     sorted.sort_by_key(|a| a.id);
-    let mut used = BTreeSet::new();
-    sorted
-        .into_iter()
-        .map(|a| {
-            let name = layout::assignment_file(a.name.as_deref().unwrap_or(""));
-            (a.id, layout::unique_name(&mut used, name, a.id))
-        })
-        .collect()
+    let wanted: Vec<String> = sorted
+        .iter()
+        .map(|a| layout::assignment_file(a.name.as_deref().unwrap_or("")))
+        .collect();
+    let names = layout::unique_names(&wanted, &|_| false);
+    sorted.into_iter().map(|a| a.id).zip(names).collect()
 }
 
 /// A Canvas timestamp as the frontmatter writes it: RFC 3339, UTC, seconds.
@@ -653,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn assignments_are_named_by_title_and_the_newer_twin_gets_its_id() {
+    fn assignments_are_named_by_title_and_the_newer_twin_is_numbered() {
         let got = assignment_files(&[
             assignment(30, "Semana 10: Formativa 6"),
             assignment(12, "Tarea"),
@@ -661,20 +660,23 @@ mod tests {
         ]);
         assert_eq!(got[&30], "semana-10-formativa-6.md");
         assert_eq!(got[&7], "tarea.md");
-        assert_eq!(got[&12], "tarea-12.md");
+        assert_eq!(got[&12], "tarea-2.md");
     }
 
     #[test]
-    fn a_suffixed_name_is_checked_against_the_names_already_given() {
-        let got = assignment_files(&[
-            assignment(7, "Tarea"),
-            assignment(10, "Tarea 12"),
-            assignment(12, "Tarea"),
-        ]);
-        let names: HashSet<&String> = got.values().collect();
-        assert_eq!(names.len(), 3, "{got:?}");
-        assert_eq!(got[&10], "tarea-12.md");
-        assert_eq!(got[&12], "tarea-12-2.md");
+    fn a_new_assignment_never_renames_an_existing_twin() {
+        let twins = [assignment(7, "Tarea"), assignment(10, "Tarea")];
+        let before = assignment_files(&twins);
+        assert_eq!(before[&10], "tarea-2.md");
+        // Canvas adds "Tarea 2" later: the twin keeps its file.
+        let mut more = twins.to_vec();
+        more.push(assignment(20, "Tarea 2"));
+        let after = assignment_files(&more);
+        assert_eq!(after[&7], before[&7]);
+        assert_eq!(after[&10], before[&10]);
+        assert_eq!(after[&20], "tarea-2-2.md");
+        let names: HashSet<&String> = after.values().collect();
+        assert_eq!(names.len(), 3, "{after:?}");
     }
 
     #[test]
@@ -682,7 +684,7 @@ mod tests {
         let title = "Informe ".repeat(20);
         let got = assignment_files(&[assignment(100, &title), assignment(200, &title)]);
         assert_ne!(got[&100], got[&200]);
-        assert!(got[&200].ends_with("-200.md"), "{got:?}");
+        assert!(got[&200].ends_with("-2.md"), "{got:?}");
     }
 
     #[test]

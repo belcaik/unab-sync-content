@@ -453,6 +453,9 @@ async fn handle_migrate(
             for u in &summary.unresolved {
                 println!("left in place: {}: {}: {}", u.root, u.path, u.reason);
             }
+            for dir in &summary.kept_dirs {
+                println!("v1 directory kept, not empty: {dir}/");
+            }
             if summary.changed_files() {
                 println!("{summary}");
             } else {
