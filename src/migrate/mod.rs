@@ -10,18 +10,23 @@
 //! - [`plan::plan`] turns the inventory, plus optional Canvas metadata, into a
 //!   [`plan::Plan`]: moves, markdown edits, destination collisions and what
 //!   it could not place. It is pure and deterministic.
+//! - [`rewrite`] copies a generated markdown note under `.u_crawler/backup/`
+//!   and then refreshes its YAML frontmatter and Canvas file links.
 //!
 //! - [`apply::apply`] carries a plan out: a write-ahead journal under
 //!   `.u_crawler/migrations/`, `rename(2)` without replacement, BLAKE3 for
 //!   collisions; [`apply::undo`] reverses a journal.
 //!
-//! Scanning and planning never open a file for writing. The executor renames
-//! and creates directories and `curso.json`; nothing here deletes, copies or
-//! overwrites a file.
+//! [`scan`], [`detect`] and [`plan`] never open a file for writing. The
+//! writers are [`apply`], which renames and creates directories and
+//! `curso.json` (nothing deleted, copied or overwritten), and [`rewrite`],
+//! which only replaces a note [`rewrite::generated_kind`] accepts, after
+//! the backup exists. There is no `migrate` CLI.
 
 pub mod apply;
 pub mod detect;
 pub mod plan;
+pub mod rewrite;
 
 use crate::layout::{self, CourseMeta, ExistingCourseDir};
 use serde::Deserialize;
