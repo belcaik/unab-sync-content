@@ -32,6 +32,9 @@ pub struct CourseIndex {
     /// Canvas identity of the course; `id` is `None` after an offline
     /// migration that never saw a `courses/<id>`.
     pub course: CourseMeta,
+    /// The name a person reads ([`layout::CourseNaming::display_name`]);
+    /// empty falls back to `course.name`, then to `dir`.
+    pub title: String,
     /// Academic term (e.g. `202615`), when a builder recovered one.
     pub term: Option<String>,
     /// Section / NRC (e.g. `2690`), when a builder recovered one.
@@ -46,6 +49,17 @@ pub struct CourseIndex {
     pub announcements: Vec<AnnouncementIndex>,
     /// Recordings with a file under `grabaciones/`, in any order.
     pub recordings: Vec<RecordingIndex>,
+}
+
+impl CourseIndex {
+    /// What the indexes call the course: [`Self::title`], else the Canvas
+    /// name, else the directory.
+    pub fn display(&self) -> &str {
+        [&self.title, &self.course.name, &self.dir]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .map_or("", String::as_str)
+    }
 }
 
 /// One module of a course, with the pages and assignments it links.
@@ -205,12 +219,7 @@ pub struct RecordingIndex {
 /// list, assignments with their due dates, recent announcements and the
 /// recordings. Empty sections are omitted.
 pub fn render_course_readme(course: &CourseIndex) -> String {
-    let title = if course.course.name.is_empty() {
-        &course.dir
-    } else {
-        &course.course.name
-    };
-    let mut out = format!("# {title}\n");
+    let mut out = format!("# {}\n", course.display());
 
     let mut meta: Vec<String> = Vec::new();
     if let Some(code) = &course.course.code {
@@ -358,13 +367,16 @@ pub fn render_module_readme(module: &ModuleIndex) -> String {
 
 /// The `curso.json` of a course directory: the metadata an offline reader
 /// (the migrator, [`layout::CourseNaming::course_dirs`]) needs to recognize
-/// the course without a network.
+/// the course without a network. `name` is the readable name
+/// ([`CourseIndex::display`]); `canvas_name` is the name as Canvas gives it
+/// (or as a v1 directory spelled it), which is what identifies the course.
 pub fn render_curso_json(course: &CourseIndex) -> String {
     #[derive(Serialize)]
     struct CursoJson<'a> {
         canvas_id: Option<u64>,
         course_code: Option<&'a str>,
         name: &'a str,
+        canvas_name: &'a str,
         term: Option<&'a str>,
         section: Option<&'a str>,
         zoom_ids: &'a [u64],
@@ -372,7 +384,8 @@ pub fn render_curso_json(course: &CourseIndex) -> String {
     let json = CursoJson {
         canvas_id: course.course.id,
         course_code: course.course.code.as_deref(),
-        name: &course.course.name,
+        name: course.display(),
+        canvas_name: &course.course.name,
         term: course.term.as_deref(),
         section: course.section.as_deref(),
         zoom_ids: &course.zoom_ids,
@@ -394,11 +407,7 @@ pub fn render_index_md(library: &LibraryIndex, today: NaiveDate) -> String {
     if !courses.is_empty() {
         out.push_str("\n## Ramos\n\n");
         for c in &courses {
-            let title = if c.course.name.is_empty() {
-                &c.dir
-            } else {
-                &c.course.name
-            };
+            let title = c.display();
             let mut extra: Vec<&str> = Vec::new();
             if let Some(code) = &c.course.code {
                 extra.push(code);
@@ -432,11 +441,7 @@ pub fn render_index_md(library: &LibraryIndex, today: NaiveDate) -> String {
         out.push_str("\n## Próximas entregas\n\n");
         for (c, a) in upcoming {
             let due = a.due_at.map(|d| fmt_dt(&d)).unwrap_or_default();
-            let title = if c.course.name.is_empty() {
-                &c.dir
-            } else {
-                &c.course.name
-            };
+            let title = c.display();
             out.push_str(&format!(
                 "- {due} — {title}: [{}]({}/{}/{})\n",
                 md_text(&a.title),
@@ -541,6 +546,7 @@ mod tests {
                 name: "202615_2690_MINERIA DE DATOS".into(),
                 code: Some("ATDF105_202615_2690_EL_ON".into()),
             },
+            title: "Minería de Datos".into(),
             term: Some("202615".into()),
             section: Some("2690".into()),
             zoom_ids: vec![210432],
@@ -563,7 +569,7 @@ mod tests {
     fn course_readme_snapshot() {
         let got = render_course_readme(&sample_course());
         let want = "\
-# 202615_2690_MINERIA DE DATOS
+# Minería de Datos
 
 **Código:** ATDF105_202615_2690_EL_ON · **Término:** 202615 · **Sección:** 2690 · **ID Canvas:** 210432
 
@@ -658,7 +664,8 @@ mod tests {
         let want = r#"{
   "canvas_id": 210432,
   "course_code": "ATDF105_202615_2690_EL_ON",
-  "name": "202615_2690_MINERIA DE DATOS",
+  "name": "Minería de Datos",
+  "canvas_name": "202615_2690_MINERIA DE DATOS",
   "term": "202615",
   "section": "2690",
   "zoom_ids": [
@@ -685,6 +692,7 @@ mod tests {
   "canvas_id": null,
   "course_code": null,
   "name": "ATDF106 ELECTRICIDAD",
+  "canvas_name": "ATDF106 ELECTRICIDAD",
   "term": null,
   "section": null,
   "zoom_ids": []
@@ -720,13 +728,13 @@ mod tests {
 
 ## Ramos
 
-- [202615_2690_MINERIA DE DATOS](atdf105-mineria-de-datos/README.md) — ATDF105_202615_2690_EL_ON · 202615
+- [Minería de Datos](atdf105-mineria-de-datos/README.md) — ATDF105_202615_2690_EL_ON · 202615
 - [Intro to CS](cs101-intro/README.md) — CS101
 
 ## Próximas entregas
 
 - 2026-06-19 00:00 UTC — Intro to CS: [Entrega de hoy](cs101-intro/tareas/entrega-de-hoy.md)
-- 2026-06-20 23:59 UTC — 202615_2690_MINERIA DE DATOS: [Semana 10: Formativa 6](atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md)
+- 2026-06-20 23:59 UTC — Minería de Datos: [Semana 10: Formativa 6](atdf105-mineria-de-datos/tareas/semana-10-formativa-6.md)
 ";
         assert_eq!(got, want);
     }

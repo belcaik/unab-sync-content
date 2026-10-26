@@ -99,6 +99,7 @@ pub struct CourseNaming {
     code_pattern: Option<Regex>,
     name_strip_pattern: Option<Regex>,
     section_pattern: Option<Regex>,
+    term_pattern: Option<Regex>,
 }
 
 impl CourseNaming {
@@ -110,6 +111,7 @@ impl CourseNaming {
             code_pattern: compile("code_pattern", &cfg.code_pattern)?,
             name_strip_pattern: compile("name_strip_pattern", &cfg.name_strip_pattern)?,
             section_pattern: compile("section_pattern", &cfg.section_pattern)?,
+            term_pattern: compile("term_pattern", &cfg.term_pattern)?,
         })
     }
 
@@ -140,6 +142,29 @@ impl CourseNaming {
             .or_else(|| first_capture(re, &course.name))
             .map(|s| slugify(&s))
             .filter(|s| !s.is_empty())
+    }
+
+    /// The academic term shown in `curso.json` and the indexes: `term_pattern`
+    /// tried on the code, then on the name; capture group 1 if present, else
+    /// the match.
+    pub fn term(&self, course: &CourseMeta) -> Option<String> {
+        let re = self.term_pattern.as_ref()?;
+        let code = course.code.as_deref().unwrap_or("");
+        first_capture(re, code)
+            .or_else(|| first_capture(re, &course.name))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The name a person reads: [`Self::short_name`] through [`humanize`].
+    /// Falls back to the whole name when stripping leaves nothing.
+    pub fn display_name(&self, course: &CourseMeta) -> String {
+        let short = humanize(&self.short_name(course));
+        if short.is_empty() {
+            humanize(&course.name)
+        } else {
+            short
+        }
     }
 
     /// The course directory name, before disambiguation: `course_dir` with
@@ -429,6 +454,65 @@ pub fn slugify(input: &str) -> String {
     cut.trim_end_matches('-').to_string()
 }
 
+/// Words [`humanize`] leaves in lowercase unless they open the name.
+const MINOR_WORDS: &[&str] = &[
+    "a", "al", "con", "de", "del", "e", "el", "en", "la", "las", "lo", "los", "o", "para", "por",
+    "u", "un", "una", "y",
+];
+
+/// A name made readable: `_` become spaces and runs of spaces collapse. A
+/// name with no lowercase letter (`MINERIA_DE_DATOS`, as v1 directories and
+/// many Canvas names spell it) is title-cased word by word — Spanish minor
+/// words in lowercase, roman numerals kept in capitals — so it reads
+/// `Mineria de Datos`. A name that already has lowercase
+/// letters (an official name with accents and acronyms) keeps its case.
+pub fn humanize(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split(|c: char| c == '_' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if name.chars().any(char::is_lowercase) {
+        return words.join(" ");
+    }
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, word)| {
+            let lower = word.to_lowercase();
+            if is_roman(word) {
+                (*word).to_string()
+            } else if i > 0 && MINOR_WORDS.contains(&lower.as_str()) {
+                lower
+            } else {
+                capitalize(&lower)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A slug this module produced, read back as a title: `programa-del-curso`
+/// becomes `Programa del curso`. The best an offline reader can do once the
+/// original title is gone.
+pub fn humanize_slug(slug: &str) -> String {
+    let words: Vec<&str> = slug.split('-').filter(|w| !w.is_empty()).collect();
+    capitalize(&words.join(" "))
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// `II`, `IV`, `XII`: kept in capitals by [`humanize`]. (A one-letter word
+/// comes out capitalized anyway.)
+fn is_roman(word: &str) -> bool {
+    word.len() > 1 && word.chars().all(|c| matches!(c, 'I' | 'V' | 'X'))
+}
+
 fn slug_or_untitled(input: &str) -> String {
     let s = slugify(input);
     if s.is_empty() {
@@ -708,6 +792,47 @@ mod tests {
         assert_eq!(meta.code.as_deref(), Some("ATDF105_202615_2690_EL_ON"));
         assert_eq!(unab().course_slug(&meta), "atdf105-mineria-de-datos");
         assert_eq!(unab().section(&meta).as_deref(), Some("2690"));
+    }
+
+    #[test]
+    fn display_name_strips_and_humanizes() {
+        let offline =
+            unab().parse_v1_course_dir("202615_2690_MINERIA_DE_DATOS_ATDF105_202615_2690_EL_ON");
+        assert_eq!(unab().display_name(&offline), "Mineria de Datos");
+        assert_eq!(unab().term(&offline).as_deref(), Some("202615"));
+        let official = course(
+            1,
+            "202615_2690_MINERÍA DE DATOS",
+            "ATDF105_202615_2690_EL_ON",
+        );
+        assert_eq!(unab().display_name(&official), "Minería de Datos");
+        assert_eq!(unab().term(&official).as_deref(), Some("202615"));
+        // Nothing left after stripping: the whole name, humanized.
+        assert_eq!(
+            unab().display_name(&course(2, "202615_2690_", "X")),
+            "202615 2690"
+        );
+        assert_eq!(generic().term(&official), None);
+    }
+
+    #[test]
+    fn humanize_table() {
+        let cases = [
+            ("MINERIA_DE_DATOS", "Mineria de Datos"),
+            ("PROGRAMACION EN PYTHON3", "Programacion en Python3"),
+            ("CALCULO II", "Calculo II"),
+            ("DE LA TIERRA Y EL MAR", "De la Tierra y el Mar"),
+            ("Taller de SQL", "Taller de SQL"),
+            ("Minería  de_Datos", "Minería de Datos"),
+            ("ÁLGEBRA LINEAL", "Álgebra Lineal"),
+            ("", ""),
+        ];
+        for (input, want) in cases {
+            assert_eq!(humanize(input), want, "input {input:?}");
+        }
+        assert_eq!(humanize_slug("programa-del-curso"), "Programa del curso");
+        assert_eq!(humanize_slug("01"), "01");
+        assert_eq!(humanize_slug(""), "");
     }
 
     #[test]

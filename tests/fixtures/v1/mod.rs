@@ -178,6 +178,7 @@ pub fn unab_naming() -> io::Result<CourseNaming> {
     let mut code_pattern = String::new();
     let mut name_strip_pattern = String::new();
     let mut section_pattern = String::new();
+    let mut term_pattern = String::new();
     for line in include_str!("../../../assets/config.toml").lines() {
         if let Some(value) = commented_pattern(line, "code_pattern") {
             code_pattern = unquote(value)?;
@@ -185,9 +186,15 @@ pub fn unab_naming() -> io::Result<CourseNaming> {
             name_strip_pattern = unquote(value)?;
         } else if let Some(value) = commented_pattern(line, "section_pattern") {
             section_pattern = unquote(value)?;
+        } else if let Some(value) = commented_pattern(line, "term_pattern") {
+            term_pattern = unquote(value)?;
         }
     }
-    if code_pattern.is_empty() || name_strip_pattern.is_empty() || section_pattern.is_empty() {
+    if code_pattern.is_empty()
+        || name_strip_pattern.is_empty()
+        || section_pattern.is_empty()
+        || term_pattern.is_empty()
+    {
         return Err(io::Error::other(
             "assets/config.toml is missing a commented UNAB layout pattern",
         ));
@@ -197,6 +204,7 @@ pub fn unab_naming() -> io::Result<CourseNaming> {
         code_pattern,
         name_strip_pattern,
         section_pattern,
+        term_pattern,
     })
     .map_err(io::Error::other)
 }

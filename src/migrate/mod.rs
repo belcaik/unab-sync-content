@@ -201,11 +201,14 @@ pub fn course_from_curso_json(text: &str) -> Option<CourseMeta> {
         canvas_id: Option<u64>,
         course_code: Option<String>,
         name: String,
+        #[serde(default)]
+        canvas_name: Option<String>,
     }
     let curso: CursoJson = serde_json::from_str(text).ok()?;
     Some(CourseMeta {
         id: curso.canvas_id,
-        name: curso.name,
+        // `name` is the readable one; older files have only `name`.
+        name: curso.canvas_name.unwrap_or(curso.name),
         code: curso.course_code,
     })
 }

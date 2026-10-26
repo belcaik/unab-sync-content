@@ -228,8 +228,8 @@ u_crawler migrate --undo 20261025T120000000Z
 ```
 
 Every rename is reversed and every rewritten note is put back from its
-backup. The rewritten versions and the migration's `curso.json` files are set
-aside under `.u_crawler/migrations/<timestamp>.undo/`, not deleted. The
+backup. The rewritten versions and the migration's `curso.json` and
+`README.md` files are set aside under `.u_crawler/migrations/<timestamp>.undo/`, not deleted. The
 `library.json` marker is set aside too, so the next writer command migrates
 again (for example after you change `[layout]`).
 
@@ -513,7 +513,7 @@ specific to one institution and is unlikely to be right for yours.
 │   └── backup/<timestamp>/...                originals of notes the migration rewrote
 └── <course>/                                 e.g. atdf105-mineria-de-datos, from [layout]
     ├── README.md                             modules, assignments, announcements, recordings
-    ├── curso.json                            canvas_id, course_code, name, term, section, zoom_ids
+    ├── curso.json                            canvas_id, course_code, name, canvas_name, term, section, zoom_ids
     ├── .u_crawler/state.json                 sync state for this course
     ├── modulos/
     │   └── <NN>-<module>/                    NN = the module's position in Canvas
