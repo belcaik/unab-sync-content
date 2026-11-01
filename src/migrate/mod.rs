@@ -79,8 +79,10 @@ pub struct Inventory {
     /// non-regular entries are not listed either, so they stay where they are.
     pub files: BTreeMap<String, u64>,
     /// Canvas course id per top-level directory, from the `courses/<id>` in
-    /// its `announcements/index.json`, else, for a v1 course, from the links
-    /// in its notes that its `state.json` backs ([`course_id_from_links`]).
+    /// its `announcements/index.json`, else from the links in its notes that
+    /// its `state.json` backs ([`course_id_from_links`]): for a v1 course,
+    /// and for a v2 course whose `curso.json` has no id, which the planner
+    /// then repairs.
     pub course_ids: BTreeMap<String, u64>,
     /// v2 course directories already in the library, from their `curso.json`.
     pub existing: Vec<ExistingCourseDir>,
@@ -160,14 +162,24 @@ pub fn scan(root: &Path, caldir_root: Option<&Path>) -> io::Result<Inventory> {
             }
         }
     }
-    let unidentified: Vec<String> = inv
+    // A v1 course without index.json, and a v2 course whose curso.json has
+    // no id (migrated offline, or before this rule): read from its links.
+    let v1_states = inv
         .v1_course_dirs()
         .into_iter()
         .filter(|dir| !inv.course_ids.contains_key(*dir))
-        .map(str::to_string)
-        .collect();
-    for dir in unidentified {
-        if let Some(id) = course_id_from_notes(root, &inv, &dir)? {
+        .map(|dir| (dir.to_string(), format!("{dir}/{V1_STATE_FILE}")));
+    let v2_states = inv
+        .existing
+        .iter()
+        .filter(|e| e.course.id.is_none())
+        .map(|e| {
+            let state = format!("{}/{}/{V1_STATE_FILE}", e.dir, layout::META_DIR);
+            (e.dir.clone(), state)
+        });
+    let unidentified: Vec<(String, String)> = v1_states.chain(v2_states).collect();
+    for (dir, state_rel) in unidentified {
+        if let Some(id) = course_id_from_notes(root, &inv, &dir, &state_rel)? {
             tracing::info!(path = %dir, course_id = id, "Canvas id read from the course's own links");
             inv.course_ids.insert(dir, id);
         }
@@ -197,15 +209,19 @@ pub fn scan(root: &Path, caldir_root: Option<&Path>) -> io::Result<Inventory> {
     Ok(inv)
 }
 
-/// The Canvas id of the v1 course `dir` that has no `index.json`, from its
-/// notes and its `state.json` ([`course_id_from_links`]). `None` without a
+/// The Canvas id of the course in `dir`, from its notes and its
+/// `state.json` at `state_rel` ([`course_id_from_links`]). `None` without a
 /// readable `state.json`.
-fn course_id_from_notes(root: &Path, inv: &Inventory, dir: &str) -> io::Result<Option<u64>> {
-    let state_rel = format!("{dir}/{V1_STATE_FILE}");
-    if !inv.files.contains_key(&state_rel) {
+fn course_id_from_notes(
+    root: &Path,
+    inv: &Inventory,
+    dir: &str,
+    state_rel: &str,
+) -> io::Result<Option<u64>> {
+    if !inv.files.contains_key(state_rel) {
         return Ok(None);
     }
-    let state: State = match serde_json::from_slice(&fs::read(root.join(&state_rel))?) {
+    let state: State = match serde_json::from_slice(&fs::read(root.join(state_rel))?) {
         Ok(state) => state,
         Err(e) => {
             tracing::warn!(path = %state_rel, error = %e, "unreadable state.json");
@@ -445,14 +461,20 @@ mod tests {
             b"<img src=\"https://canvas.x.cl/courses/188678/files/17317335/preview?verifier=a\">\n\
               [otro](https://canvas.x.cl/courses/92458/files/1/download)\n",
         )?;
-        // A v2 course directory is not a v1 course: its id comes from curso.json.
-        let v2 = root.join("v2-curso/.u_crawler");
-        fs::create_dir_all(&v2)?;
-        fs::write(v2.join("state.json"), br#"{"items":{"file:1":{}}}"#)?;
-        fs::write(
-            root.join("v2-curso/n.md"),
-            b"/courses/92458/files/1/download",
-        )?;
+        // A v2 course whose curso.json has no id: read from its links too.
+        for (dir, curso) in [
+            ("v2-sin-id", r#"{"canvas_id":null,"name":"N"}"#),
+            ("v2-con-id", r#"{"canvas_id":5,"name":"M"}"#),
+        ] {
+            let meta = root.join(dir).join(".u_crawler");
+            fs::create_dir_all(&meta)?;
+            fs::write(meta.join("state.json"), br#"{"items":{"file:1":{}}}"#)?;
+            fs::write(root.join(dir).join("curso.json"), curso)?;
+            fs::write(
+                root.join(dir).join("n.md"),
+                b"/courses/92458/files/1/download",
+            )?;
+        }
 
         let inv = scan(&root, None)?;
         let ids: Vec<(&str, u64)> = inv
@@ -462,7 +484,10 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            [("202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON", 188678)]
+            [
+                ("202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON", 188678),
+                ("v2-sin-id", 92458)
+            ]
         );
         Ok(())
     }
