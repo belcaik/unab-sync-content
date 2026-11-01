@@ -1387,6 +1387,37 @@ mod tests {
     }
 
     #[test]
+    fn an_inactive_course_named_by_canvas_takes_its_zoom_folder_without_patterns() {
+        // The real 2025 shape: no announcements, no [layout] patterns, a
+        // course Canvas lists only by id. scan read the id from its links.
+        let mec = "202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON";
+        let mut inv = inv(&[
+            (&format!("{mec}/state.json"), 1),
+            (&format!("{mec}/Modules/5_Unidad/01-Sesion.md"), 1),
+            ("Zoom/188678/2025_10_01_202525_1149_MECANICA.mp4", 1),
+        ]);
+        inv.course_ids.insert(mec.into(), 188678);
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let canvas = [CanvasCourse {
+            meta: CourseMeta {
+                id: Some(188678),
+                name: "202525.1149 | MECANICA".into(),
+                code: Some("CFSA3220.202525.1149.EL.ON".into()),
+            },
+            module_positions: BTreeMap::from([(5, 1)]),
+        }];
+        let plan = plan(&inv, &naming, &canvas);
+        let v2 = "cfsa3220-202525-1149-el-on-202525-1149-mecanica";
+        assert_eq!(plan.courses[0].dir, v2);
+        assert_eq!(plan.courses[0].zoom_ids, [188678]);
+        assert_eq!(
+            moved(&plan, "Zoom/188678/2025_10_01_202525_1149_MECANICA.mp4"),
+            Some(format!("{v2}/grabaciones/2025-10-01_clase.mp4").as_str())
+        );
+        assert!(plan.unresolved.is_empty());
+    }
+
+    #[test]
     fn a_course_with_another_canvas_id_never_takes_a_zoom_folder() {
         // A retaken course: its old offering's folder names the same course.
         let mut inv = inv(&[
