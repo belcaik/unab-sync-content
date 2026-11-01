@@ -47,6 +47,7 @@ sanitize-filename = "0.5"
 html2md = "0.2"
 deunicode = "1.6"
 sha1 = "0.10"
+md-5 = "0.10"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 urlencoding = "2.1"

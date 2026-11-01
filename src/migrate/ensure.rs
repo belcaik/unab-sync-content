@@ -160,7 +160,7 @@ pub struct Summary {
     pub rewritten: usize,
     /// Canvas links now pointing at a local copy.
     pub links: usize,
-    /// `state.json` files given what Canvas taught.
+    /// `state.json` files given what Canvas taught or an etag proved.
     pub states: usize,
     /// Generated notes that could not be rewritten (see the log).
     pub rewrite_failed: usize,
@@ -220,7 +220,7 @@ impl fmt::Display for Summary {
             write!(f, ", {} README(s) written", self.indexes)?;
         }
         if self.states > 0 {
-            write!(f, ", {} state.json updated from Canvas", self.states)?;
+            write!(f, ", {} state.json updated", self.states)?;
         }
         if let Some(ts) = &self.resumed {
             write!(f, "; resumed {ts}")?;
@@ -513,14 +513,12 @@ pub async fn migrate(
     summary.rewritten += relinked.notes;
     summary.links += relinked.links;
     summary.rewrite_failed += relinked.failed;
-    if let Some(learned) = &sources.1 {
-        for (rel, text) in relink::state_updates(&sources.0, learned).map_err(io::Error::other)? {
-            let ts = batch.ts(library)?;
-            if let RewriteOutcome::Rewritten { .. } =
-                rewrite::rewrite_state(library, &rel, &text, &ts).await?
-            {
-                summary.states += 1;
-            }
+    for (rel, text) in relink::state_updates(&sources.0, &sources.1).map_err(io::Error::other)? {
+        let ts = batch.ts(library)?;
+        if let RewriteOutcome::Rewritten { .. } =
+            rewrite::rewrite_state(library, &rel, &text, &ts).await?
+        {
+            summary.states += 1;
         }
     }
     if let Relink::Lazy(Some(ts)) = &batch {
@@ -539,25 +537,23 @@ pub async fn migrate(
 }
 
 /// The library's [`LinkMap`]: from disk, plus what Canvas says when a
-/// client is given. Also returns what it was built from, and what Canvas
-/// taught (to persist).
+/// client is given. Also returns what it was built from, and what the disk
+/// proved ([`relink::proven`]) and Canvas taught, to persist.
 async fn link_map(
     library: &Path,
     canvas: Option<&CanvasClient>,
-) -> Result<((Sources, Option<relink::Learned>), LinkMap), MigrateError> {
+) -> Result<((Sources, relink::Learned), LinkMap), MigrateError> {
     let root = library.to_path_buf();
     let sources = tokio::task::spawn_blocking(move || relink::read_sources(&root)).await??;
     let mut map = relink::build(&sources);
-    let learned = match canvas {
-        Some(client) => {
-            map.hosts
-                .extend(client.base.host_str().map(str::to_ascii_lowercase));
-            let learned = relink::learn(client, &sources, &map).await;
-            learned.apply(&sources, &mut map);
-            Some(learned)
-        }
-        None => None,
-    };
+    let mut learned = relink::proven(&sources);
+    if let Some(client) = canvas {
+        map.hosts
+            .extend(client.base.host_str().map(str::to_ascii_lowercase));
+        let taught = relink::learn(client, &sources, &map).await;
+        taught.apply(&sources, &mut map);
+        learned.extend(taught);
+    }
     Ok(((sources, learned), map))
 }
 
@@ -601,7 +597,7 @@ struct Relinked {
 /// fails is logged and counted.
 async fn relink_notes(
     library: &Path,
-    sources: &(Sources, Option<relink::Learned>),
+    sources: &(Sources, relink::Learned),
     map: &LinkMap,
     batch: &mut Relink,
 ) -> Result<Relinked, MigrateError> {

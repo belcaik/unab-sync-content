@@ -42,10 +42,18 @@
 //!   pages, a module item, an assignment, an announcement, a page and the
 //!   home of another course, quizzes, iframes, external tools, equation
 //!   images, a `mailto:`, one Canvas mangled into `https://<canvas>/mailto:`,
-//!   a page of another Canvas host, and raw HTML (`<img … width=…>`) that
-//!   html2md keeps. Two attachments have the same size
+//!   a page of another Canvas host, raw HTML (`<img … width=…>`) that
+//!   html2md keeps, and a link inside a link's text (T11): an image
+//!   (`[![x](…)](…)`), an `<img … data-api-endpoint=…>`, and a table row of
+//!   `[**<img>**](…)` cells, each half local or remote on its own; and
+//!   link text spanning lines: html2md's `![alt…\n](…)` and a three-line
+//!   `[…](…)`. Two
+//!   attachments have the same size
 //!   ([`SAME_SIZE_FILES`]); `state.json` records each attachment's size
-//!   (no name, as v1 did) and each page's slug.
+//!   (no name, as v1 did) and each page's slug. One of them,
+//!   [`ETAG_FILE`], has the real S3 ETag (the MD5 of its bytes) v1 recorded,
+//!   and its link's text (`[descarga]`) does not name it; the others carry a
+//!   placeholder etag that proves nothing.
 //!
 //! There is no `.u_crawler/library.json`. That absence, plus `Zoom/<digits>/`,
 //! `Modules/<id>_` and `NN-ASSIGN-`, is the v1 signal.
@@ -84,7 +92,11 @@ pub const LINKS_PAGE: &str = "Fase 4";
 /// Canvas ids of two attachments with the same size (`Guia_1.PDF`,
 /// `Guia_2.PDF`): only a link whose text names one can be pointed at it.
 pub const SAME_SIZE_FILES: [u64; 2] = [1001, 1002];
-/// The links of [`LINKS_PAGE`], one shape per line, as html2md wrote them.
+/// The attachment whose `state.json` etag is the MD5 of its bytes: found
+/// offline by content (T12) though no link text names it.
+pub const ETAG_FILE: u64 = SAME_SIZE_FILES[1];
+/// The links of [`LINKS_PAGE`], one shape per line (a few span two or
+/// three), as html2md wrote them.
 pub const LINKS_BODY: &str = "\
 - [Guia\\_1.PDF](https://canvas.example.edu/courses/9001/files/1001/preview?verifier=abc&wrap=1)
 - [descarga](/courses/9001/files/1002/download?download_frd=1)
@@ -108,6 +120,17 @@ pub const LINKS_BODY: &str = "\
 - [otro tenant](https://otro.instructure.com/courses/9001/pages/contenidos)
 
 <p><img src=\"https://canvas.example.edu/courses/9001/files/1003/preview\" alt=\"Diagrama.png\" width=\"640\" height=\"480\"></p>
+
+[![Diagrama](https://canvas.example.edu/courses/9001/files/1003/preview?verifier=x)](https://canvas.example.edu/courses/9001/pages/contenidos)
+[<img src=\"https://canvas.example.edu/courses/9001/files/1003/preview?verifier=x\" alt=\"Diagrama.png\" data-api-endpoint=\"https://canvas.example.edu/api/v1/courses/9001/files/1003\" data-api-returntype=\"File\">](https://canvas.example.edu/courses/9001/quizzes/12)
+
+| [**<img src=\"https://canvas.example.edu/courses/9001/files/1001/preview\" alt=\"Guia_1.PDF\">**](/courses/9001/pages/contenidos) | [<img src=\"https://canvas.example.edu/courses/9001/files/1099/preview\" alt=\"Nada\">](https://canvas.example.edu/courses/9001/pages/informacion-general) |
+
+![Diagrama.png
+](https://canvas.example.edu/courses/9001/files/1003/preview?verifier=x)
+[Contenidos de
+la semana,
+lectura obligatoria](https://canvas.example.edu/courses/9001/pages/contenidos)
 
 ```
 [en codigo](https://canvas.example.edu/courses/9001/pages/contenidos)
@@ -190,6 +213,12 @@ impl V1Library {
             .iter()
             .find(|c| c.meta.code.as_deref() == Some(code))
     }
+}
+
+/// Lowercase hex MD5 of `bytes`: the S3 ETag of a single-part upload.
+pub fn md5_hex(bytes: &[u8]) -> String {
+    use md5::Digest as _;
+    hex::encode(md5::Md5::digest(bytes))
 }
 
 /// Lowercase hex SHA-1 of `bytes`. This is the hash stored in [`V1Library::manifest`].
@@ -476,8 +505,12 @@ fn state_bytes(plan: &CoursePlan) -> io::Result<Vec<u8>> {
             );
         }
         for (id, original) in module.attachments {
-            let size = fake_bytes("file", original).len() as u64;
-            state.set(format!("file:{id}"), entry(Some(size), None));
+            let bytes = fake_bytes("file", original);
+            let mut item = entry(Some(bytes.len() as u64), None);
+            if *id == ETAG_FILE {
+                item.etag = Some(format!("\"{}\"", md5_hex(&bytes)));
+            }
+            state.set(format!("file:{id}"), item);
         }
     }
     if let AnnPlan::Indexed {
