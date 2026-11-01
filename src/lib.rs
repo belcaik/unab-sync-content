@@ -7,6 +7,22 @@
 //!   request in the crate goes through it.
 //! - [`canvas`] and [`zoom::api`] are the two REST clients.
 //! - [`download`] is the only downloader: one ETag/resume/atomic-rename policy.
+//! - [`layout`] turns course/module/item metadata into on-disk names; it is
+//!   pure, so the writers and the offline migrator agree on every path.
+//! - [`frontmatter`] renders the YAML block on a generated note and updates it
+//!   in place.
+//! - [`links`] extracts URLs from Canvas HTML and rewrites Canvas `/files/<id>`
+//!   links in markdown to local paths.
+//! - [`index`] renders the layout v2 index files (per-course `README.md` and
+//!   `curso.json`, per-module `README.md`, root `INDEX.md` and `AGENTS.md`)
+//!   from an in-memory model both `sync` and `migrate` can build.
+//! - [`migrate`] scans a layout v1 library, plans its move to v2 and carries
+//!   it out without deleting or overwriting a file: renames behind a journal
+//!   ([`migrate::apply`]), generated notes rewritten after a backup
+//!   ([`migrate::rewrite`]). [`migrate::ensure_v2`] runs it at the start of
+//!   every writer command.
+//! - [`library`] reads the library root's `curso.json` files and tells every
+//!   writer which directory a course owns, so they all agree.
 //! - [`state`] records per-course what has been fetched and what failed.
 //! - [`syncer`], [`announcements`] and [`recordings`] are the feature flows.
 //! - [`ui`] is the user-facing output channel; [`tracing`] is the diagnostic one.
@@ -24,14 +40,27 @@ pub mod config;
 pub mod download;
 /// Invocation of `ffmpeg`, used to fetch Zoom's streamed recordings.
 pub mod ffmpeg;
+/// YAML frontmatter for pages, assignments, announcements and recordings.
+pub mod frontmatter;
 /// Filesystem helpers: name sanitization and atomic writes.
 pub mod fsutil;
 /// The shared HTTP client, with rate limiting and bounded retries.
 pub mod http;
-/// Extraction of links and media references from Canvas HTML.
+/// Layout v2 index files: pure rendering of the per-course and library-level
+/// `README.md`, `curso.json`, `INDEX.md` and `AGENTS.md`.
+pub mod index;
+/// Library layout v2: pure metadata-to-path naming, the one source of truth for paths.
+pub mod layout;
+/// Which directory each course owns in the library (`curso.json`), shared by the writers.
+pub mod library;
+/// Extraction of links from Canvas HTML, and rewriting of Canvas file links in markdown.
 pub mod links;
 /// Log file setup.
 pub mod logger;
+/// Retroactive layout v1 → v2 migration: read-only scan, pure detection and
+/// planning, the journaled executor, the markdown rewrite, and
+/// [`migrate::ensure`], which chains them.
+pub mod migrate;
 /// Progress bars.
 pub mod progress;
 /// Discovery of Zoom links referenced across a course.

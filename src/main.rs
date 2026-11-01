@@ -3,6 +3,7 @@ use u_crawler::calendar;
 use u_crawler::canvas;
 use u_crawler::config;
 use u_crawler::logger;
+use u_crawler::migrate;
 use u_crawler::progress;
 use u_crawler::recordings;
 use u_crawler::state::State;
@@ -84,6 +85,22 @@ enum Commands {
     Zoom {
         #[command(subcommand)]
         command: ZoomCommands,
+    },
+    /// Migrate a layout v1 library to layout v2 (rename only; journaled, undoable)
+    Migrate {
+        /// Library to migrate instead of `download_root`. The calendar tree
+        /// is left alone, so a `cp -al` clone can be migrated safely.
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        /// Print the plan; move, rename and write nothing
+        #[arg(long, conflicts_with = "undo")]
+        dry_run: bool,
+        /// Undo the migration journal with this timestamp
+        #[arg(long, value_name = "TS", conflicts_with = "canvas")]
+        undo: Option<String>,
+        /// Ask Canvas for official course names and module order
+        #[arg(long)]
+        canvas: bool,
     },
     /// Show last run, pending items, failed jobs
     Status {
@@ -232,7 +249,7 @@ async fn main() -> ExitCode {
         #[cfg(feature = "zoom")]
         Commands::Zoom { command } => match command {
             ZoomCommands::Flow { course_id, since } => {
-                match zoom::zoom_flow(course_id, since).await {
+                match zoom::run_flow(course_id, since).await {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
                         tracing::error!(error = %e, "zoom flow failed");
@@ -251,6 +268,22 @@ async fn main() -> ExitCode {
             );
             ExitCode::from(12)
         }
+        Commands::Migrate {
+            root,
+            dry_run,
+            undo,
+            canvas,
+        } => match handle_migrate(root, dry_run, undo, canvas).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "migrate failed");
+                eprintln!("error: {e:#}");
+                match e.downcast_ref::<ConfigError>() {
+                    Some(_) => ExitCode::from(10),
+                    None => ExitCode::from(12),
+                }
+            }
+        },
         Commands::Status { verbose } => match handle_status(verbose).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -358,6 +391,88 @@ async fn handle_scan(course_id: Option<u64>) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn handle_migrate(
+    root: Option<std::path::PathBuf>,
+    dry_run: bool,
+    undo: Option<String>,
+    with_canvas: bool,
+) -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    use u_crawler::layout::CourseNaming;
+
+    let cfg = Config::load_or_init()?;
+    let naming = CourseNaming::new(&cfg.layout)?;
+    // Another root is a copy (or another library): renaming the configured
+    // calendar tree to match it would break the real one. The configured
+    // root given explicitly is still the configured root: once it is marked
+    // nothing would ever rename its calendar folders.
+    let configured = PathBuf::from(&cfg.download_root);
+    let caldir = PathBuf::from(&cfg.calendar.caldir_root);
+    let resolve = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+    let (library, caldir) = match root {
+        Some(root) if resolve(&root) != resolve(&configured) => (root, None),
+        _ => (configured, Some(caldir)),
+    };
+    let target = migrate::Target {
+        library: &library,
+        caldir: caldir.as_deref(),
+        naming: &naming,
+    };
+    if caldir.is_none() {
+        tracing::info!(path = %library.display(), "migrating another root; calendar tree left alone");
+    }
+
+    if let Some(ts) = undo {
+        let summary = migrate::undo(&target, &ts).await?;
+        println!("{summary}");
+        return Ok(());
+    }
+
+    let canvas = if with_canvas {
+        Some(canvas::CanvasClient::from_config().await?)
+    } else {
+        None
+    };
+    // Plain `println!`, not `status!`: no bar is drawing here, and the report
+    // must survive a redirect (`migrate --dry-run > plan.txt`), which
+    // `status!` drops when stdout is not a terminal.
+    match migrate::migrate(&target, canvas.as_ref(), dry_run).await? {
+        migrate::Outcome::DryRun(dry) => {
+            if let Some(ts) = &dry.pending {
+                println!("migration {ts} was cut short; a real run resumes it first, then plans what is left:");
+            }
+            for line in dry.plan.to_string().lines() {
+                println!("{line}");
+            }
+            if dry.plan.is_empty() && dry.pending.is_none() {
+                println!("nothing to migrate in {}", library.display());
+            }
+            if let Some(links) = dry.links.filter(|n| *n > 0) {
+                println!("{links} Canvas link(s) would point at local copies");
+            }
+            println!("dry run: nothing was moved or written");
+        }
+        migrate::Outcome::Migrated(summary) => {
+            for u in &summary.unresolved {
+                println!("left in place: {}: {}: {}", u.root, u.path, u.reason);
+            }
+            for dir in &summary.kept_dirs {
+                println!("v1 directory kept, not empty: {dir}/");
+            }
+            if summary.changed_files() {
+                println!("{summary}");
+            } else {
+                println!("nothing to migrate in {}", library.display());
+            }
+            if summary.marked {
+                println!("marked {} as layout v2", library.display());
+            }
+        }
+        migrate::Outcome::NoLibrary | migrate::Outcome::AlreadyV2 => {}
+    }
+    Ok(())
+}
+
 async fn handle_status(verbose: bool) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use tracing::info;
@@ -380,7 +495,10 @@ async fn handle_status(verbose: bool) -> anyhow::Result<()> {
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_dir() {
+        // `.u_crawler/` (migration journals, `library.json`), `.git/` and
+        // `.obsidian/` are not courses.
+        let hidden = entry.file_name().to_string_lossy().starts_with('.');
+        if path.is_dir() && !hidden {
             course_dirs.push(path);
         }
     }
@@ -401,7 +519,14 @@ async fn handle_status(verbose: bool) -> anyhow::Result<()> {
 
     // Load state from each course directory
     for course_dir in &course_dirs {
-        let state_path = course_dir.join("state.json");
+        // Layout v2 keeps state under `.u_crawler/`; a v1 course not yet
+        // migrated still has it at the top of the course directory.
+        let v2_state = u_crawler::library::state_path(course_dir);
+        let state_path = if v2_state.exists() {
+            v2_state
+        } else {
+            course_dir.join("state.json")
+        };
         let state = State::load(&state_path).await;
 
         let course_name = course_dir
