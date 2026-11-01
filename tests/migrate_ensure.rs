@@ -260,7 +260,8 @@ async fn undo_puts_the_v1_tree_back_and_the_next_run_migrates_again() -> TestRes
     let ts = summary.journal.ok_or("no journal")?;
 
     let undone = undo(&lib.target(), &ts).await?;
-    assert_eq!(undone.restored, summary.rewritten);
+    // The notes, and the `state.json` an etag-proven path went into.
+    assert_eq!(undone.restored, summary.rewritten + summary.states);
     assert!(undone.unmarked);
     assert!(!library_json_path(&lib.root).exists());
 
@@ -324,7 +325,11 @@ async fn notes_are_still_rewritten_when_the_cut_came_after_the_moves() -> TestRe
     assert!(lib.plan()?.is_empty());
 
     let summary = migrated(ensure_v2(&lib.target(), None, false).await?)?;
-    assert_eq!(summary.journal, None);
+    // No new migration: the only journal is the relink one the etag-proven
+    // `state.json` path is written under.
+    assert_eq!(summary.moved, 0);
+    assert_eq!(summary.states, 1, "{summary}");
+    assert_ne!(summary.journal.as_deref(), Some("20261025T120000000Z"));
     assert_eq!(summary.rewritten, planned.edits.len());
     assert!(summary.marked);
     Ok(())

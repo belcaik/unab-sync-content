@@ -527,7 +527,7 @@ specific to one institution and is unlikely to be right for yours.
 ├── INDEX.md                                  courses + upcoming deadlines
 ├── AGENTS.md                                 how to navigate the tree (for AI agents)
 ├── .u_crawler/
-│   ├── library.json                          {"layout_version": 2, "links_version": 1}
+│   ├── library.json                          {"layout_version": 2, "links_version": 2}
 │   ├── migrations/<timestamp>.jsonl          migration journals
 │   └── backup/<timestamp>/...                originals of notes the migration rewrote
 └── <course>/                                 e.g. atdf105-mineria-de-datos, from [layout]

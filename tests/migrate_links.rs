@@ -14,13 +14,16 @@ use regex::Regex;
 use tempfile::{tempdir, TempDir};
 use u_crawler::frontmatter;
 use u_crawler::layout::CourseNaming;
+use u_crawler::links::FileTarget;
 use u_crawler::migrate::ensure::{library_json_path, Summary};
+use u_crawler::migrate::relink::{disk_map, LINKS_VERSION};
 use u_crawler::migrate::rewrite::generated_kind;
 use u_crawler::migrate::{ensure_v2, migrate, undo, Outcome, Target};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 const LINKS_NOTE: &str = "atdf105-mineria-de-datos/modulos/02-semana-1/02-fase-4.md";
+const LINKS_STATE: &str = "atdf105-mineria-de-datos/.u_crawler/state.json";
 /// `library.json` as layout v2 wrote it before `links_version`.
 const OLD_MARKER: &str = "{\n  \"layout_version\": 2\n}\n";
 
@@ -74,10 +77,12 @@ fn migrated(outcome: Outcome) -> Result<Summary, Box<dyn Error>> {
 /// The body of [`LINKS_NOTE`] once migrated offline: what has a single
 /// local copy points at it, the rest stays as Canvas wrote it. v1 recorded
 /// no attachment names, so a file is reached by size only when the link's
-/// text names it (`[rubrica]` does not: `rubrica-final.docx`).
+/// text names it (`[rubrica]` does not: `rubrica-final.docx`), or by the
+/// etag v1 recorded when it is the MD5 of the bytes (`[descarga]`,
+/// [`v1::ETAG_FILE`]).
 const LOCAL_BODY: &str = "\
 - [Guia\\_1.PDF](../01-informacion-general/adjuntos/guia-1.pdf)
-- [descarga](/courses/9001/files/1002/download?download_frd=1)
+- [descarga](adjuntos/guia-2.pdf)
 - ![Diagrama](../01-informacion-general/adjuntos/diagrama.png)
 - [Rubrica final.docx](../01-informacion-general/adjuntos/rubrica-final.docx)
 - [rubrica](https://canvas.example.edu/courses/9001/files/1004?wrap=1)
@@ -98,6 +103,17 @@ const LOCAL_BODY: &str = "\
 - [otro tenant](https://otro.instructure.com/courses/9001/pages/contenidos)
 
 <p><img src=\"../01-informacion-general/adjuntos/diagrama.png\" alt=\"Diagrama.png\" width=\"640\" height=\"480\"></p>
+
+[![Diagrama](../01-informacion-general/adjuntos/diagrama.png)](01-contenidos.md)
+[<img src=\"../01-informacion-general/adjuntos/diagrama.png\" alt=\"Diagrama.png\" data-api-endpoint=\"../01-informacion-general/adjuntos/diagrama.png\" data-api-returntype=\"File\">](https://canvas.example.edu/courses/9001/quizzes/12)
+
+| [**<img src=\"../01-informacion-general/adjuntos/guia-1.pdf\" alt=\"Guia_1.PDF\">**](01-contenidos.md) | [<img src=\"https://canvas.example.edu/courses/9001/files/1099/preview\" alt=\"Nada\">](../01-informacion-general/01-informacion-general.md) |
+
+![Diagrama.png
+](../01-informacion-general/adjuntos/diagrama.png)
+[Contenidos de
+la semana,
+lectura obligatoria](01-contenidos.md)
 
 ```
 [en codigo](https://canvas.example.edu/courses/9001/pages/contenidos)
@@ -156,10 +172,10 @@ async fn migrating_the_v1_library_leaves_local_links_and_none_broken() -> TestRe
     let summary = migrated(ensure_v2(&lib.target(), None, false).await?)?;
     assert_eq!(summary.rewrite_failed, 0, "{summary}");
     // Every link of LOCAL_BODY now pointing at a file (the `mailto:` fix is
-    // not a local link).
-    assert_eq!(summary.links, 11, "{summary}");
+    // not a local link; a `data-api-endpoint` is its tag's `src` again).
+    assert_eq!(summary.links, 20, "{summary}");
     assert!(
-        summary.to_string().contains("11 local link(s)"),
+        summary.to_string().contains("20 local link(s)"),
         "{summary}"
     );
 
@@ -169,10 +185,12 @@ async fn migrating_the_v1_library_leaves_local_links_and_none_broken() -> TestRe
     assert!(note.ends_with(LOCAL_BODY), "{note}");
     assert!(frontmatter::parse(&note)?.is_some());
     assert_eq!(broken_links(&lib.root)?, Vec::<String>::new());
+    assert_etag_file_recorded(&lib)?;
+    assert_eq!(summary.states, 1, "{summary}");
 
     let marker: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(library_json_path(&lib.root))?)?;
-    assert_eq!(marker["links_version"], 1);
+    assert_eq!(marker["links_version"], LINKS_VERSION);
 
     // Nothing left to do: the writers' gate is cheap, and `migrate` agrees.
     let after = v1::hash_tree(&lib.root)?;
@@ -183,6 +201,16 @@ async fn migrating_the_v1_library_leaves_local_links_and_none_broken() -> TestRe
     let again = migrated(migrate(&lib.target(), None, false).await?)?;
     assert!(!again.changed_files(), "{again}");
     assert_eq!(v1::hash_tree(&lib.root)?, after);
+    Ok(())
+}
+
+/// The copy [`v1::ETAG_FILE`]'s etag proved is in its `state.json`, offline,
+/// so later runs find it by its `path` even once Canvas has no such file.
+fn assert_etag_file_recorded(lib: &Lib) -> TestResult {
+    let state: serde_json::Value = serde_json::from_str(&lib.read(LINKS_STATE)?)?;
+    let entry = &state["items"][format!("file:{}", v1::ETAG_FILE)];
+    assert_eq!(entry["path"], "modulos/02-semana-1/adjuntos/guia-2.pdf");
+    assert_eq!(entry["file_name"], "guia-2.pdf");
     Ok(())
 }
 
@@ -197,6 +225,11 @@ async fn remote_v2_library() -> Result<(Lib, String), Box<dyn Error>> {
     for (rel, _) in v1::hash_tree(&backup)? {
         // The backup holds the v1 bytes under the v2 path.
         let original = fs::read_to_string(backup.join(&rel))?;
+        if generated_kind(Path::new(&rel)).is_none() {
+            // A `state.json` before the etag-proven paths were written in.
+            fs::write(lib.root.join(&rel), original)?;
+            continue;
+        }
         let current = lib.read(&rel)?;
         let fm = frontmatter::parse(&current)?.ok_or("migrated note without frontmatter")?;
         fs::write(lib.root.join(&rel), frontmatter::upsert(&original, &fm))?;
@@ -215,20 +248,22 @@ async fn migrate_repairs_a_v2_library_with_remote_links_and_undo_reverts_it() ->
 
     // A dry run counts and writes nothing.
     match migrate(&lib.target(), None, true).await? {
-        Outcome::DryRun(dry) => assert_eq!(dry.links, Some(11)),
+        Outcome::DryRun(dry) => assert_eq!(dry.links, Some(20)),
         other => return Err(format!("expected a dry run, got {other:?}").into()),
     }
     assert_eq!(lib.user_files()?, remote);
 
     // The writers' gate relinks a library from before `links_version`.
     let summary = migrated(ensure_v2(&lib.target(), None, false).await?)?;
-    assert_eq!(summary.links, 11, "{summary}");
+    assert_eq!(summary.links, 20, "{summary}");
     assert_eq!(summary.moved, 0);
     assert!(!summary.marked, "it was v2 already");
     let relink = summary.journal.clone().ok_or("no relink journal")?;
     assert_ne!(relink, migration);
     assert!(lib.read(LINKS_NOTE)?.ends_with(LOCAL_BODY));
     assert_eq!(broken_links(&lib.root)?, Vec::<String>::new());
+    assert_eq!(summary.states, 1, "{summary}");
+    assert_etag_file_recorded(&lib)?;
 
     // Second pass: nothing.
     let repaired = v1::hash_tree(&lib.root)?;
@@ -242,9 +277,10 @@ async fn migrate_repairs_a_v2_library_with_remote_links_and_undo_reverts_it() ->
 
     // The migration under it cannot be undone first.
     assert!(undo(&lib.target(), &migration).await.is_err());
-    // Undo puts the notes back byte for byte and keeps the library v2.
+    // Undo puts the notes (and `state.json`) back byte for byte and keeps
+    // the library v2.
     let undone = undo(&lib.target(), &relink).await?;
-    assert_eq!(undone.restored, summary.rewritten);
+    assert_eq!(undone.restored, summary.rewritten + summary.states);
     assert!(!undone.unmarked);
     assert_eq!(lib.user_files()?, remote);
     assert!(library_json_path(&lib.root).is_file());
@@ -254,6 +290,67 @@ async fn migrate_repairs_a_v2_library_with_remote_links_and_undo_reverts_it() ->
         Outcome::AlreadyV2
     );
     assert_eq!(lib.user_files()?, remote);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_library_relinked_by_links_version_1_is_relinked_again() -> TestResult {
+    // T10 (`links_version: 1`) left a link inside a link's text remote.
+    let lib = Lib::new()?;
+    migrated(ensure_v2(&lib.target(), None, false).await?)?;
+    let local = lib.read(LINKS_NOTE)?;
+    let nested_local =
+        "[![Diagrama](../01-informacion-general/adjuntos/diagrama.png)](01-contenidos.md)";
+    let nested_t10 = "[![Diagrama](https://canvas.example.edu/courses/9001/files/1003/preview?verifier=x)](01-contenidos.md)";
+    assert!(local.contains(nested_local), "{local}");
+    fs::write(
+        lib.root.join(LINKS_NOTE),
+        local.replace(nested_local, nested_t10),
+    )?;
+    fs::write(
+        library_json_path(&lib.root),
+        "{\n  \"layout_version\": 2,\n  \"links_version\": 1\n}\n",
+    )?;
+
+    let summary = migrated(ensure_v2(&lib.target(), None, false).await?)?;
+    assert_eq!(summary.links, 1, "{summary}");
+    assert_eq!(lib.read(LINKS_NOTE)?, local);
+    let marker: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(library_json_path(&lib.root))?)?;
+    assert_eq!(marker["links_version"], LINKS_VERSION);
+    assert_eq!(
+        ensure_v2(&lib.target(), None, false).await?,
+        Outcome::AlreadyV2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn syncs_disk_map_finds_a_file_by_its_etag_without_a_recorded_path() -> TestResult {
+    // `sync` starts from `relink::disk_map`: a note it renders links the
+    // etag-proven copy, so its content hash changes and it is rewritten.
+    let lib = Lib::new()?;
+    migrated(ensure_v2(&lib.target(), None, false).await?)?;
+    let mut state: serde_json::Value = serde_json::from_str(&lib.read(LINKS_STATE)?)?;
+    let key = format!("file:{}", v1::ETAG_FILE);
+    let entry = state["items"][&key]
+        .as_object_mut()
+        .ok_or("no etag entry")?;
+    entry.remove("path");
+    entry.remove("file_name");
+    fs::write(
+        lib.root.join(LINKS_STATE),
+        serde_json::to_string_pretty(&state)?,
+    )?;
+    let map = disk_map(&lib.root)?;
+    assert_eq!(
+        map.files
+            .get(&v1::ETAG_FILE)
+            .and_then(FileTarget::sure_path),
+        Some(&PathBuf::from(
+            "atdf105-mineria-de-datos/modulos/02-semana-1/adjuntos/guia-2.pdf"
+        ))
+    );
     Ok(())
 }
 

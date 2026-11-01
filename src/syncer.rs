@@ -643,7 +643,13 @@ impl CourseSync<'_> {
                 Some("File") => {
                     if let Some(fid) = item.content_id {
                         counts.files += ctx.sync_file(fid, state).await?;
-                        if let Some(FileTarget::Path(path)) = ctx.links.files.get(&fid).cloned() {
+                        if let Some(path) = ctx
+                            .links
+                            .files
+                            .get(&fid)
+                            .and_then(FileTarget::sure_path)
+                            .cloned()
+                        {
                             if let Ok(rel) = path.strip_prefix(self.ramo) {
                                 record_path(state, relink::module_item_key(item.id), rel);
                             }

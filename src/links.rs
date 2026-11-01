@@ -246,9 +246,27 @@ pub struct LinkMap {
 pub enum FileTarget {
     /// This file.
     Path(PathBuf),
+    /// Copies of this file, same name and same bytes (v1 downloaded one
+    /// attachment into every module that showed it), in a stable order. Any
+    /// of them is the file; [`LinkMap::resolve`] gives a note the copy under
+    /// its own directory (its module's `adjuntos/`) when there is one, else
+    /// the first. Never empty.
+    Copies(Vec<PathBuf>),
     /// One of these files, all of the right size: the link's own text has to
     /// name exactly one of them ([`LinkMap::resolve`]), or the link stays remote.
     Ambiguous(Vec<PathBuf>),
+}
+
+impl FileTarget {
+    /// The file, when it is sure: a [`FileTarget::Path`], or the first of
+    /// its [`FileTarget::Copies`].
+    pub fn sure_path(&self) -> Option<&PathBuf> {
+        match self {
+            FileTarget::Path(path) => Some(path),
+            FileTarget::Copies(paths) => paths.first(),
+            FileTarget::Ambiguous(_) => None,
+        }
+    }
 }
 
 /// How [`LinkMap::resolve`] answered.
@@ -265,14 +283,26 @@ pub enum Resolution {
 }
 
 impl LinkMap {
-    /// Where `target` is, if anywhere. `label` is the link's text, the only
-    /// tie-break between same-size copies ([`FileTarget::Ambiguous`]): it
-    /// must name exactly one of them, as its original file name
-    /// ([`layout::attachment_file`]) or as its slug.
-    pub fn resolve(&self, target: &CanvasRef, label: &str) -> Resolution {
+    /// Where `target` is, if anywhere, for a link with text `label` in the
+    /// note `note` (relative to the library root, like the map).
+    ///
+    /// `label` is the only tie-break between same-size candidates
+    /// ([`FileTarget::Ambiguous`]): it must name exactly one of them, as its
+    /// original file name ([`layout::attachment_file`]) or as its slug.
+    /// `note` picks among identical [`FileTarget::Copies`]: the one under the
+    /// note's own directory, else the first.
+    pub fn resolve(&self, target: &CanvasRef, label: &str, note: &Path) -> Resolution {
         let found = match target {
             CanvasRef::File(id) => match self.files.get(id) {
                 Some(FileTarget::Path(path)) => Some(path.clone()),
+                Some(FileTarget::Copies(paths)) => {
+                    let dir = note.parent().unwrap_or(Path::new(""));
+                    paths
+                        .iter()
+                        .find(|path| path.starts_with(dir))
+                        .or_else(|| paths.first())
+                        .cloned()
+                }
                 Some(FileTarget::Ambiguous(paths)) => {
                     return match pick_by_label(paths, label) {
                         Some(path) => Resolution::Local(path.clone()),
@@ -420,8 +450,17 @@ pub struct LinkStats {
 /// stays exactly as it was.
 ///
 /// Fenced code and inline code are not rewritten. Inline links, images,
-/// autolinks, reference definitions and bare `http(s)` URLs are. A destination
-/// is read on the same line as its opening `[`.
+/// autolinks, reference definitions and bare `http(s)` URLs are. The text of a
+/// link can span lines of one paragraph (html2md's `![alt…\n](…)`): its
+/// destination is a destination, never a bare URL. A `](url)` whose `[` is not
+/// in the paragraph is no link and stays as it is, rather than become
+/// `]([name](path))`. The text of an inline link is
+/// rewritten too, apart from its destination: an image or raw HTML inside it
+/// (`[![x](…)](…)`, `[<img src=…>](…)`) gets its own local path or keeps its
+/// URL, whatever the outer link does. Raw HTML only ever gets attribute
+/// values replaced: `src` / `href`, and any other attribute (`alt` and
+/// `title` aside) whose value is a Canvas file URL, such as Canvas's
+/// `data-api-endpoint`.
 pub fn rewrite_canvas_links(markdown: &str, md_path: &Path, map: &LinkMap) -> (String, LinkStats) {
     let mut cx = Cx {
         md_path,
@@ -455,10 +494,10 @@ pub fn rewrite_canvas_links(markdown: &str, md_path: &Path, map: &LinkMap) -> (S
                 continue;
             }
         }
-        let (line_len, nl_len) = line_bounds(rest);
-        out.push_str(&rewrite_line(&rest[..line_len], &mut code, &mut cx));
-        out.push_str(&rest[line_len..line_len + nl_len]);
-        rest = &rest[line_len + nl_len..];
+        let (para_len, nl_len) = paragraph_bounds(rest);
+        out.push_str(&rewrite_line(&rest[..para_len], &mut code, &mut cx));
+        out.push_str(&rest[para_len..para_len + nl_len]);
+        rest = &rest[para_len + nl_len..];
     }
     cx.stats.ambiguous.sort_unstable();
     cx.stats.ambiguous.dedup();
@@ -475,10 +514,12 @@ struct Cx<'a> {
     in_tag: Option<Option<char>>,
 }
 
-/// `src` / `href` attribute values of a raw HTML tag. Literal pattern, so
-/// `Regex::new` only fails if this string is edited into something invalid.
-static HTML_URL_ATTR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)(\s(?:src|href)\s*=\s*)(?:"([^"]*)"|'([^']*)')"#).unwrap());
+/// Quoted attribute values of a raw HTML tag, with the attribute's name.
+/// Literal pattern, so `Regex::new` only fails if this string is edited into
+/// something invalid.
+static HTML_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\s([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap()
+});
 /// `alt` / `title` of a raw HTML tag: its text, for [`LinkMap::resolve`].
 static HTML_LABEL_ATTR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\s(?:alt|title)\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
@@ -489,6 +530,27 @@ fn line_bounds(s: &str) -> (usize, usize) {
         Some(n) => (n, 1),
         None => (s.len(), 0),
     }
+}
+
+/// The lines of the paragraph `s` starts with, as [`line_bounds`] gives one
+/// line: its length without the last line's newline, and that newline's.
+///
+/// The text of a link can span lines (html2md ends an image's alt text with a
+/// newline: `![…\n](…)`), never a blank line, so a paragraph ends at one, or
+/// before a line that opens a code fence (which can interrupt a paragraph).
+/// Inside it, newlines are ordinary text to [`rewrite_line`].
+fn paragraph_bounds(s: &str) -> (usize, usize) {
+    let (mut len, mut nl_len) = line_bounds(s);
+    while nl_len > 0 {
+        let next = &s[len + nl_len..];
+        let (next_len, next_nl) = line_bounds(next);
+        if next[..next_len].trim().is_empty() || open_fence(next).is_some() {
+            break;
+        }
+        len += nl_len + next_len;
+        nl_len = next_nl;
+    }
+    (len, nl_len)
 }
 
 fn open_fence(s: &str) -> Option<(char, usize)> {
@@ -586,6 +648,17 @@ fn rewrite_line(line: &str, code: &mut Option<usize>, cx: &mut Cx<'_>) -> String
                 }
             }
         }
+        if matches!(byte, b'<' | b'h' | b'H') && after_link_text(&line[..i]) {
+            // `](url)` whose `[` is not in this paragraph (in code, or a
+            // stray `]`): not a link, and not a bare URL either. Turned into
+            // `[name](path)` it would read `]([name](path))`, so it stays.
+            let len = match_len_after_text(&line[i..]);
+            if len > 0 {
+                out.push_str(&line[i..i + len]);
+                i += len;
+                continue;
+            }
+        }
         let interesting = matches!(byte, b'[' | b'!' | b'<' | b'h' | b'H');
         let bare_ok = (byte != b'h' && byte != b'H') || url_boundary(line, i);
         if interesting && bare_ok {
@@ -638,8 +711,16 @@ fn tag_end(s: &str, quote: &mut Option<char>) -> Option<usize> {
 }
 
 /// A raw HTML tag with each `src` / `href` value that has a local copy
-/// (`alt` or `title` being the link text) replaced by its relative path (already percent-encoded, so it needs no
-/// HTML escaping). Everything else in the tag stays byte for byte.
+/// (`alt` or `title` being the link text) replaced by its relative path
+/// (already percent-encoded, so it needs no HTML escaping). Everything else
+/// in the tag stays byte for byte.
+///
+/// Any other attribute whose whole value is a Canvas *file* URL with a local
+/// copy (Canvas's `data-api-endpoint="…/api/v1/courses/<n>/files/<id>"`)
+/// gets the same relative path, rather than being dropped: the tag keeps
+/// every attribute it had, and no Canvas file URL is left to fetch. It is
+/// the same link as the tag's `src` / `href`, so it is not counted again.
+/// `alt` and `title` are text, never rewritten.
 fn rewrite_tag(tag: &str, cx: &mut Cx<'_>) -> String {
     let label = HTML_LABEL_ATTR_RE
         .captures(tag)
@@ -647,11 +728,21 @@ fn rewrite_tag(tag: &str, cx: &mut Cx<'_>) -> String {
         .map_or("", |m| m.as_str());
     let mut out = String::with_capacity(tag.len());
     let mut last = 0;
-    for cap in HTML_URL_ATTR_RE.captures_iter(tag) {
-        let Some(value) = cap.get(2).or_else(|| cap.get(3)) else {
+    for cap in HTML_ATTR_RE.captures_iter(tag) {
+        let (Some(name), Some(value)) = (cap.get(1), cap.get(2).or_else(|| cap.get(3))) else {
             continue;
         };
-        let Some(link) = local_link(value.as_str(), label, cx) else {
+        let name = name.as_str().to_ascii_lowercase();
+        let link = match name.as_str() {
+            "src" | "href" => local_link(value.as_str(), label, cx),
+            "alt" | "title" => None,
+            _ if value.as_str().chars().any(char::is_whitespace) => None,
+            _ => match canvas_ref(value.as_str()) {
+                Some(CanvasRef::File(_)) => local_target(value.as_str(), label, cx).map(|(l, _)| l),
+                _ => None,
+            },
+        };
+        let Some(link) = link else {
             continue;
         };
         out.push_str(&tag[last..value.start()]);
@@ -701,15 +792,47 @@ fn finish_inline(
     let (title, close_len) = parse_title_and_close(&s[after_dest..])?;
     let end = after_dest + close_len;
     let label = &s[bracket + 1..label_end - 1];
-    let replacement =
-        local_link(dest_raw, label, cx).map(|link| render_inline(bang, label, &link.dest, title));
+    // The text is rewritten on its own: `[![x](<file>)](<page>)` and
+    // `[<img src=…>](<page>)` carry a second link inside the first, and
+    // either one can have a local copy without the other.
+    let inner = rewrite_label(label, cx);
+    let replacement = match (local_link(dest_raw, label, cx), inner) {
+        (Some(link), inner) => Some(render_inline(
+            bang,
+            inner.as_deref().unwrap_or(label),
+            &link.dest,
+            title,
+        )),
+        (None, Some(inner)) => Some(format!(
+            "{}{inner}{}",
+            &s[..bracket + 1],
+            &s[label_end - 1..end]
+        )),
+        (None, None) => None,
+    };
     Some(Found {
         len: end,
         replacement,
     })
 }
 
+/// The text of an inline link with the links inside it rewritten (a nested
+/// image, raw HTML), or `None` when nothing in it changed. Read as one line
+/// of its own: code and raw tags it opens end with it.
+fn rewrite_label(label: &str, cx: &mut Cx<'_>) -> Option<String> {
+    let mut code = None;
+    let out = rewrite_line(label, &mut code, cx);
+    // `match_link` only runs outside a raw tag, so none was open before.
+    cx.in_tag = None;
+    (out != label).then_some(out)
+}
+
 fn finish_ref(s: &str, label_end: usize, cx: &mut Cx<'_>) -> Option<Found> {
+    // A definition ends with its line, wherever the paragraph goes on.
+    let s = &s[..line_bounds(s).0];
+    if label_end >= s.len() {
+        return None;
+    }
     let after_colon = &s[label_end + 1..];
     let lead = leading_ws(after_colon);
     if lead == 0 {
@@ -783,6 +906,17 @@ struct LocalLink {
 /// The new destination of the link `url` with text `label`, counted in
 /// `cx.stats`, or `None` to leave it alone.
 fn local_link(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<LocalLink> {
+    let (link, target) = local_target(url, label, cx)?;
+    match target {
+        CanvasRef::Mailto(_) => cx.stats.mailto += 1,
+        _ => cx.stats.local += 1,
+    }
+    Some(link)
+}
+
+/// [`local_link`] without counting it: the new destination and what `url`
+/// points at. An ambiguous file is still recorded in `cx.stats.ambiguous`.
+fn local_target(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<(LocalLink, CanvasRef)> {
     if !cx.map.hosts.is_empty() {
         if let Some(host) = url_host(url) {
             if !cx.map.hosts.contains(&host) {
@@ -791,7 +925,7 @@ fn local_link(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<LocalLink> {
         }
     }
     let target = canvas_ref(url)?;
-    let link = match cx.map.resolve(&target, label) {
+    let link = match cx.map.resolve(&target, label, cx.md_path) {
         Resolution::Local(path) => {
             let rel = relative_link(cx.md_path, &path)?;
             if rel.chars().any(char::is_control) {
@@ -826,11 +960,7 @@ fn local_link(url: &str, label: &str, cx: &mut Cx<'_>) -> Option<LocalLink> {
     if link.dest == url.trim() {
         return None;
     }
-    match target {
-        CanvasRef::Mailto(_) => cx.stats.mailto += 1,
-        _ => cx.stats.local += 1,
-    }
-    Some(link)
+    Some((link, target))
 }
 
 fn destination_body(raw: &str) -> &str {
@@ -1092,8 +1222,32 @@ fn backtick_run(s: &str) -> usize {
     s.bytes().take_while(|b| *b == b'`').count()
 }
 
-fn ref_def_slot(line: &str, i: usize) -> bool {
-    i <= 3 && line.as_bytes()[..i].iter().all(|b| *b == b' ')
+/// `i` is where a reference definition can start: at most three spaces into
+/// its line (`text` may be a paragraph of several).
+fn ref_def_slot(text: &str, i: usize) -> bool {
+    let start = text[..i].rfind('\n').map_or(0, |n| n + 1);
+    i - start <= 3 && text.as_bytes()[start..i].iter().all(|b| *b == b' ')
+}
+
+/// `before` ends where a link's destination would start: `](`, then optional
+/// whitespace.
+fn after_link_text(before: &str) -> bool {
+    before.trim_end().ends_with("](")
+}
+
+/// The length of the URL `s` starts with, bare or in `<…>`, or 0.
+fn match_len_after_text(s: &str) -> usize {
+    if let Some(rest) = s.strip_prefix('<') {
+        return match rest.find('>') {
+            Some(close) if starts_with_http(rest) => close + 2,
+            _ => 0,
+        };
+    }
+    if starts_with_http(s) {
+        bare_url_len(s)
+    } else {
+        0
+    }
 }
 
 fn url_boundary(line: &str, i: usize) -> bool {
@@ -1521,19 +1675,23 @@ Usa `[a](https://canvas.example.com/files/22)` tal cual.
     #[test]
     fn an_ambiguous_file_is_settled_only_by_a_label_naming_one_copy() {
         let map = full_map();
+        let note = Path::new("mineria/tareas/semana-10.md");
         let r = CanvasRef::File(2);
         let local = |p: &str| Resolution::Local(PathBuf::from(p));
         assert_eq!(
-            map.resolve(&r, "Guía 2"),
+            map.resolve(&r, "Guía 2", note),
             local("mineria/modulos/02-semana/adjuntos/guia-2.pdf")
         );
         assert_eq!(
-            map.resolve(&r, "guia_1.PDF"),
+            map.resolve(&r, "guia_1.PDF", note),
             local("mineria/modulos/01-intro/adjuntos/guia-1.pdf")
         );
-        assert_eq!(map.resolve(&r, "guia"), Resolution::Ambiguous);
-        assert_eq!(map.resolve(&r, ""), Resolution::Ambiguous);
-        assert_eq!(map.resolve(&CanvasRef::File(3), "x"), Resolution::Remote);
+        assert_eq!(map.resolve(&r, "guia", note), Resolution::Ambiguous);
+        assert_eq!(map.resolve(&r, "", note), Resolution::Ambiguous);
+        assert_eq!(
+            map.resolve(&CanvasRef::File(3), "x", note),
+            Resolution::Remote
+        );
     }
 
     #[test]
@@ -1555,6 +1713,183 @@ Usa `[a](https://canvas.example.com/files/22)` tal cual.
         assert_eq!(out, want);
         assert_eq!(stats.local, 3);
         assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn an_image_inside_a_link_is_rewritten_on_its_own() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+[![Normativa](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)](https://canvas.unab.cl/courses/9001/pages/fase-1)
+[![local](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)](https://canvas.unab.cl/courses/9001/quizzes/3)
+[![remota](https://canvas.unab.cl/courses/9001/files/99/preview)](https://canvas.unab.cl/courses/9001/pages/fase-1)
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+[![Normativa](../01-intro/adjuntos/rubrica.docx)](01-fase-1.md)
+[![local](../01-intro/adjuntos/rubrica.docx)](https://canvas.unab.cl/courses/9001/quizzes/3)
+[![remota](https://canvas.unab.cl/courses/9001/files/99/preview)](01-fase-1.md)
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 4);
+        assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn an_image_whose_alt_text_ends_in_a_newline_keeps_its_destination() {
+        // html2md's `![alt\n](…)`: the destination is on the next line.
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+Antes.
+![Personas analizan gráficos digitales en oficina moderna.
+](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=uNa6)
+![Remota en dos
+](https://canvas.unab.cl/courses/9001/files/99/preview?verifier=x)
+
+![Con título
+](https://canvas.unab.cl/courses/9001/files/1/preview \"Figura\")
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+Antes.
+![Personas analizan gráficos digitales en oficina moderna.
+](../01-intro/adjuntos/rubrica.docx)
+![Remota en dos
+](https://canvas.unab.cl/courses/9001/files/99/preview?verifier=x)
+
+![Con título
+](../01-intro/adjuntos/rubrica.docx \"Figura\")
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 2);
+        assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn a_link_whose_text_spans_several_lines_is_a_link() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+- Etapas: [Recolección de datos
+Obtener los datos de fuentes
+como archivos, bases de datos, APIs, etc.](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)
+y [Fase
+uno](https://canvas.unab.cl/courses/9001/pages/fase-1), con `[código
+](https://canvas.unab.cl/courses/9001/files/1)` intacto.\r
+[ref]: https://canvas.unab.cl/courses/9001/files/1\r
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+- Etapas: [Recolección de datos
+Obtener los datos de fuentes
+como archivos, bases de datos, APIs, etc.](../01-intro/adjuntos/rubrica.docx)
+y [Fase
+uno](01-fase-1.md), con `[código
+](https://canvas.unab.cl/courses/9001/files/1)` intacto.\r
+[ref]: ../01-intro/adjuntos/rubrica.docx\r
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 3);
+        assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn a_destination_without_its_text_is_left_alone() {
+        // The `[` is in another paragraph, or in code: `](url)` is no link,
+        // and its URL is not bare. It stays, never `]([name](path))`.
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+![Alt en otro párrafo
+
+](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)
+`[código` ](<https://canvas.unab.cl/courses/9001/files/1>) y https://canvas.unab.cl/courses/9001/files/1
+```
+[en una cerca
+```
+](https://canvas.unab.cl/courses/9001/files/1)
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+![Alt en otro párrafo
+
+](https://canvas.unab.cl/courses/9001/files/1/preview?verifier=x)
+`[código` ](<https://canvas.unab.cl/courses/9001/files/1>) y [rubrica.docx](../01-intro/adjuntos/rubrica.docx)
+```
+[en una cerca
+```
+](https://canvas.unab.cl/courses/9001/files/1)
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 1);
+    }
+
+    #[test]
+    fn raw_html_inside_a_link_gets_paths_and_no_markdown() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let img = |id: u64| {
+            format!(
+                "<img id=\"805699\" src=\"https://canvas.unab.cl/courses/9001/files/{id}/preview?verifier=x\" alt=\"Botón\" width=\"116\" height=\"35\" data-api-endpoint=\"https://canvas.unab.cl/api/v1/courses/9001/files/{id}\" data-api-returntype=\"File\" loading=\"lazy\">"
+            )
+        };
+        let input = format!(
+            "[{}](https://canvas.unab.cl/courses/9001/pages/fase-1)\n\
+             | [**{}**](https://canvas.unab.cl/courses/9001/quizzes/3) | [{}](https://canvas.unab.cl/courses/9001/pages/fase-1) |\n",
+            img(1),
+            img(1),
+            img(99),
+        );
+        let (out, stats) = rewrite_canvas_links(&input, note, &full_map());
+        let local = "<img id=\"805699\" src=\"../01-intro/adjuntos/rubrica.docx\" alt=\"Botón\" width=\"116\" height=\"35\" data-api-endpoint=\"../01-intro/adjuntos/rubrica.docx\" data-api-returntype=\"File\" loading=\"lazy\">";
+        let want = format!(
+            "[{local}](01-fase-1.md)\n\
+             | [**{local}**](https://canvas.unab.cl/courses/9001/quizzes/3) | [{}](01-fase-1.md) |\n",
+            img(99),
+        );
+        assert_eq!(out, want);
+        // Two images and two pages: `data-api-endpoint` is not a link of its own.
+        assert_eq!(stats.local, 4);
+        assert_eq!(rewrite_canvas_links(&out, note, &full_map()).0, out);
+    }
+
+    #[test]
+    fn other_attributes_follow_only_canvas_file_urls() {
+        let note = Path::new("mineria/modulos/02-semana/02-fase-2.md");
+        let input = "\
+<a href=\"https://canvas.unab.cl/courses/9001/files/1?wrap=1\" title=\"https://canvas.unab.cl/files/1\" data-api-endpoint=\"https://canvas.unab.cl/api/v1/courses/9001/files/1\" data-x=\"https://canvas.unab.cl/courses/9001/pages/fase-1\">r</a>
+<img src=\"https://canvas.unab.cl/courses/9001/files/99/preview\" data-api-endpoint=\"https://canvas.unab.cl/api/v1/courses/9001/files/99\">
+";
+        let (out, stats) = rewrite_canvas_links(input, note, &full_map());
+        let want = "\
+<a href=\"../01-intro/adjuntos/rubrica.docx\" title=\"https://canvas.unab.cl/files/1\" data-api-endpoint=\"../01-intro/adjuntos/rubrica.docx\" data-x=\"https://canvas.unab.cl/courses/9001/pages/fase-1\">r</a>
+<img src=\"https://canvas.unab.cl/courses/9001/files/99/preview\" data-api-endpoint=\"https://canvas.unab.cl/api/v1/courses/9001/files/99\">
+";
+        assert_eq!(out, want);
+        assert_eq!(stats.local, 1);
+    }
+
+    #[test]
+    fn identical_copies_resolve_to_the_one_beside_the_note() {
+        let mut map = LinkMap::default();
+        map.files.insert(
+            5,
+            FileTarget::Copies(vec![
+                PathBuf::from("mineria/modulos/01-intro/adjuntos/banner.png"),
+                PathBuf::from("mineria/modulos/02-semana/adjuntos/banner.png"),
+            ]),
+        );
+        let input = "![b](https://canvas.unab.cl/courses/9001/files/5/preview)\n";
+        let at = |note: &str| rewrite_canvas_links(input, Path::new(note), &map).0;
+        assert_eq!(
+            at("mineria/modulos/02-semana/01-fase-1.md"),
+            "![b](adjuntos/banner.png)\n"
+        );
+        assert_eq!(
+            at("mineria/modulos/01-intro/01-intro.md"),
+            "![b](adjuntos/banner.png)\n"
+        );
+        // No copy beside the note: the first.
+        assert_eq!(
+            at("mineria/tareas/semana-10.md"),
+            "![b](../modulos/01-intro/adjuntos/banner.png)\n"
+        );
     }
 
     #[test]

@@ -44,7 +44,9 @@ recordings that session can reach.
 * **Parsing:** `serde`, `serde_json`, `regex`, `url`, `html2md`
 * **Storage:** `rusqlite` (Zoom session store), JSON (`state.json` per course)
 * **Migration:** `blake3` (`pure`) for collision checks; `rustix` (Linux only)
-  for `renameat2(RENAME_NOREPLACE)`, so a migration rename never replaces a file
+  for `renameat2(RENAME_NOREPLACE)`, so a migration rename never replaces a file;
+  `md-5` (RustCrypto, pure Rust, not behind `zoom`) to check an attachment
+  against the S3 ETag `state.json` recorded for it (`migrate::relink`)
 * **Browser automation:** `chromiumoxide` (pinned to a git rev — see Cargo.toml).
   Gated behind the default-on `zoom` cargo feature, along with the rest of the
   Zoom flow (`rusqlite`, `cookie`, `cookie_store`, `reqwest_cookie_store`,
@@ -266,7 +268,24 @@ an absolute link on a host that is not the library's Canvas
 (`LinkMap::hosts`: from the notes' `url`, `index.json`, `canvas.base_url`)
 stay as they are. Raw HTML html2md keeps (`<img … width=…>`, `<iframe>`)
 never gets markdown inside it: only its `src` / `href` values become the
-relative path (`alt` / `title` as the link text). The map spans every course, so a link into another
+relative path (`alt` / `title` as the link text), and so does any other
+attribute (not `alt` / `title`) whose whole value is a Canvas file URL —
+Canvas's `data-api-endpoint="…/api/v1/courses/<n>/files/<id>"` gets the
+same path as its `src`, rather than being deleted, so the tag keeps every
+byte it had but the URL; it is not counted as a second link. The text of a
+link is rewritten on its own: in `[![x](<file>)](<page>)`,
+`[<img src=…>](<page>)` or `[**<img …>**](…)` (several per table row) the
+inner image and the outer destination each become local or stay remote
+independently. A link's text can span lines of one paragraph (html2md
+ends an image's alt text with a newline: `![alt…\n](…)`); its destination
+is a destination, never a bare URL. A `](url)` whose `[` is not in its
+paragraph (a blank line before, or in code) is no link and stays as it is
+rather than become `]([name](path))`; a bare URL becomes `[name](path)`
+only when it is not right after `](`. Two or more attachments of one course with the same name
+and the same bytes are copies of one file (`FileTarget::Copies`: v1
+downloaded it into every module that showed it); `LinkMap::resolve` takes
+the note's path and gives it the copy under its own directory (its module's
+`adjuntos/`), else the first in path order. The map spans every course, so a link into another
 course's directory works. `sync` builds it from disk at the start
 (`migrate::relink::disk_map`), adds each course's pages and assignments
 from the module listing before writing any note (a page can link to one
@@ -331,7 +350,7 @@ run has not seen the other courses' deadlines); `AGENTS.md`, the READMEs and
 `curso.json` are rewritten only when their text changed. A root `AGENTS.md`
 or `INDEX.md` whose first line is not ours (the vault's own) is never
 overwritten (`library::write_root_file`). `.u_crawler/library.json`
-(`{"layout_version": 2, "links_version": 1}`) is written by the migration
+(`{"layout_version": 2, "links_version": 2}`) is written by the migration
 only, as its last step (see "Migration").
 
 ### Directory Layout (Calendar)
@@ -480,11 +499,15 @@ one `sync` does not rewrite is a leftover copy, never a loss.
 4. Relink (`migrate::relink`): the `LinkMap` of the whole library is built
    from disk (`relink::read_sources` → `relink::build`, pure), plus Canvas
    with a client (`relink::learn`: module items, assignment file names, and
-   `GET /files/:id` for every linked file with no single local copy), and
+   `GET /files/:id` for every linked file with no single local copy: the
+   attachment with Canvas's name and size, or the first of several when they
+   all have the same bytes — different bytes, none), and
    every other generated note of a v2 course whose links it resolves is
-   rewritten, frontmatter untouched. What Canvas taught goes into each
-   course's `state.json` (`relink::state_updates`, via
-   `rewrite::rewrite_state`, backed up like a note). Both are backed up
+   rewritten, frontmatter untouched. What Canvas taught, and what an etag
+   proved (`relink::proven`, with or without a client), goes into each
+   course's `state.json` (`relink::state_updates`: `path`, and a `file:`
+   entry's `file_name` when it had none; via `rewrite::rewrite_state`,
+   backed up like a note). Both are backed up
    under this run's journal, or, when the plan moved nothing, under a
    journal of their own (`apply::begin_relink`: an intent with
    `relink: true`, no moves), so `--undo <ts>` reverses them. Offline, the
@@ -494,13 +517,26 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    v1 wrote, matched against each note's bytes and its backups; announcement
    ids from `index.json` (`body_md_path`) or from the journal's rename of
    a v1 `…_<id>.md`; announcement media from `index.json` (`local_path`,
-   as is or through the journal's rename); a `file:<id>` with a recorded
-   `file_name`: the attachment of its course with that name and size (none:
+   as is or through the journal's rename); a `file:<id>` with an `etag` and a
+   `size` (a `last_error` from a later refresh does not void it): the attachment(s) of its course with that
+   size whose bytes have that S3 ETag (MD5 hex, quotes dropped; multipart
+   `<hex>-<N>`: the MD5 of its `N` parts' binary MD5s, 5 MiB parts first,
+   then any whole-MiB size giving exactly `N` parts, at most 8) — proof of
+   content, so the link becomes local whatever its text and whether or not
+   Canvas still has the course; only same-size attachments of that course
+   are hashed, each once, and only for entries without a sure path
+   (recordings never: they have no `file:` key) — then written to
+   `state.json` so the next run finds it by path; a `file:<id>` with a
+   recorded `file_name`: the attachment of its course with that name and size (none:
    the copy is gone, and another file of that size is never taken for it;
-   several with the same bytes: the first); a `file:<id>` without a name
+   several with the same bytes: one file); a `file:<id>` without a name
    (v1): every attachment of that size is only a candidate, and a link
    reaches one when its own text names it (`layout::attachment_file` or
-   slug), else it stays remote; a `page:<slug>` whose slug names one page note
+   slug), else it stays remote — copies with the same bytes are one
+   candidate, but this rule is never relaxed to a size alone; wherever a
+   file was found (path, etag, name, Canvas), the other attachments of its course
+   with its name and bytes are its copies (`FileTarget::Copies`, each note
+   linking the one beside it); a `page:<slug>` whose slug names one page note
    of its course (`NN-<slug>.md`, needs the course's Canvas id). Two notes
    claiming one resource at the same level leave it remote (logged), as
    does an ambiguous file (logged per note). Module items are not on disk
@@ -519,8 +555,10 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    only (which module links which assignment is not on disk; `sync` adds
    it).
 6. `.u_crawler/library.json`, last, with `links_version`
-   (`relink::LINKS_VERSION`): until it exists the library is not v2; until
-   it has that version, the next writer command relinks it once.
+   (`relink::LINKS_VERSION`, currently `2`: T11's nested links,
+   `data-api-endpoint` and identical copies): until it exists the library
+   is not v2; until it has that version, the next writer command relinks
+   it once (a library marked `1` by T10 included).
 
 `ensure_v2` is the cheap gate the writer commands use: a root that does not
 exist is left alone; `library.json` present with the current
@@ -769,8 +807,18 @@ extraction, filename sanitization, `State::record_error`, page-slug extraction,
 byte-size formatting, char-safe truncation, Zoom cookie expiry, YAML frontmatter
 round-trip and upsert, Canvas link classification and markdown rewrite to
 local copies (every link shape, ambiguity settled by link text,
-percent-encoding, `mailto:` repair), the `LinkMap` built from disk and from
-Canvas answers (`migrate::relink`), `sync`'s predicted page and assignment
+percent-encoding, `mailto:` repair, an image or raw `<img>` inside a link's
+text — table rows of them included — each half local or remote on its own,
+`data-api-endpoint` following its `src` with no markdown in the HTML,
+identical copies resolved to the one beside the note, link text spanning
+lines and a `](url)` without its `[` left alone), the `LinkMap` built
+from disk and from Canvas answers (`migrate::relink`; same name, size and
+bytes in two modules is one file, same name and size with other bytes stays
+ambiguous; a file found by its etag — plain MD5, quoted, multipart in
+5 MiB parts — whatever its link text, the one of two same-size files whose
+MD5 it is, identical copies as `Copies`, a non-matching etag left to the
+size rule, a failed or sizeless entry hashing nothing, and what it proves
+written to `state.json`), `sync`'s predicted page and assignment
 paths, course
 directory resolution and index-file writes (`library`), assignment and
 announcement naming with collisions, recording naming / parts / `zoom:`
@@ -801,11 +849,16 @@ directory follows its course, a dry run touches nothing, a cut mid-apply or
 after the renames heals on the next run, undo restores the v1 tree byte for
 byte, and a caldir used as `download_root` is never marked), and the links
 (`tests/migrate_links.rs`: migrating the v1 fixture, whose page `Fase 4`
-carries every link shape measured in the real notes, leaves exactly the
-expected local links and no broken one; a v2 library whose notes still link
+carries every link shape measured in the real notes (nested ones, a
+`data-api-endpoint` and multi-line link text included), leaves exactly the
+expected local links and no broken one — `[descarga]`, whose text names no
+file, made local offline by the real MD5 etag of `Guia_2.PDF`, with its
+`path` and `file_name` written to `state.json`, and found by
+`relink::disk_map` (what `sync` starts from) even without them; a v2 library whose notes still link
 to Canvas is repaired by the next writer (and counted by a dry run), a
 second pass does nothing, and undoing the relink journal restores it byte
-for byte while keeping it marked; a course without a Canvas id keeps its
+for byte while keeping it marked; a library marked `links_version: 1` is
+relinked by the next writer; a course without a Canvas id keeps its
 page links).
 
 Worth adding: a mock-server integration test covering pagination across three
