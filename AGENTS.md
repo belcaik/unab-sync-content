@@ -493,6 +493,22 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    announcements, and this is what ties its `Zoom/<id>` to it without
    `[layout]` patterns);
    offline, modules are numbered in id order.
+   **Repair.** A v2 course whose `curso.json` has `canvas_id: null` and
+   whose id `course_id_from_links` proves (its state is
+   `.u_crawler/state.json`) is planned as a repair
+   (`PlannedCourse::repair`, `(repair)` in the plan): Canvas names it by
+   id (offline it keeps its name and code), and when that name differs
+   its directory is renamed whole — one journaled `Dir` move, before any
+   file move, its calendar directory along — and its `Zoom/<id>` goes into
+   its `grabaciones/`. A course whose id another directory already owns is
+   left alone (that would be a merge, not a rename). After `apply`, before
+   the link map, `curso.json` gets the id, code, Canvas name and zoom ids
+   (`rewrite::rewrite_course_file`, backed up under the journal); then
+   every generated note of the course gets `ramo` = its directory, the
+   rest of its frontmatter kept; and its `README.md`, when its first line
+   is the old title (the migration wrote it), is written again from disk.
+   `--undo` puts all of it back byte for byte (root `AGENTS.md` /
+   `INDEX.md` stay, as with any undo).
 3. Every generated note a journal renamed is rewritten
    (`rewrite::rewrite_file`, backup under `.u_crawler/backup/<ts>/`, the
    journal's `<ts>`): `ramo` + `tipo`, and for an announcement `canvas_id`
@@ -669,7 +685,8 @@ Rules that hold today and should keep holding:
   non-symlink `.part` beside the note or the backup is refused (`PartExists`);
   `atomic_write` itself is unchanged and downloads still truncate their own
   `.part`. `rewrite_state` gives a course's `.u_crawler/state.json` the
-  same backup-then-replace (the only non-markdown it writes). `migrate::ensure` is its only caller outside the writers. The frozen signatures are in
+  same backup-then-replace, and `rewrite_course_file` a repaired course's
+  `curso.json` and `README.md` (the only non-markdown it writes). `migrate::ensure` is its only caller outside the writers. The frozen signatures are in
   `docs/specs/layout-v2.md` ("API de frontmatter y de la reescritura").
 * Structured log fields: `course_id`, `module_id`, `file_id`, `path`, `attempt`.
 
@@ -866,7 +883,12 @@ to Canvas is repaired by the next writer (and counted by a dry run), a
 second pass does nothing, and undoing the relink journal restores it byte
 for byte while keeping it marked; a library marked `links_version: 1` is
 relinked by the next writer; a course without a Canvas id keeps its
-page links).
+page links), and the repair of a v2 course without Canvas id
+(`tests/migrate_repair.rs`: renamed whole with its calendar directory,
+id and zoom ids in `curso.json`, `ramo` in its notes, its README written
+again, its `Zoom/<id>` in `grabaciones/`, a second pass with nothing to
+repair, a dry run that reports it and touches nothing, and undo back to
+the same tree byte for byte).
 
 Worth adding: a mock-server integration test covering pagination across three
 pages, ETag skip, and `Range` resume. `tests/` covers the Zoom database and

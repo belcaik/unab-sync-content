@@ -10,6 +10,9 @@
 //!    half-migrated tree is not the same plan).
 //! 2. [`super::scan`] → [`plan::plan`] → [`apply::apply`] under a new
 //!    journal, when the plan has anything to do.
+//!    A v2 course the plan repairs ([`PlannedCourse::repair`]: no Canvas
+//!    id, one its links prove) then gets its `curso.json`, before the link
+//!    map is built; its notes' `ramo` and its README follow in steps 3–4.
 //! 3. The generated notes each journal renamed get their frontmatter and
 //!    local links ([`rewrite::rewrite_file`], backup under
 //!    `.u_crawler/backup/<ts>/`, `<ts>` being the journal's). The links come
@@ -43,14 +46,15 @@
 //! `library.json` set aside, so the next run migrates again.
 
 use super::apply::{self, ApplyError, Entry, JournalState, Roots};
-use super::plan::{self, CanvasCourse, Plan, Root, Unresolved};
+use super::plan::{self, CanvasCourse, Plan, PlannedCourse, Root, Unresolved};
 use super::relink::{self, Sources};
 use super::rewrite::{self, Rewrite, RewriteError, RewriteOutcome};
 use super::{scan, Inventory, INDEX_JSON, LIBRARY_JSON};
 use crate::canvas::{CanvasClient, CanvasError, Course};
 use crate::config::Config;
-use crate::frontmatter::{DocKind, Frontmatter};
+use crate::frontmatter::{self, DocKind, Frontmatter};
 use crate::fsutil;
+use crate::index;
 use crate::layout::{self, CourseMeta, CourseNaming};
 use crate::library;
 use crate::links::LinkMap;
@@ -481,6 +485,7 @@ pub async fn migrate(
     let plan = plan::plan(&inv, target.naming, &meta);
     summary.courses = plan.courses.len();
     summary.unresolved = plan.unresolved.clone();
+    let repairs: Vec<PlannedCourse> = plan.courses.iter().filter(|c| c.repair).cloned().collect();
     for u in &plan.unresolved {
         tracing::warn!(root = %u.root, path = %u.path, reason = %u.reason, "left in place by the migration");
     }
@@ -496,6 +501,13 @@ pub async fn migrate(
         ran.push(ts);
     }
 
+    let mut batch = match &summary.journal {
+        Some(ts) => Relink::Journal(ts.clone()),
+        None => Relink::Lazy(None),
+    };
+    // Before the link map: a repaired course's Canvas id resolves its links.
+    let old_titles = repair_records(library, target.naming, &repairs, &mut batch).await?;
+
     let (sources, map) = link_map(library, canvas).await?;
     let to_rewrite = if was_marked {
         ran.clone()
@@ -505,10 +517,7 @@ pub async fn migrate(
     for ts in &to_rewrite {
         rewrite_notes(library, ts, &map, &mut summary).await?;
     }
-    let mut batch = match &summary.journal {
-        Some(ts) => Relink::Journal(ts.clone()),
-        None => Relink::Lazy(None),
-    };
+    repair_notes(library, &repairs, &map, &mut batch, &mut summary).await?;
     let relinked = relink_notes(library, &sources, &map, &mut batch).await?;
     summary.rewritten += relinked.notes;
     summary.links += relinked.links;
@@ -521,11 +530,12 @@ pub async fn migrate(
             summary.states += 1;
         }
     }
+
+    repair_readmes(library, target.naming, &repairs, &old_titles, &mut batch).await?;
     if let Relink::Lazy(Some(ts)) = &batch {
         apply::finish_relink(library, ts)?;
         summary.journal = Some(ts.clone());
     }
-
     summary.indexes = library::write_indexes_from_disk(library, target.naming)
         .await?
         .len();
@@ -722,9 +732,10 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
     })
 }
 
-/// What Canvas says about the courses of the library's v1 directories:
-/// those whose id an `index.json` or the course's links gave (looked up one by one when they are
-/// no longer active) and the active ones whose v1 directory name is there.
+/// What Canvas says about the courses of the library's v1 directories, and
+/// of the v2 courses to repair: those whose id an `index.json` or the
+/// course's links gave (looked up one by one when they are no longer
+/// active) and the active ones whose v1 directory name is there.
 ///
 /// # Errors
 ///
@@ -735,10 +746,11 @@ pub async fn canvas_courses(
     inv: &Inventory,
 ) -> Result<Vec<CanvasCourse>, CanvasError> {
     let v1_dirs = inv.v1_course_dirs();
-    if v1_dirs.is_empty() {
+    // `course_ids` also holds the ids `scan` proved for v2 courses to repair.
+    let ids: BTreeSet<u64> = inv.course_ids.values().copied().collect();
+    if v1_dirs.is_empty() && ids.is_empty() {
         return Ok(Vec::new());
     }
-    let ids: BTreeSet<u64> = inv.course_ids.values().copied().collect();
     let mut wanted: BTreeMap<u64, (Course, bool)> = BTreeMap::new();
     for course in client.list_courses().await? {
         let named = v1_dir_name(&course).is_some_and(|d| v1_dirs.contains(d.as_str()));
@@ -884,6 +896,138 @@ impl CourseContext {
             announcements: records.into_iter().map(|r| (r.id, r)).collect(),
         }
     }
+}
+
+/// Give each repaired course ([`PlannedCourse::repair`]) its Canvas id,
+/// name, code and `Zoom/<id>` folders in `curso.json`, backed up under
+/// `batch` so `--undo` puts the old one back. Returns the titles the old
+/// `curso.json` gave each course (by directory), which its own README
+/// starts with when the migration wrote it.
+async fn repair_records(
+    library: &Path,
+    naming: &CourseNaming,
+    repairs: &[PlannedCourse],
+    batch: &mut Relink,
+) -> Result<BTreeMap<String, Vec<String>>, MigrateError> {
+    let mut old_titles = BTreeMap::new();
+    if repairs.is_empty() {
+        return Ok(old_titles);
+    }
+    let lib = library::read(library)?;
+    for course in repairs {
+        let Some(old) = lib.records.get(&course.dir) else {
+            tracing::warn!(path = %course.dir, "repaired course has no curso.json; not rewritten");
+            continue;
+        };
+        old_titles.insert(
+            course.dir.clone(),
+            vec![old.name.clone(), old.index(naming, &course.dir).title],
+        );
+        let mut record = old.clone();
+        record.canvas_id = course.course.id;
+        record.course_code.clone_from(&course.course.code);
+        record.canvas_name = Some(course.course.name.clone());
+        record.zoom_ids.extend(&course.zoom_ids);
+        record.zoom_ids.sort_unstable();
+        record.zoom_ids.dedup();
+        let text = index::render_curso_json(&record.index(naming, &course.dir));
+        let rel = format!("{}/{}", course.dir, super::CURSO_JSON);
+        let ts = batch.ts(library)?;
+        rewrite::rewrite_course_file(library, Path::new(&rel), &text, &ts).await?;
+        tracing::info!(path = %course.dir, course_id = ?course.course.id, "course without Canvas id repaired");
+    }
+    Ok(old_titles)
+}
+
+/// Point the `ramo` of every generated note of a repaired course at its
+/// directory (which a repair may have renamed), keeping the rest of its
+/// frontmatter, and its Canvas links at the local copies.
+async fn repair_notes(
+    library: &Path,
+    repairs: &[PlannedCourse],
+    map: &LinkMap,
+    batch: &mut Relink,
+    summary: &mut Summary,
+) -> Result<(), MigrateError> {
+    for course in repairs {
+        let mut rels = Vec::new();
+        list_files(&library.join(&course.dir), &course.dir, &mut rels)?;
+        for rel in rels {
+            if rewrite::generated_kind(Path::new(&rel)).is_none() {
+                continue;
+            }
+            let text = tokio::fs::read_to_string(library.join(&rel)).await?;
+            let Ok(Some(mut fm)) = frontmatter::parse(&text) else {
+                continue;
+            };
+            if fm.ramo == course.dir {
+                continue;
+            }
+            fm.ramo.clone_from(&course.dir);
+            let ts = batch.ts(library)?;
+            let job = Rewrite {
+                root: library,
+                path: Path::new(&rel),
+                frontmatter: Some(&fm),
+                links: map,
+                backup_ts: &ts,
+            };
+            match rewrite::rewrite_file(&job).await {
+                Ok(RewriteOutcome::Rewritten { local, .. }) => {
+                    summary.rewritten += 1;
+                    summary.links += local;
+                }
+                Ok(RewriteOutcome::Unchanged) => {}
+                Err(e) => {
+                    tracing::warn!(path = %rel, error = %e, "repaired course note not rewritten");
+                    summary.rewrite_failed += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write a repaired course's `README.md` again from disk when the
+/// migration wrote it (its first line is the old title, `old_titles`): it
+/// carries the old name and none of the recordings the repair brought. One
+/// the user wrote, or a `sync`'s, is left alone. Backed up like a note.
+async fn repair_readmes(
+    library: &Path,
+    naming: &CourseNaming,
+    repairs: &[PlannedCourse],
+    old_titles: &BTreeMap<String, Vec<String>>,
+    batch: &mut Relink,
+) -> Result<(), MigrateError> {
+    if repairs.is_empty() {
+        return Ok(());
+    }
+    let lib = library::read(library)?;
+    for course in repairs {
+        let (Some(record), Some(titles)) =
+            (lib.records.get(&course.dir), old_titles.get(&course.dir))
+        else {
+            continue;
+        };
+        let rel = format!("{}/README.md", course.dir);
+        let Ok(current) = tokio::fs::read_to_string(library.join(&rel)).await else {
+            continue;
+        };
+        let first = current.lines().next().unwrap_or_default();
+        if !titles.iter().any(|t| first == format!("# {t}")) {
+            continue;
+        }
+        let index = library::course_index_from_disk(library, &course.dir, record, naming)?;
+        let ts = batch.ts(library)?;
+        rewrite::rewrite_course_file(
+            library,
+            Path::new(&rel),
+            &index::render_course_readme(&index),
+            &ts,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Give every generated note journal `ts` renamed its frontmatter and local

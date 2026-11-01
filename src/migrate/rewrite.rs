@@ -198,16 +198,47 @@ pub async fn rewrite_state(
     new_text: &str,
     backup_ts: &str,
 ) -> Result<RewriteOutcome, RewriteError> {
+    rewrite_whole(root, rel, new_text, backup_ts, |comps| {
+        matches!(comps, [course, META_DIR, "state.json"] if !is_foreign_meta(course) && *course != "..")
+    })
+    .await
+}
+
+/// Back up and rewrite a course's own index file, `<course>/curso.json` or
+/// `<course>/README.md`, as [`rewrite_state`] does `state.json`: what the
+/// repair of a course without Canvas id writes, so `--undo` puts the bytes
+/// back.
+///
+/// # Errors
+///
+/// As [`rewrite_file`]; [`RewriteError::NotGenerated`] for any other path.
+pub async fn rewrite_course_file(
+    root: &Path,
+    rel: &Path,
+    new_text: &str,
+    backup_ts: &str,
+) -> Result<RewriteOutcome, RewriteError> {
+    rewrite_whole(root, rel, new_text, backup_ts, |comps| {
+        matches!(comps, [course, "curso.json" | "README.md"] if !is_foreign_meta(course) && *course != "..")
+    })
+    .await
+}
+
+/// Replace the whole of `<root>/<rel>` with `new_text` after backing it up,
+/// when `allowed` accepts its components.
+async fn rewrite_whole(
+    root: &Path,
+    rel: &Path,
+    new_text: &str,
+    backup_ts: &str,
+    allowed: impl Fn(&[&str]) -> bool,
+) -> Result<RewriteOutcome, RewriteError> {
     if !valid_timestamp(backup_ts) {
         return Err(RewriteError::BadTimestamp);
     }
     let root = normalize(root);
     let rel = relative_to_root(&root, rel)?;
-    let is_state = matches!(
-        utf8_components(&rel).as_deref(),
-        Some([course, META_DIR, "state.json"]) if !is_foreign_meta(course) && *course != ".."
-    );
-    if !is_state {
+    if !utf8_components(&rel).is_some_and(|comps| allowed(&comps)) {
         return Err(RewriteError::NotGenerated(rel));
     }
     let full = root.join(&rel);
@@ -1015,5 +1046,35 @@ Cuerpo
         assert_eq!(std::fs::read_to_string(&part).unwrap(), "DATOS DEL USUARIO");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Cuerpo\n");
         assert!(!root.join(".u_crawler").exists());
+    }
+
+    #[tokio::test]
+    async fn rewrite_course_file_backs_up_curso_json_and_readme_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for rel in ["ramo/curso.json", "ramo/README.md", "ramo/notas.md"] {
+            write_note(root, rel, "viejo\n").await;
+        }
+        for rel in ["ramo/curso.json", "ramo/README.md"] {
+            let out = rewrite_course_file(root, Path::new(rel), "nuevo\n", "t9")
+                .await
+                .unwrap();
+            assert!(matches!(out, RewriteOutcome::Rewritten { .. }), "{rel}");
+            assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), "nuevo\n");
+            let backup = root.join(".u_crawler/backup/t9").join(rel);
+            assert_eq!(std::fs::read_to_string(backup).unwrap(), "viejo\n");
+            let again = rewrite_course_file(root, Path::new(rel), "nuevo\n", "t9")
+                .await
+                .unwrap();
+            assert_eq!(again, RewriteOutcome::Unchanged);
+        }
+        let err = rewrite_course_file(root, Path::new("ramo/notas.md"), "x", "t9")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RewriteError::NotGenerated(_)), "{err}");
+        let err = rewrite_course_file(root, Path::new(".u_crawler/curso.json"), "x", "t9")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RewriteError::NotGenerated(_)), "{err}");
     }
 }

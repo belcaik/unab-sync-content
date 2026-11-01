@@ -187,6 +187,11 @@ pub struct PlannedCourse {
     pub course: CourseMeta,
     /// The `Zoom/<id>` folders migrated into it, ascending.
     pub zoom_ids: Vec<u64>,
+    /// Not a v1 course: a v2 course directory whose `curso.json` had no
+    /// Canvas id, which `scan` proved from its links. `v1_dir` is its
+    /// current directory; it is renamed whole to `dir` when the name its id
+    /// gives differs, and `migrate::ensure` rewrites its `curso.json`.
+    pub repair: bool,
 }
 
 /// Everything a migration would do, and everything it would not.
@@ -233,13 +238,19 @@ pub fn plan(inv: &Inventory, naming: &CourseNaming, canvas: &[CanvasCourse]) -> 
     let mut planner = Planner {
         inv,
         candidates: BTreeMap::new(),
-        caldir_moves: Vec::new(),
+        dir_moves: Vec::new(),
+        renamed: Vec::new(),
         unresolved: Vec::new(),
         prune: Vec::new(),
     };
     let mut courses = resolve_courses(inv, naming, canvas);
     let zoom = planner.map_zoom(naming, &mut courses);
+    planner.caldir(&courses);
     for course in &courses {
+        if course.planned.repair {
+            planner.repaired_dir(&course.planned);
+            continue;
+        }
         planner.course_files(course);
         let v1 = &course.planned.v1_dir;
         if *v1 == course.planned.dir {
@@ -259,7 +270,6 @@ pub fn plan(inv: &Inventory, naming: &CourseNaming, canvas: &[CanvasCourse]) -> 
         // (files only) cannot see. An unresolved folder keeps it.
         planner.prune.push(V1_ZOOM_DIR.to_string());
     }
-    planner.caldir(&courses);
     planner.finish(courses)
 }
 
@@ -328,6 +338,12 @@ fn resolve_courses(
         .collect();
     existing.extend(reserved);
     let dirs = naming.course_dirs(&existing, &metas);
+    let mut taken = existing;
+    taken.extend(dirs.iter().map(|dir| ExistingCourseDir {
+        dir: dir.clone(),
+        course: CourseMeta::default(),
+    }));
+    let repairs = repairs(inv, naming, canvas, &mut taken);
 
     v1_dirs
         .iter()
@@ -340,10 +356,70 @@ fn resolve_courses(
                 dir,
                 course,
                 zoom_ids: Vec::new(),
+                repair: false,
             },
             module_positions,
         })
+        .chain(repairs)
         .collect()
+}
+
+/// The v2 courses to repair: each directory whose `curso.json` has no
+/// Canvas id and whose id `scan` proved ([`Inventory::course_ids`]). Canvas
+/// names it when it knows the id; offline it keeps its name and code. Its
+/// directory is the one [`CourseNaming::course_dirs`] gives that course as
+/// a newcomer among `taken` (everything at the root but itself, and the
+/// directories this plan gives other courses), so it stays where it is
+/// when the name is the same. A course whose id another directory already
+/// owns (a later `sync` started it afresh) is left alone: merging two
+/// directories is not a rename.
+fn repairs(
+    inv: &Inventory,
+    naming: &CourseNaming,
+    canvas: &[CanvasCourse],
+    taken: &mut Vec<ExistingCourseDir>,
+) -> Vec<Resolved> {
+    let mut out = Vec::new();
+    for e in inv.existing.iter().filter(|e| e.course.id.is_none()) {
+        let Some(&id) = inv.course_ids.get(&e.dir) else {
+            continue;
+        };
+        if let Some(owner) = inv.existing.iter().find(|o| o.course.id == Some(id)) {
+            tracing::warn!(path = %e.dir, owner = %owner.dir, course_id = id, "Canvas id already owned by another directory; not repaired");
+            continue;
+        }
+        let matched = canvas.iter().find(|c| c.meta.id == Some(id));
+        let course = match matched {
+            Some(c) => c.meta.clone(),
+            None => CourseMeta {
+                id: Some(id),
+                ..e.course.clone()
+            },
+        };
+        let others: Vec<ExistingCourseDir> =
+            taken.iter().filter(|t| t.dir != e.dir).cloned().collect();
+        let Some(dir) = naming
+            .course_dirs(&others, std::slice::from_ref(&course))
+            .pop()
+        else {
+            continue;
+        };
+        taken.push(ExistingCourseDir {
+            dir: dir.clone(),
+            course: CourseMeta::default(),
+        });
+        out.push(Resolved {
+            planned: PlannedCourse {
+                v1_dir: e.dir.clone(),
+                dir,
+                course,
+                zoom_ids: Vec::new(),
+                repair: true,
+            },
+            module_positions: BTreeMap::new(),
+        });
+    }
+    out
 }
 
 /// The v1 directory name `fsutil::course_dir` gave this course.
@@ -394,6 +470,19 @@ impl Dest {
     }
 }
 
+/// Where `path` is on disk before the plan runs: under a repaired course's
+/// current directory when `renamed` (`(dir, v1_dir)`) renames it.
+fn before<'p>(renamed: &[(String, String)], path: &'p str) -> std::borrow::Cow<'p, str> {
+    for (dir, v1_dir) in renamed {
+        if let Some(rest) = path.strip_prefix(dir.as_str()) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return format!("{v1_dir}{rest}").into();
+            }
+        }
+    }
+    path.into()
+}
+
 /// One course-matching rule of [`match_by_tokens`].
 /// Its second argument is a topic's words, then those words minus the date's.
 type Tier<'a> = &'a dyn Fn(&CourseMeta, &(BTreeSet<String>, BTreeSet<String>)) -> bool;
@@ -402,7 +491,13 @@ struct Planner<'a> {
     inv: &'a Inventory,
     /// Library destination → the files that want it.
     candidates: BTreeMap<String, Vec<Source>>,
-    caldir_moves: Vec<Move>,
+    /// Whole-directory renames: calendar course directories and repaired
+    /// course directories ([`Planner::finish`] puts the library ones first,
+    /// since file moves may go into them).
+    dir_moves: Vec<Move>,
+    /// `(dir, v1_dir)` of each repaired course whose directory is renamed:
+    /// what is on disk under `v1_dir` is under `dir` once the plan runs.
+    renamed: Vec<(String, String)>,
     unresolved: Vec<Unresolved>,
     prune: Vec<String>,
 }
@@ -548,6 +643,22 @@ impl Planner<'_> {
         }
     }
 
+    /// Rename a repaired course's directory when its name changes. Its
+    /// files move with it, so none is planned one by one.
+    fn repaired_dir(&mut self, course: &PlannedCourse) {
+        if course.v1_dir == course.dir {
+            return;
+        }
+        self.dir_moves.push(Move {
+            root: Root::Library,
+            kind: EntryKind::Dir,
+            from: course.v1_dir.clone(),
+            to: course.dir.clone(),
+        });
+        self.renamed
+            .push((course.dir.clone(), course.v1_dir.clone()));
+    }
+
     fn caldir(&mut self, courses: &[Resolved]) {
         let taken = &self.inv.caldir_dirs;
         for c in courses.iter().map(|c| &c.planned) {
@@ -561,7 +672,7 @@ impl Planner<'_> {
                     reason: Reason::CaldirTargetExists(c.dir.clone()),
                 });
             } else {
-                self.caldir_moves.push(Move {
+                self.dir_moves.push(Move {
                     root: Root::Caldir,
                     kind: EntryKind::Dir,
                     from: c.v1_dir.clone(),
@@ -639,14 +750,16 @@ impl Planner<'_> {
             .collect();
         let mut plan = Plan {
             courses: courses.into_iter().map(|c| c.planned).collect(),
-            moves: self.caldir_moves,
+            moves: self.dir_moves,
             unresolved: self.unresolved,
             prune: self.prune,
             ..Plan::default()
         };
         for (to, sources) in &self.candidates {
-            let blocked =
-                dirs.contains(to.as_str()) || ancestors(to).any(|a| inv.files.contains_key(a));
+            let on_disk = before(&self.renamed, to);
+            let blocked = dirs.contains(to.as_str())
+                || dirs.contains(on_disk.as_ref())
+                || ancestors(&on_disk).any(|a| inv.files.contains_key(a));
             if blocked {
                 for source in sources {
                     plan.unresolved.push(Unresolved {
@@ -657,7 +770,7 @@ impl Planner<'_> {
                 }
                 continue;
             }
-            let occupied = inv.files.get(to);
+            let occupied = inv.files.get(on_disk.as_ref());
             if let ([source], None) = (sources.as_slice(), occupied) {
                 plan.moves.push(Move {
                     root: Root::Library,
@@ -693,7 +806,14 @@ impl Planner<'_> {
                 plan.conflicts.push(collision);
             }
         }
-        plan.moves.sort();
+        // A repaired course's directory is renamed before anything moves
+        // into it.
+        plan.moves.sort_by_key(|m| {
+            (
+                !(m.root == Root::Library && m.kind == EntryKind::Dir),
+                m.clone(),
+            )
+        });
         plan.edits.sort();
         plan.duplicates.sort();
         plan.conflicts.sort();
@@ -971,7 +1091,8 @@ impl fmt::Display for Plan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "courses ({}):", self.courses.len())?;
         for c in &self.courses {
-            write!(f, "  {} -> {}", c.v1_dir, c.dir)?;
+            let repair = if c.repair { " (repair)" } else { "" };
+            write!(f, "  {} -> {}{repair}", c.v1_dir, c.dir)?;
             match c.course.id {
                 Some(id) => write!(f, " canvas_id={id}")?,
                 None => write!(f, " canvas_id=null")?,
@@ -1415,6 +1536,144 @@ mod tests {
             Some(format!("{v2}/grabaciones/2025-10-01_clase.mp4").as_str())
         );
         assert!(plan.unresolved.is_empty());
+    }
+
+    /// A migrated library whose `REP` course got no Canvas id: named from
+    /// its v1 directory, its `Zoom/188678` orphaned. scan read the id.
+    const REP: &str = "202525-1149-mecanica-cfsa3220-202525-1149-el-on";
+    const REP_ZOOM: &str = "Zoom/188678/2025_10_01_202525_1149_MECANICA.mp4";
+
+    fn repairable() -> Inventory {
+        let mut inv = inv(&[
+            (&format!("{REP}/curso.json"), 1),
+            (&format!("{REP}/.u_crawler/state.json"), 1),
+            (&format!("{REP}/modulos/01-a/01-p.md"), 1),
+            (REP_ZOOM, 1),
+            ("aacd101-ok/curso.json", 1),
+        ]);
+        inv.existing = vec![
+            ExistingCourseDir {
+                dir: REP.into(),
+                course: CourseMeta {
+                    id: None,
+                    name: "202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON".into(),
+                    code: None,
+                },
+            },
+            ExistingCourseDir {
+                dir: "aacd101-ok".into(),
+                course: CourseMeta {
+                    id: Some(1),
+                    name: "ok".into(),
+                    code: None,
+                },
+            },
+        ];
+        inv.course_ids.insert(REP.into(), 188678);
+        inv.caldir_dirs.insert(REP.into());
+        inv
+    }
+
+    fn mecanica() -> CanvasCourse {
+        CanvasCourse {
+            meta: CourseMeta {
+                id: Some(188678),
+                name: "202525.1149 | MECANICA".into(),
+                code: Some("CFSA3220.202525.1149.EL.ON".into()),
+            },
+            module_positions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_v2_course_without_id_is_renamed_whole_and_takes_its_zoom_folder() {
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let plan = plan(&repairable(), &naming, &[mecanica()]);
+        let v2 = "cfsa3220-202525-1149-el-on-202525-1149-mecanica";
+        assert_eq!(
+            plan.courses,
+            [PlannedCourse {
+                v1_dir: REP.into(),
+                dir: v2.into(),
+                course: mecanica().meta,
+                zoom_ids: vec![188678],
+                repair: true,
+            }]
+        );
+        let dir = |root| Move {
+            root,
+            kind: EntryKind::Dir,
+            from: REP.into(),
+            to: v2.into(),
+        };
+        let file = Move {
+            root: Root::Library,
+            kind: EntryKind::File,
+            from: REP_ZOOM.into(),
+            to: format!("{v2}/grabaciones/2025-10-01_clase.mp4"),
+        };
+        // The library directory first: the recording goes into it.
+        assert_eq!(plan.moves, [dir(Root::Library), file, dir(Root::Caldir)]);
+        assert!(plan.edits.is_empty());
+        assert_eq!(plan.prune, ["Zoom"]);
+        assert!(plan.unresolved.is_empty());
+    }
+
+    #[test]
+    fn offline_a_v2_course_keeps_its_directory_and_still_takes_its_zoom_folder() {
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let plan = plan(&repairable(), &naming, &[]);
+        assert_eq!(plan.courses[0].dir, REP);
+        assert_eq!(plan.courses[0].course.id, Some(188678));
+        assert_eq!(
+            plan.moves,
+            [Move {
+                root: Root::Library,
+                kind: EntryKind::File,
+                from: REP_ZOOM.into(),
+                to: format!("{REP}/grabaciones/2025-10-01_clase.mp4"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_v2_course_is_not_repaired_into_a_directory_its_id_already_owns() {
+        // A later sync made a fresh directory for the same course.
+        let mut inv = repairable();
+        inv.existing.push(ExistingCourseDir {
+            dir: "cfsa3220-nuevo".into(),
+            course: mecanica().meta,
+        });
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let plan = plan(&inv, &naming, &[mecanica()]);
+        assert!(plan.courses.is_empty());
+        assert!(plan.moves.is_empty());
+    }
+
+    #[test]
+    fn a_v2_course_without_a_proven_id_is_left_alone() {
+        let mut inv = repairable();
+        inv.course_ids.clear();
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let plan = plan(&inv, &naming, &[mecanica()]);
+        assert!(plan.courses.is_empty());
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn a_recording_already_in_a_repaired_directory_is_a_collision() {
+        let mut inv = repairable();
+        let v2 = "cfsa3220-202525-1149-el-on-202525-1149-mecanica";
+        inv.files
+            .insert(format!("{REP}/grabaciones/2025-10-01_clase.mp4"), 1);
+        let naming = CourseNaming::new(&config::Layout::default()).unwrap();
+        let plan = plan(&inv, &naming, &[mecanica()]);
+        assert_eq!(plan.duplicates.len(), 1);
+        assert_eq!(
+            plan.duplicates[0].to,
+            format!("{v2}/grabaciones/2025-10-01_clase.mp4")
+        );
+        assert!(plan.duplicates[0].occupied);
     }
 
     #[test]
