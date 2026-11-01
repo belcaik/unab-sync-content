@@ -3,7 +3,8 @@
 //! See `docs/specs/layout-v2.md` ("Reglas del migrador"). The pieces:
 //!
 //! - [`scan`] walks a library (read-only) into an [`Inventory`]: every file
-//!   with its size, the Canvas ids recovered from `announcements/index.json`,
+//!   with its size, the Canvas ids recovered from `announcements/index.json`
+//!   (else from the course's own links, [`course_id_from_links`]),
 //!   the v2 course directories already present (`curso.json`) and the course
 //!   directories under `calendar.caldir_root`.
 //! - [`detect::detect`] tells a v1 library from a v2 one, from the inventory alone.
@@ -37,11 +38,14 @@ pub mod rewrite;
 pub use ensure::{ensure_v2, migrate, undo, MigrateError, Outcome, Target};
 
 use crate::layout::{self, CourseMeta, ExistingCourseDir};
+use crate::state::State;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::LazyLock;
 
 /// v1 directory holding one `Zoom/<course id>/` folder per course.
 pub const V1_ZOOM_DIR: &str = "Zoom";
@@ -75,7 +79,8 @@ pub struct Inventory {
     /// non-regular entries are not listed either, so they stay where they are.
     pub files: BTreeMap<String, u64>,
     /// Canvas course id per top-level directory, from the `courses/<id>` in
-    /// its `announcements/index.json`.
+    /// its `announcements/index.json`, else, for a v1 course, from the links
+    /// in its notes that its `state.json` backs ([`course_id_from_links`]).
     pub course_ids: BTreeMap<String, u64>,
     /// v2 course directories already in the library, from their `curso.json`.
     pub existing: Vec<ExistingCourseDir>,
@@ -155,6 +160,18 @@ pub fn scan(root: &Path, caldir_root: Option<&Path>) -> io::Result<Inventory> {
             }
         }
     }
+    let unidentified: Vec<String> = inv
+        .v1_course_dirs()
+        .into_iter()
+        .filter(|dir| !inv.course_ids.contains_key(*dir))
+        .map(str::to_string)
+        .collect();
+    for dir in unidentified {
+        if let Some(id) = course_id_from_notes(root, &inv, &dir)? {
+            tracing::info!(path = %dir, course_id = id, "Canvas id read from the course's own links");
+            inv.course_ids.insert(dir, id);
+        }
+    }
 
     if let Some(caldir) = caldir_root {
         match fs::read_dir(caldir) {
@@ -178,6 +195,87 @@ pub fn scan(root: &Path, caldir_root: Option<&Path>) -> io::Result<Inventory> {
         "library scanned"
     );
     Ok(inv)
+}
+
+/// The Canvas id of the v1 course `dir` that has no `index.json`, from its
+/// notes and its `state.json` ([`course_id_from_links`]). `None` without a
+/// readable `state.json`.
+fn course_id_from_notes(root: &Path, inv: &Inventory, dir: &str) -> io::Result<Option<u64>> {
+    let state_rel = format!("{dir}/{V1_STATE_FILE}");
+    if !inv.files.contains_key(&state_rel) {
+        return Ok(None);
+    }
+    let state: State = match serde_json::from_slice(&fs::read(root.join(&state_rel))?) {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::warn!(path = %state_rel, error = %e, "unreadable state.json");
+            return Ok(None);
+        }
+    };
+    let keys: BTreeSet<String> = state.items.into_keys().collect();
+    let prefix = format!("{dir}/");
+    let mut notes = Vec::new();
+    for rel in inv.files.keys() {
+        if rel.starts_with(&prefix) && rel.ends_with(".md") {
+            notes.push(String::from_utf8_lossy(&fs::read(root.join(rel))?).into_owned());
+        }
+    }
+    Ok(course_id_from_links(
+        &keys,
+        notes.iter().map(String::as_str),
+    ))
+}
+
+/// `courses/<id>/<kind>/<item>` in a note, `<kind>` being a resource
+/// `state.json` keys by its Canvas id.
+static COURSE_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // A literal pattern, so compiling it cannot fail.
+    Regex::new(r#"/courses/(\d+)/(files|assignments|discussion_topics)/([^/?#\s)"'<>\]]+)"#)
+        .unwrap()
+});
+
+/// The Canvas course id the links in a course's `notes` prove: a link
+/// `courses/<n>/<kind>/<item>` counts only when the course's own
+/// `state.json` (`state_keys`) recorded that item, so a link to another
+/// course's resource that was never fetched proves nothing.
+///
+/// Assignments and announcements are listed per course and their ids are
+/// global, so a single `<n>` among them is the answer. Files are weaker (v1
+/// downloads the files a page embeds, a template course's included): they
+/// decide only when no such item links, and only when they name a single
+/// `<n>` too. Pages never count: `state.json` keys them by slug, and a slug
+/// such as `informacion-general` is in every course built from one template.
+/// Anything else is `None`.
+pub fn course_id_from_links<'a>(
+    state_keys: &BTreeSet<String>,
+    notes: impl IntoIterator<Item = &'a str>,
+) -> Option<u64> {
+    let mut listed = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for note in notes {
+        for cap in COURSE_LINK_RE.captures_iter(note) {
+            let Ok(course) = cap[1].parse::<u64>() else {
+                continue;
+            };
+            let (key, set) = match &cap[2] {
+                "files" => (format!("file:{}", &cap[3]), &mut files),
+                "assignments" => (format!("assignment:{}", &cap[3]), &mut listed),
+                _ => (format!("announcement:{}", &cap[3]), &mut listed),
+            };
+            if state_keys.contains(&key) {
+                set.insert(course);
+            }
+        }
+    }
+    let single = |set: &BTreeSet<u64>| match set.len() {
+        1 => set.first().copied(),
+        _ => None,
+    };
+    if listed.is_empty() {
+        single(&files)
+    } else {
+        single(&listed)
+    }
 }
 
 /// The Canvas course id an announcements `index.json` points at: the
@@ -270,6 +368,103 @@ mod tests {
         assert_eq!(course_id_from_index("[]"), None);
         assert_eq!(course_id_from_index(r#"[{"html_url":null}]"#), None);
         assert_eq!(course_id_from_index("{"), None);
+    }
+
+    fn keys(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn course_id_from_links_needs_the_link_backed_by_the_state() {
+        let state = keys(&["file:11", "file:12"]);
+        let note = "![a](https://x.edu/courses/77/files/11/preview?verifier=v) \
+                    [b](/courses/77/files/12?wrap=1) [c](https://x.edu/courses/5/files/99)";
+        assert_eq!(course_id_from_links(&state, [note]), Some(77));
+        // A link to a file the course never downloaded proves nothing.
+        assert_eq!(
+            course_id_from_links(&state, ["[c](https://x.edu/courses/5/files/99)"]),
+            None
+        );
+        assert_eq!(course_id_from_links(&state, [""]), None);
+    }
+
+    #[test]
+    fn course_id_from_links_refuses_two_courses_of_one_kind() {
+        // v1 also downloads a template course's files a page embeds.
+        let state = keys(&["file:11", "file:21"]);
+        let notes = [
+            "/courses/77/files/11/preview",
+            "/courses/93/files/21/download",
+        ];
+        assert_eq!(course_id_from_links(&state, notes), None);
+    }
+
+    #[test]
+    fn course_id_from_links_trusts_items_canvas_lists_per_course_over_files() {
+        // The real shape: most downloaded files are a template course's, but
+        // assignments and announcements are listed per course.
+        let state = keys(&["file:11", "file:21", "file:22", "announcement:7"]);
+        let notes = [
+            "/courses/93/files/21/preview /courses/93/files/22/preview",
+            "/courses/77/files/11/preview",
+            "https://x.edu/courses/77/discussion_topics/7",
+        ];
+        assert_eq!(course_id_from_links(&state, notes), Some(77));
+        let split = keys(&["assignment:1", "announcement:2"]);
+        let notes = [
+            "/courses/77/assignments/1",
+            "/courses/78/discussion_topics/2",
+        ];
+        assert_eq!(course_id_from_links(&split, notes), None);
+    }
+
+    #[test]
+    fn course_id_from_links_never_trusts_a_page_slug() {
+        // Another course built from the same template has the same slug.
+        let state = keys(&["page:informacion-general", "file:11"]);
+        let notes = [
+            "/courses/7777/pages/informacion-general",
+            "/courses/77/files/11/preview",
+        ];
+        assert_eq!(course_id_from_links(&state, notes), Some(77));
+        assert_eq!(course_id_from_links(&state, [notes[0]]), None);
+    }
+
+    #[test]
+    fn scan_reads_the_id_of_a_course_without_index_json_from_its_notes() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("lib");
+        let course = root.join("202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON");
+        fs::create_dir_all(course.join("Modules/5_Unidad"))?;
+        fs::write(
+            course.join("state.json"),
+            br#"{"items":{"file:17317335":{"size":3},"page:sesion":{}}}"#,
+        )?;
+        fs::write(
+            course.join("Modules/5_Unidad/01-Sesion.md"),
+            b"<img src=\"https://canvas.x.cl/courses/188678/files/17317335/preview?verifier=a\">\n\
+              [otro](https://canvas.x.cl/courses/92458/files/1/download)\n",
+        )?;
+        // A v2 course directory is not a v1 course: its id comes from curso.json.
+        let v2 = root.join("v2-curso/.u_crawler");
+        fs::create_dir_all(&v2)?;
+        fs::write(v2.join("state.json"), br#"{"items":{"file:1":{}}}"#)?;
+        fs::write(
+            root.join("v2-curso/n.md"),
+            b"/courses/92458/files/1/download",
+        )?;
+
+        let inv = scan(&root, None)?;
+        let ids: Vec<(&str, u64)> = inv
+            .course_ids
+            .iter()
+            .map(|(d, id)| (d.as_str(), *id))
+            .collect();
+        assert_eq!(
+            ids,
+            [("202525_1149_MECANICA_CFSA3220_202525_1149_EL_ON", 188678)]
+        );
+        Ok(())
     }
 
     #[test]

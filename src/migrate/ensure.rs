@@ -723,7 +723,7 @@ pub async fn undo(target: &Target<'_>, ts: &str) -> Result<UndoSummary, MigrateE
 }
 
 /// What Canvas says about the courses of the library's v1 directories:
-/// those whose id an `index.json` gave (looked up one by one when they are
+/// those whose id an `index.json` or the course's links gave (looked up one by one when they are
 /// no longer active) and the active ones whose v1 directory name is there.
 ///
 /// # Errors

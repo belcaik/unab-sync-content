@@ -484,7 +484,14 @@ one `sync` does not rewrite is a leftover copy, never a loss.
    `.u_crawler/migrations/<ts>.jsonl`, when the plan is not empty. With a
    `CanvasClient` (`--canvas`, and always from the writer commands), Canvas
    supplies official names and module positions (`ensure::canvas_courses`:
-   the active list plus `GET /courses/:id` for ids an `index.json` gave);
+   the active list plus `GET /courses/:id` for ids an `index.json` gave,
+   or, for a v1 course without one, `migrate::course_id_from_links`: the
+   one course its notes' `courses/<n>/assignments|discussion_topics/<id>`
+   links name (else its `courses/<n>/files/<id>` links), counting a link
+   only when the course's `state.json` recorded that id — pages never,
+   their keys are slugs a template repeats; a 2025 course has no
+   announcements, and this is what ties its `Zoom/<id>` to it without
+   `[layout]` patterns);
    offline, modules are numbered in id order.
 3. Every generated note a journal renamed is rewritten
    (`rewrite::rewrite_file`, backup under `.u_crawler/backup/<ts>/`, the
